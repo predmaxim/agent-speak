@@ -265,6 +265,12 @@ impl State {
         self.active.as_ref().is_some_and(|a| a.id == session)
     }
 
+    /// Ручное чтение ждёт или звучит — живые статусы молчат.
+    fn reading(&self) -> bool {
+        let (queued, popped) = self.shared.queue.lock().unwrap().reading();
+        queued || (popped && self.shared.busy.load(Ordering::SeqCst))
+    }
+
     /// Финальный ответ сессии ждёт в очереди или звучит — статусы за ним не ставим.
     fn final_pending(&self, session: &str) -> bool {
         let q = self.shared.queue.lock().unwrap();
@@ -351,6 +357,12 @@ impl State {
         let all = sentences.clone();
         let sentences: Vec<String> = if only_new { sentences.into_iter().filter(|t| !self.dedup.seen(session, t)).collect() } else { sentences };
         // статусы только вживую: не для активной сессии или за финалом — опоздали; финал доберёт
+        if kind == Kind::Status && self.reading() {
+            for t in &sentences {
+                eprintln!("agent-speak: статус пропущен: идёт ручное чтение ({session}): {}", t.chars().take(40).collect::<String>());
+            }
+            return 0;
+        }
         if kind == Kind::Status && (!self.is_active(session) || self.final_pending(session)) {
             for t in &sentences {
                 eprintln!("agent-speak: статус пропущен ({session}): {}", t.chars().take(40).collect::<String>());
@@ -461,7 +473,7 @@ impl State {
             Agent::Codex => codex::last_turn(&content),
         };
         let joined = texts.join("\n\n");
-        if self.enqueue(s.agent.clone(), &s.id, &joined, Kind::Manual) == 0 {
+        if self.enqueue(s.agent.clone(), &s.id, &joined, Kind::Read) == 0 {
             eprintln!("agent-speak: read: нечего читать ({})", s.transcript.display());
             notice("Нечего читать", "");
         } else {
@@ -1005,5 +1017,48 @@ mod tests {
         assert!(texts(&st).is_empty());
         st.enqueue_new(Agent::Codex, "x", "Готово.", Kind::Status);
         assert_eq!(texts(&st), vec!["Готово."]);
+    }
+
+    /// Ручное чтение в сессии a (фокус на a), затем фокус ≥ 5 с на b — активной стала b.
+    fn read_then_switch(text: &str) -> (State, Env) {
+        let dir = std::env::temp_dir().join(format!("agent-speak-pin-{}-{}", std::process::id(), text.len()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.jsonl");
+        let line = serde_json::json!({"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text": text}]}});
+        std::fs::write(&path, line.to_string()).unwrap();
+        let (mut st, env) = env_state();
+        *env.0.lock().unwrap() = Some(SessionRef { transcript: path, ..sref("a") });
+        st.on_msg(Msg::Read);
+        at(&mut st, &env, Some("b"), 1);
+        at(&mut st, &env, Some("b"), 5);
+        assert_eq!(active(&st).as_deref(), Some("b"));
+        (st, env)
+    }
+
+    #[test]
+    fn read_is_pinned_across_switch_and_blocks_statuses() {
+        let (mut st, _env) = read_then_switch("Раз. Два. Три.");
+        assert_eq!(pop1(&st), "Раз.");
+        st.shared.set_busy(Some("a"));
+        md_id(&mut st, "b", "m1", "Статус бэ. ");
+        st.on_hook("stop", &serde_json::json!({"session_id": "b", "last_assistant_message": "Финал бэ."}));
+        assert_eq!(texts(&st), vec!["Два.", "Три.", "Финал бэ."]);
+    }
+
+    #[test]
+    fn stop_and_prompt_submit_end_pinned_read() {
+        let (mut st, _env) = read_then_switch("Раз. Два.");
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "b"}));
+        assert_eq!(pop1(&st), "Раз.");
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "a"}));
+        assert!(texts(&st).is_empty());
+
+        let (mut st, _env) = read_then_switch("Раз. Два.");
+        st.on_msg(Msg::Read); // повторный read — стоп
+        assert!(texts(&st).is_empty());
+
+        let (mut st, _env) = read_then_switch("Раз. Два.");
+        st.on_msg(Msg::Stop);
+        assert!(texts(&st).is_empty());
     }
 }

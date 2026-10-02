@@ -12,6 +12,7 @@ pub enum Kind {
     Status,
     Urgent,
     Manual,
+    Read,    // ручное чтение (read): играет до конца при любой активной сессии
     Preview, // образец голоса: один в очереди, впереди всех, играет и на паузе
 }
 
@@ -85,7 +86,7 @@ impl Queue {
         });
         let active = &self.active;
         let pos = self.items.iter().position(|i| {
-            active.is_empty() || i.session == *active || matches!(i.kind, Kind::Urgent | Kind::Preview)
+            active.is_empty() || i.session == *active || matches!(i.kind, Kind::Urgent | Kind::Preview | Kind::Read)
         })?;
         let item = self.items.remove(pos)?;
         self.popped = Some((item.session.clone(), item.kind.clone()));
@@ -129,7 +130,12 @@ impl Queue {
 
     /// Есть ли что играть сейчас (без учёта паузы).
     pub fn ready(&self) -> bool {
-        self.items.iter().any(|i| self.active.is_empty() || i.session == self.active || matches!(i.kind, Kind::Urgent | Kind::Preview))
+        self.items.iter().any(|i| self.active.is_empty() || i.session == self.active || matches!(i.kind, Kind::Urgent | Kind::Preview | Kind::Read))
+    }
+
+    /// Ручное чтение ждёт в очереди или отдано последним (звучит ли — знает speaker через busy).
+    pub fn reading(&self) -> (bool, bool) {
+        (self.items.iter().any(|i| i.kind == Kind::Read), self.popped.as_ref().is_some_and(|(_, k)| *k == Kind::Read))
     }
 
     /// В очереди ждёт финальный ответ сессии.
