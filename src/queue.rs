@@ -1,8 +1,11 @@
 //! Очередь фраз: устаревшие статусы выбрасываются, срочные вперёд, на паузе возраст не растёт.
 //! Играет только активная сессия (и срочные/образец); фразы остальных ждут своей очереди.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
+
+/// Финальный ответ, не дождавшийся своей сессии за это время, уже никому не нужен.
+pub const FINAL_MAX_AGE: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
@@ -27,12 +30,13 @@ pub struct Queue {
     paused_at: Option<Instant>,
     paused_total: Duration,
     active: String,                 // активная сессия; пусто — ещё не выбрана, играют все
-    popped: Option<(String, Kind, String)>, // последняя отданная фраза (сессия, вид, сообщение) — «что сейчас звучит»
+    popped: Option<(String, Kind)>,     // последняя отданная фраза — «что сейчас звучит»
+    started: HashSet<(String, String)>, // (сессия, сообщение) начаты и не дочитаны — не устаревают
 }
 
 impl Queue {
     pub fn new(max_age: Duration) -> Queue {
-        Queue { items: VecDeque::new(), max_age, paused_at: None, paused_total: Duration::ZERO, active: String::new(), popped: None }
+        Queue { items: VecDeque::new(), max_age, paused_at: None, paused_total: Duration::ZERO, active: String::new(), popped: None, started: HashSet::new() }
     }
 
     pub fn set_max_age(&mut self, d: Duration) {
@@ -66,11 +70,14 @@ impl Queue {
         }
         let eff_now = now.checked_sub(self.paused_total).unwrap_or(now);
         let max_age = self.max_age;
-        let started = self.popped.as_ref().map(|(s, _, m)| (s.clone(), m.clone()));
+        let (started, active) = (&self.started, &self.active);
         self.items.retain(|i| {
-            let stale = i.kind == Kind::Status
-                && eff_now.saturating_duration_since(i.born) > max_age
-                && started.as_ref().is_none_or(|(s, m)| *s != i.session || *m != i.msg);
+            let age = eff_now.saturating_duration_since(i.born);
+            let stale = match i.kind {
+                Kind::Status => age > max_age && !started.contains(&(i.session.clone(), i.msg.clone())),
+                Kind::Manual => age > FINAL_MAX_AGE && i.session != *active,
+                _ => false,
+            };
             if stale {
                 eprintln!("agent-speak: устарело, пропущено ({}): {}", i.session, i.text.chars().take(40).collect::<String>());
             }
@@ -81,14 +88,21 @@ impl Queue {
             active.is_empty() || i.session == *active || matches!(i.kind, Kind::Urgent | Kind::Preview)
         })?;
         let item = self.items.remove(pos)?;
-        self.popped = Some((item.session.clone(), item.kind.clone(), item.msg.clone()));
+        self.popped = Some((item.session.clone(), item.kind.clone()));
+        let key = (item.session.clone(), item.msg.clone());
+        if self.items.iter().any(|i| i.session == key.0 && i.msg == key.1) {
+            self.started.insert(key);
+        } else {
+            self.started.remove(&key);
+        }
         Some(item)
     }
 
-    /// Смена активной сессии: статусы живые — чужие выбрасываются, остальное ждёт возврата.
+    /// Смена активной сессии: не начатые чужие статусы выбрасываются, остальное ждёт возврата.
     pub fn set_active(&mut self, session: &str) {
         self.active = session.to_string();
-        self.items.retain(|i| i.kind != Kind::Status || i.session == session);
+        let started = &self.started;
+        self.items.retain(|i| i.kind != Kind::Status || i.session == session || started.contains(&(i.session.clone(), i.msg.clone())));
     }
 
     /// Есть ли что играть сейчас (без учёта паузы).
@@ -103,7 +117,7 @@ impl Queue {
 
     /// Последней отдан финальный ответ сессии (звучит ли он — знает speaker через busy).
     pub fn popped_final(&self, session: &str) -> bool {
-        self.popped.as_ref().is_some_and(|(s, k, _)| s == session && *k == Kind::Manual)
+        self.popped.as_ref().is_some_and(|(s, k)| s == session && *k == Kind::Manual)
     }
 
     pub fn pause(&mut self, now: Instant) {
@@ -120,15 +134,19 @@ impl Queue {
         self.paused_at.is_some()
     }
 
-    pub fn clear(&mut self) {
-        self.items.clear();
+    /// Стоп: молчит активная сессия; финалы остальных ждут своей очереди.
+    pub fn clear_active(&mut self) {
+        let active = self.active.clone();
+        self.items.retain(|i| !active.is_empty() && i.session != active && i.kind == Kind::Manual);
+        self.started.retain(|(s, _)| !active.is_empty() && *s != active);
     }
 
     pub fn clear_session(&mut self, session: &str) {
         self.items.retain(|i| i.session != session);
-        if self.popped.as_ref().is_some_and(|(s, _, _)| s == session) {
+        if self.popped.as_ref().is_some_and(|(s, _)| s == session) {
             self.popped = None;
         }
+        self.started.retain(|(s, _)| s != session);
     }
 
     #[cfg(test)]
@@ -282,5 +300,56 @@ mod tests {
         }
         let got: Vec<String> = (1..=10).filter_map(|k| q.pop(t0 + Duration::from_secs(5 * k))).map(|i| i.text).collect();
         assert_eq!(got.len(), 10, "{got:?}");
+    }
+
+    fn msg(session: &str, text: &str, kind: Kind, born: Instant, m: &str) -> Item {
+        Item { session: session.into(), text: text.into(), kind, born, msg: m.into() }
+    }
+
+    #[test]
+    fn clear_active_keeps_finals_of_other_sessions() {
+        let t0 = Instant::now();
+        let mut q = Queue::new(Duration::from_secs(30));
+        q.set_active("a");
+        q.push(at("a", "а", Kind::Manual, t0));
+        q.push(at("b", "финал бэ", Kind::Manual, t0));
+        q.push(at("c", "срочно", Kind::Urgent, t0));
+        q.clear_active();
+        assert!(q.pop(t0).is_none());
+        q.set_active("b");
+        assert_eq!(q.pop(t0).unwrap().text, "финал бэ");
+    }
+
+    #[test]
+    fn stale_final_of_non_active_dropped_after_cap() {
+        let t0 = Instant::now();
+        let mut q = Queue::new(Duration::from_secs(30));
+        q.set_active("a");
+        q.push(at("b", "старый финал", Kind::Manual, t0));
+        q.push(at("a", "свой старый", Kind::Manual, t0));
+        let later = t0 + FINAL_MAX_AGE + Duration::from_secs(1);
+        assert_eq!(q.pop(later).unwrap().text, "свой старый");
+        assert!(!q.ready());
+        q.set_active("b");
+        assert!(q.pop(later).is_none());
+    }
+
+    #[test]
+    fn started_message_survives_urgent_and_switch_away() {
+        let t0 = Instant::now();
+        let mut q = Queue::new(Duration::from_secs(30));
+        q.set_active("a");
+        for n in 0..3 {
+            q.push(msg("a", &format!("m{n}"), Kind::Status, t0, "m"));
+        }
+        q.push(msg("a", "не начато", Kind::Status, t0, "n"));
+        assert_eq!(q.pop(t0).unwrap().text, "m0");
+        q.push(msg("c", "срочно", Kind::Urgent, t0, "u"));
+        assert_eq!(q.pop(t0).unwrap().text, "срочно");
+        q.set_active("b"); // уход: начатое сообщение ждёт, не начатое выброшено
+        q.set_active("a");
+        let late = t0 + Duration::from_secs(60);
+        let got: Vec<String> = std::iter::from_fn(|| q.pop(late)).map(|i| i.text).collect();
+        assert_eq!(got, vec!["m1", "m2"]);
     }
 }
