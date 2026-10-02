@@ -250,7 +250,12 @@ impl State {
 
     fn set_active(&mut self, s: SessionRef) {
         eprintln!("agent-speak: озвучиваю {} ({})", s.project, s.id);
-        self.shared.queue.lock().unwrap().set_active(&s.id);
+        let dropped = self.shared.queue.lock().unwrap().set_active(&s.id);
+        for it in dropped {
+            // не прозвучало — финал доберёт
+            self.dedup.unrecord(&it.session, &it.text);
+            eprintln!("agent-speak: статус пропущен при смене ({}): {}", it.session, it.text.chars().take(40).collect::<String>());
+        }
         self.shared.cv.notify_all();
         self.active = Some(s);
         self.candidate = None;
@@ -327,17 +332,34 @@ impl State {
     fn enqueue(&mut self, agent: Agent, session: &str, raw: &str, kind: Kind) -> usize {
         self.seq += 1;
         let msg = format!("#{}", self.seq); // одна постановка — одно сообщение
-        self.enqueue_msg(agent, session, raw, kind, &msg)
+        self.enqueue_msg(agent, session, raw, kind, &msg, false)
     }
 
-    fn enqueue_msg(&mut self, agent: Agent, session: &str, raw: &str, kind: Kind, msg: &str) -> usize {
-        // статусы только вживую: не для активной сессии или за финалом — опоздали
-        if kind == Kind::Status && (!self.is_active(session) || self.final_pending(session)) {
-            return 0;
-        }
+    /// Только ещё не поставленные в ход фразы сессии (живой текст и добор финала).
+    fn enqueue_new(&mut self, agent: Agent, session: &str, raw: &str, kind: Kind) -> usize {
+        self.seq += 1;
+        let msg = format!("#{}", self.seq);
+        self.enqueue_msg(agent, session, raw, kind, &msg, true)
+    }
+
+    /// only_new: пропустить уже поставленные фразы, поставленные — запомнить (dedup).
+    fn enqueue_msg(&mut self, agent: Agent, session: &str, raw: &str, kind: Kind, msg: &str, only_new: bool) -> usize {
         let (sentences, unknown) = prepare(raw, &self.terms.lock().unwrap());
         for w in unknown {
             let _ = self.learn.send((agent.clone(), w));
+        }
+        let sentences: Vec<String> = if only_new { sentences.into_iter().filter(|t| !self.dedup.seen(session, t)).collect() } else { sentences };
+        // статусы только вживую: не для активной сессии или за финалом — опоздали; финал доберёт
+        if kind == Kind::Status && (!self.is_active(session) || self.final_pending(session)) {
+            for t in &sentences {
+                eprintln!("agent-speak: статус пропущен ({session}): {}", t.chars().take(40).collect::<String>());
+            }
+            return 0;
+        }
+        if only_new {
+            for t in &sentences {
+                self.dedup.first_time(session, t);
+            }
         }
         let n = sentences.len();
         // образец — один элемент: каждый push Preview вытесняет прежний
@@ -349,6 +371,16 @@ impl State {
         drop(q);
         self.shared.cv.notify_all();
         n
+    }
+
+    /// Конец хода: вживую — добрать непрозвучавшие фразы (начало до активации, хвост после ухода);
+    /// без промежуточных — весь финальный ответ.
+    fn final_answer(&mut self, agent: Agent, session: &str, text: &str) {
+        if self.cfg.read_intermediate {
+            self.enqueue_new(agent, session, text, Kind::Manual);
+        } else {
+            self.enqueue(agent, session, text, Kind::Manual);
+        }
     }
 
     fn stop(&mut self) {
@@ -464,9 +496,7 @@ impl State {
                     return;
                 }
                 for s in self.asm.push(&ev) {
-                    if self.dedup.first_time(&ev.session, &s) {
-                        self.enqueue_msg(Agent::Claude, &ev.session, &s, Kind::Status, &ev.message_id);
-                    }
+                    self.enqueue_msg(Agent::Claude, &ev.session, &s, Kind::Status, &ev.message_id, true);
                 }
             }
             "stop" => {
@@ -474,27 +504,20 @@ impl State {
                 if !self.auto() {
                     return;
                 }
-                if self.cfg.read_intermediate && self.is_active(&session) {
-                    // активная сессия уже прозвучала вживую — дочитать хвост
+                if self.cfg.read_intermediate {
                     for s in rest {
-                        if self.dedup.first_time(&session, &s) {
-                            self.enqueue(Agent::Claude, &session, &s, Kind::Status);
-                        }
+                        self.enqueue_new(Agent::Claude, &session, &s, Kind::Status); // хвост вживую
                     }
-                } else {
-                    let transcript = PathBuf::from(p["transcript_path"].as_str().unwrap_or_default());
-                    if let Some(last) = final_message(p, &transcript) {
-                        self.enqueue(Agent::Claude, &session, &last, Kind::Manual); // финальный ответ ждёт своей сессии
-                    }
+                }
+                let transcript = PathBuf::from(p["transcript_path"].as_str().unwrap_or_default());
+                if let Some(last) = final_message(p, &transcript) {
+                    self.final_answer(Agent::Claude, &session, &last);
                 }
             }
             "codex-notify" => {
-                // активная в живом режиме уже прозвучала из rollout; иначе — финальный ответ
                 let thread = p["thread-id"].as_str().unwrap_or_default().to_string();
-                if self.auto() && !(self.cfg.read_intermediate && self.is_active(&thread)) {
-                    if let Some(last) = p["last-assistant-message"].as_str() {
-                        self.enqueue(Agent::Codex, &thread, last, Kind::Manual);
-                    }
+                if let Some(last) = p["last-assistant-message"].as_str().filter(|_| self.auto()) {
+                    self.final_answer(Agent::Codex, &thread, last);
                 }
             }
             other => eprintln!("agent-speak: неизвестный хук {other}"),
@@ -520,9 +543,7 @@ impl State {
                 Agent::Codex => codex::parse_line(&line),
             };
             for b in blocks {
-                if self.dedup.first_time(&id, &b.text) {
-                    self.enqueue(agent.clone(), &id, &b.text, Kind::Status);
-                }
+                self.enqueue_new(agent.clone(), &id, &b.text, Kind::Status);
             }
         }
     }
@@ -905,5 +926,51 @@ mod tests {
         *env.0.lock().unwrap() = Some(SessionRef { transcript: path, ..sref("b") });
         st.on_msg(Msg::Read);
         assert_eq!(texts(&st), vec!["Ответ бэ."]);
+    }
+
+    fn md_id(st: &mut State, session: &str, id: &str, text: &str) {
+        st.on_hook("message-display", &serde_json::json!({"session_id": session, "message_id": id, "delta": text, "final": true}));
+    }
+
+    fn pop1(st: &State) -> String {
+        st.shared.queue.lock().unwrap().pop(Instant::now()).unwrap().text
+    }
+
+    #[test]
+    fn became_active_mid_turn_gets_missing_beginning_at_stop() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        md_id(&mut st, "b", "m1", "Раз. "); // b ещё не активна — выброшено
+        at(&mut st, &env, Some("b"), 1);
+        at(&mut st, &env, Some("b"), 5);
+        md_id(&mut st, "b", "m2", "Два. ");
+        assert_eq!(pop1(&st), "Два.");
+        st.on_hook("stop", &serde_json::json!({"session_id": "b", "last_assistant_message": "Раз.\n\nДва."}));
+        assert_eq!(texts(&st), vec!["Раз."]);
+    }
+
+    #[test]
+    fn lost_active_mid_answer_queues_only_unspoken_at_stop() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("b"), 0);
+        md_id(&mut st, "b", "m1", "Раз. ");
+        md_id(&mut st, "b", "m2", "Два. ");
+        assert_eq!(pop1(&st), "Раз.");
+        at(&mut st, &env, Some("a"), 1);
+        at(&mut st, &env, Some("a"), 5); // «Два.» не начато — выброшено
+        st.on_hook("stop", &serde_json::json!({"session_id": "b", "last_assistant_message": "Раз.\n\nДва.\n\nТри."}));
+        at(&mut st, &env, Some("b"), 1);
+        at(&mut st, &env, Some("b"), 5);
+        assert_eq!(texts(&st), vec!["Два.", "Три."]);
+    }
+
+    #[test]
+    fn fully_spoken_live_queues_nothing_at_stop() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        md_id(&mut st, "a", "m1", "Раз. Два. ");
+        assert_eq!(texts(&st), vec!["Раз.", "Два."]);
+        st.on_hook("stop", &serde_json::json!({"session_id": "a", "last_assistant_message": "Раз. Два."}));
+        assert!(texts(&st).is_empty());
     }
 }

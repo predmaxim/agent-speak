@@ -12,16 +12,31 @@ pub struct Dedup {
     sessions: HashMap<String, Session>,
 }
 
+fn key(text: &str) -> u64 {
+    let norm: String = text.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+    let mut h = DefaultHasher::new();
+    norm.hash(&mut h);
+    h.finish()
+}
+
 impl Dedup {
     pub fn new() -> Dedup {
         Dedup { sessions: HashMap::new() }
     }
 
     pub fn first_time(&mut self, session: &str, text: &str) -> bool {
-        let norm: String = text.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
-        let mut h = DefaultHasher::new();
-        norm.hash(&mut h);
-        self.sessions.entry(session.into()).or_default().hashes.insert(h.finish())
+        self.sessions.entry(session.into()).or_default().hashes.insert(key(text))
+    }
+
+    pub fn seen(&self, session: &str, text: &str) -> bool {
+        self.sessions.get(session).is_some_and(|s| s.hashes.contains(&key(text)))
+    }
+
+    /// Фраза так и не прозвучала — пусть её можно будет поставить снова.
+    pub fn unrecord(&mut self, session: &str, text: &str) {
+        if let Some(s) = self.sessions.get_mut(session) {
+            s.hashes.remove(&key(text));
+        }
     }
 
     pub fn forget(&mut self, session: &str) {
