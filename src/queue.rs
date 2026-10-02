@@ -23,6 +23,7 @@ pub struct Item {
     pub kind: Kind,
     pub born: Instant,
     pub msg: String, // ключ сообщения: начатое сообщение дочитывается до конца, не устаревая
+    pub speaker: String, // голос сессии; пусто — голос по умолчанию
 }
 
 pub struct Queue {
@@ -199,7 +200,7 @@ mod tests {
     use super::*;
 
     fn it(text: &str, kind: Kind, born: Instant) -> Item {
-        Item { session: "s".into(), text: text.into(), kind, born, msg: "m".into() }
+        Item { session: "s".into(), text: text.into(), kind, born, msg: "m".into(), speaker: String::new() }
     }
 
     #[test]
@@ -239,8 +240,8 @@ mod tests {
     fn clear_session_only() {
         let t0 = Instant::now();
         let mut q = Queue::new(Duration::from_secs(30));
-        q.push(Item { session: "a".into(), text: "1".into(), kind: Kind::Status, born: t0, msg: "m".into() });
-        q.push(Item { session: "b".into(), text: "2".into(), kind: Kind::Status, born: t0, msg: "m".into() });
+        q.push(Item { session: "a".into(), text: "1".into(), kind: Kind::Status, born: t0, msg: "m".into(), speaker: String::new() });
+        q.push(Item { session: "b".into(), text: "2".into(), kind: Kind::Status, born: t0, msg: "m".into(), speaker: String::new() });
         q.clear_session("a");
         assert_eq!(q.pop(t0).unwrap().text, "2");
     }
@@ -286,7 +287,7 @@ mod tests {
     }
 
     fn at(session: &str, text: &str, kind: Kind, born: Instant) -> Item {
-        Item { session: session.into(), text: text.into(), kind, born, msg: "m".into() }
+        Item { session: session.into(), text: text.into(), kind, born, msg: "m".into(), speaker: String::new() }
     }
 
     #[test]
@@ -342,7 +343,7 @@ mod tests {
     }
 
     fn msg(session: &str, text: &str, kind: Kind, born: Instant, m: &str) -> Item {
-        Item { session: session.into(), text: text.into(), kind, born, msg: m.into() }
+        Item { session: session.into(), text: text.into(), kind, born, msg: m.into(), speaker: String::new() }
     }
 
     #[test]
