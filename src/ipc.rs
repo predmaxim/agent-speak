@@ -13,6 +13,8 @@ pub enum Msg {
     Stop,
     Pause,
     Mode,
+    /// Соединение остаётся открытым: сервис пишет строку состояния сразу и при каждом изменении.
+    Subscribe,
 }
 
 pub fn socket_path() -> PathBuf {
@@ -35,6 +37,7 @@ mod tests {
         assert!(s.contains("\"cmd\":\"hook\""));
         assert!(matches!(serde_json::from_str::<Msg>(&s).unwrap(), Msg::Hook { .. }));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"pause\"}").unwrap(), Msg::Pause));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"subscribe\"}").unwrap(), Msg::Subscribe));
     }
 
     #[test]
