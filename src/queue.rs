@@ -1,4 +1,5 @@
 //! Очередь фраз: устаревшие статусы выбрасываются, срочные вперёд, на паузе возраст не растёт.
+//! Играет только активная сессия (и срочные/образец); фразы остальных ждут своей очереди.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -24,11 +25,13 @@ pub struct Queue {
     max_age: Duration,
     paused_at: Option<Instant>,
     paused_total: Duration,
+    active: String,                 // активная сессия; пусто — ещё не выбрана, играют все
+    popped: Option<(String, Kind)>, // последняя отданная фраза — «что сейчас звучит»
 }
 
 impl Queue {
     pub fn new(max_age: Duration) -> Queue {
-        Queue { items: VecDeque::new(), max_age, paused_at: None, paused_total: Duration::ZERO }
+        Queue { items: VecDeque::new(), max_age, paused_at: None, paused_total: Duration::ZERO, active: String::new(), popped: None }
     }
 
     pub fn set_max_age(&mut self, d: Duration) {
@@ -61,14 +64,36 @@ impl Queue {
             return if self.items.front().is_some_and(|i| i.kind == Kind::Preview) { self.items.pop_front() } else { None };
         }
         let eff_now = now.checked_sub(self.paused_total).unwrap_or(now);
-        while let Some(item) = self.items.pop_front() {
-            let age = eff_now.saturating_duration_since(item.born);
-            if item.kind == Kind::Status && age > self.max_age {
-                continue;
-            }
-            return Some(item);
-        }
-        None
+        let max_age = self.max_age;
+        self.items.retain(|i| i.kind != Kind::Status || eff_now.saturating_duration_since(i.born) <= max_age);
+        let active = &self.active;
+        let pos = self.items.iter().position(|i| {
+            active.is_empty() || i.session == *active || matches!(i.kind, Kind::Urgent | Kind::Preview)
+        })?;
+        let item = self.items.remove(pos)?;
+        self.popped = Some((item.session.clone(), item.kind.clone()));
+        Some(item)
+    }
+
+    /// Смена активной сессии: статусы живые — чужие выбрасываются, остальное ждёт возврата.
+    pub fn set_active(&mut self, session: &str) {
+        self.active = session.to_string();
+        self.items.retain(|i| i.kind != Kind::Status || i.session == session);
+    }
+
+    /// Есть ли что играть сейчас (без учёта паузы).
+    pub fn ready(&self) -> bool {
+        self.items.iter().any(|i| self.active.is_empty() || i.session == self.active || matches!(i.kind, Kind::Urgent | Kind::Preview))
+    }
+
+    /// В очереди ждёт финальный ответ сессии.
+    pub fn has_final(&self, session: &str) -> bool {
+        self.items.iter().any(|i| i.session == session && i.kind == Kind::Manual)
+    }
+
+    /// Последней отдан финальный ответ сессии (звучит ли он — знает speaker через busy).
+    pub fn popped_final(&self, session: &str) -> bool {
+        self.popped.as_ref().is_some_and(|(s, k)| s == session && *k == Kind::Manual)
     }
 
     pub fn pause(&mut self, now: Instant) {
@@ -91,8 +116,12 @@ impl Queue {
 
     pub fn clear_session(&mut self, session: &str) {
         self.items.retain(|i| i.session != session);
+        if self.popped.as_ref().is_some_and(|(s, _)| s == session) {
+            self.popped = None;
+        }
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -187,5 +216,49 @@ mod tests {
         q.resume(t0);
         assert_eq!(q.pop(t0).unwrap().text, "interrupted");
         assert_eq!(q.pop(t0).unwrap().text, "rest");
+    }
+
+    fn at(session: &str, text: &str, kind: Kind, born: Instant) -> Item {
+        Item { session: session.into(), text: text.into(), kind, born }
+    }
+
+    #[test]
+    fn pop_takes_active_session_and_urgent_others_wait() {
+        let t0 = Instant::now();
+        let mut q = Queue::new(Duration::from_secs(30));
+        q.set_active("a");
+        q.push(at("b", "b1", Kind::Manual, t0));
+        q.push(at("a", "a1", Kind::Manual, t0));
+        q.push(at("b", "срочно", Kind::Urgent, t0));
+        let got: Vec<String> = std::iter::from_fn(|| q.pop(t0)).map(|i| i.text).collect();
+        assert_eq!(got, vec!["срочно", "a1"]);
+        q.set_active("b");
+        assert_eq!(q.pop(t0).unwrap().text, "b1");
+    }
+
+    #[test]
+    fn switch_drops_statuses_of_other_sessions() {
+        let t0 = Instant::now();
+        let mut q = Queue::new(Duration::from_secs(30));
+        q.set_active("a");
+        q.push(at("a", "статус", Kind::Status, t0));
+        q.push(at("a", "финал", Kind::Manual, t0));
+        q.set_active("b");
+        q.set_active("a");
+        assert_eq!(q.pop(t0).unwrap().text, "финал");
+        assert!(q.pop(t0).is_none());
+    }
+
+    #[test]
+    fn final_of_session_known_queued_or_last_popped() {
+        let t0 = Instant::now();
+        let mut q = Queue::new(Duration::from_secs(30));
+        q.push(at("a", "финал", Kind::Manual, t0));
+        assert!(q.has_final("a") && !q.has_final("b"));
+        q.pop(t0);
+        assert!(!q.has_final("a"));
+        assert!(q.popped_final("a"));
+        q.clear_session("a");
+        assert!(!q.popped_final("a"));
     }
 }
