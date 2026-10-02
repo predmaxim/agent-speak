@@ -61,6 +61,7 @@ struct State {
     active: Option<SessionRef>,          // озвучиваемая сессия
     candidate: Option<(String, Instant)>, // агент в фокусе, отличный от активного, и с какого момента
     subs: Vec<UnixStream>,
+    seq: u64, // свежие ключи сообщений для фраз без своего id
     projects: HashMap<String, String>, // сессия → имя папки проекта (из хуков и окна в фокусе)
 }
 
@@ -161,6 +162,7 @@ pub fn run() {
         active: None,
         candidate: None,
         subs: Vec::new(),
+        seq: 0,
         projects: HashMap::new(),
     };
     for ev in rx {
@@ -323,6 +325,12 @@ impl State {
 
     /// Подготовить и поставить в очередь; незнакомые слова — в фон.
     fn enqueue(&mut self, agent: Agent, session: &str, raw: &str, kind: Kind) -> usize {
+        self.seq += 1;
+        let msg = format!("#{}", self.seq); // одна постановка — одно сообщение
+        self.enqueue_msg(agent, session, raw, kind, &msg)
+    }
+
+    fn enqueue_msg(&mut self, agent: Agent, session: &str, raw: &str, kind: Kind, msg: &str) -> usize {
         // статусы только вживую: не для активной сессии или за финалом — опоздали
         if kind == Kind::Status && (!self.is_active(session) || self.final_pending(session)) {
             return 0;
@@ -336,7 +344,7 @@ impl State {
         let sentences = if kind == Kind::Preview && !sentences.is_empty() { vec![sentences.join(" ")] } else { sentences };
         let mut q = self.shared.queue.lock().unwrap();
         for text in sentences {
-            q.push(Item { session: session.into(), text, kind: kind.clone(), born: Instant::now() });
+            q.push(Item { session: session.into(), text, kind: kind.clone(), born: Instant::now(), msg: msg.into() });
         }
         drop(q);
         self.shared.cv.notify_all();
@@ -456,7 +464,7 @@ impl State {
                 }
                 for s in self.asm.push(&ev) {
                     if self.dedup.first_time(&ev.session, &s) {
-                        self.enqueue(Agent::Claude, &ev.session, &s, Kind::Status);
+                        self.enqueue_msg(Agent::Claude, &ev.session, &s, Kind::Status, &ev.message_id);
                     }
                 }
             }
@@ -540,7 +548,8 @@ mod tests {
             active: None,
             candidate: None,
             subs: Vec::new(),
-            projects: HashMap::new(),
+            seq: 0,
+        projects: HashMap::new(),
         }
     }
 

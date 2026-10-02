@@ -18,6 +18,7 @@ pub struct Item {
     pub text: String,
     pub kind: Kind,
     pub born: Instant,
+    pub msg: String, // ключ сообщения: начатое сообщение дочитывается до конца, не устаревая
 }
 
 pub struct Queue {
@@ -26,7 +27,7 @@ pub struct Queue {
     paused_at: Option<Instant>,
     paused_total: Duration,
     active: String,                 // активная сессия; пусто — ещё не выбрана, играют все
-    popped: Option<(String, Kind)>, // последняя отданная фраза — «что сейчас звучит»
+    popped: Option<(String, Kind, String)>, // последняя отданная фраза (сессия, вид, сообщение) — «что сейчас звучит»
 }
 
 impl Queue {
@@ -65,13 +66,22 @@ impl Queue {
         }
         let eff_now = now.checked_sub(self.paused_total).unwrap_or(now);
         let max_age = self.max_age;
-        self.items.retain(|i| i.kind != Kind::Status || eff_now.saturating_duration_since(i.born) <= max_age);
+        let started = self.popped.as_ref().map(|(s, _, m)| (s.clone(), m.clone()));
+        self.items.retain(|i| {
+            let stale = i.kind == Kind::Status
+                && eff_now.saturating_duration_since(i.born) > max_age
+                && started.as_ref().is_none_or(|(s, m)| *s != i.session || *m != i.msg);
+            if stale {
+                eprintln!("agent-speak: устарело, пропущено ({}): {}", i.session, i.text.chars().take(40).collect::<String>());
+            }
+            !stale
+        });
         let active = &self.active;
         let pos = self.items.iter().position(|i| {
             active.is_empty() || i.session == *active || matches!(i.kind, Kind::Urgent | Kind::Preview)
         })?;
         let item = self.items.remove(pos)?;
-        self.popped = Some((item.session.clone(), item.kind.clone()));
+        self.popped = Some((item.session.clone(), item.kind.clone(), item.msg.clone()));
         Some(item)
     }
 
@@ -93,7 +103,7 @@ impl Queue {
 
     /// Последней отдан финальный ответ сессии (звучит ли он — знает speaker через busy).
     pub fn popped_final(&self, session: &str) -> bool {
-        self.popped.as_ref().is_some_and(|(s, k)| s == session && *k == Kind::Manual)
+        self.popped.as_ref().is_some_and(|(s, k, _)| s == session && *k == Kind::Manual)
     }
 
     pub fn pause(&mut self, now: Instant) {
@@ -116,7 +126,7 @@ impl Queue {
 
     pub fn clear_session(&mut self, session: &str) {
         self.items.retain(|i| i.session != session);
-        if self.popped.as_ref().is_some_and(|(s, _)| s == session) {
+        if self.popped.as_ref().is_some_and(|(s, _, _)| s == session) {
             self.popped = None;
         }
     }
@@ -132,7 +142,7 @@ mod tests {
     use super::*;
 
     fn it(text: &str, kind: Kind, born: Instant) -> Item {
-        Item { session: "s".into(), text: text.into(), kind, born }
+        Item { session: "s".into(), text: text.into(), kind, born, msg: "m".into() }
     }
 
     #[test]
@@ -172,8 +182,8 @@ mod tests {
     fn clear_session_only() {
         let t0 = Instant::now();
         let mut q = Queue::new(Duration::from_secs(30));
-        q.push(Item { session: "a".into(), text: "1".into(), kind: Kind::Status, born: t0 });
-        q.push(Item { session: "b".into(), text: "2".into(), kind: Kind::Status, born: t0 });
+        q.push(Item { session: "a".into(), text: "1".into(), kind: Kind::Status, born: t0, msg: "m".into() });
+        q.push(Item { session: "b".into(), text: "2".into(), kind: Kind::Status, born: t0, msg: "m".into() });
         q.clear_session("a");
         assert_eq!(q.pop(t0).unwrap().text, "2");
     }
@@ -219,7 +229,7 @@ mod tests {
     }
 
     fn at(session: &str, text: &str, kind: Kind, born: Instant) -> Item {
-        Item { session: session.into(), text: text.into(), kind, born }
+        Item { session: session.into(), text: text.into(), kind, born, msg: "m".into() }
     }
 
     #[test]
@@ -260,5 +270,17 @@ mod tests {
         assert!(q.popped_final("a"));
         q.clear_session("a");
         assert!(!q.popped_final("a"));
+    }
+
+    #[test]
+    fn long_message_read_to_the_end() {
+        // одно сообщение — 10 предложений-статусов разом; чтение дольше max_age
+        let t0 = Instant::now();
+        let mut q = Queue::new(Duration::from_secs(30));
+        for n in 0..10 {
+            q.push(it(&n.to_string(), Kind::Status, t0));
+        }
+        let got: Vec<String> = (1..=10).filter_map(|k| q.pop(t0 + Duration::from_secs(5 * k))).map(|i| i.text).collect();
+        assert_eq!(got.len(), 10, "{got:?}");
     }
 }
