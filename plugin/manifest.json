@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "predmaxim.agent-speak",
+  "name": "Agent speech",
+  "version": "1.0.0",
+  "author": "predmaxim",
+  "description": "agent-speakd control: state, pause, mode, intermediate statuses, voice and speed",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "Agent speech",
+    "description": "Read-aloud of AI agents: state and settings",
+    "category": "Audio",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
