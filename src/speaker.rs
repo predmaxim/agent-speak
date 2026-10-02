@@ -148,7 +148,8 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
             }
         };
         shared.set_busy(Some(&item.session));
-        let (speaker, rate) = shared.voice.lock().unwrap().clone();
+        let (default, rate) = shared.voice.lock().unwrap().clone();
+        let speaker = if item.speaker.is_empty() { default } else { item.speaker.clone() };
         let Some(pcm) = tts.synth(&item.text, &speaker, &rate) else {
             // синтез упал: очередь ждёт, а не теряет фразу
             let mut q = shared.queue.lock().unwrap();
@@ -242,7 +243,7 @@ mod tests {
 
     fn say(shared: &Shared) {
         let mut q = shared.queue.lock().unwrap();
-        q.push(Item { session: "s".into(), text: "фраза".into(), kind: Kind::Manual, born: Instant::now(), msg: "m".into() });
+        q.push(Item { session: "s".into(), text: "фраза".into(), kind: Kind::Manual, born: Instant::now(), msg: "m".into(), speaker: String::new() });
         shared.cv.notify_all();
     }
 
@@ -313,7 +314,7 @@ mod tests {
     #[test]
     fn preview_not_replayed_after_pause() {
         let (shared, ev) = start(0, 0);
-        shared.queue.lock().unwrap().push(Item { session: "s".into(), text: "образец".into(), kind: Kind::Preview, born: Instant::now(), msg: "m".into() });
+        shared.queue.lock().unwrap().push(Item { session: "s".into(), text: "образец".into(), kind: Kind::Preview, born: Instant::now(), msg: "m".into(), speaker: String::new() });
         shared.cv.notify_all();
         wait(|| count(&ev, "write") == 2);
         shared.pause();

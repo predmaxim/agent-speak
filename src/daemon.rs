@@ -61,6 +61,7 @@ struct State {
     active: Option<SessionRef>,          // озвучиваемая сессия
     candidate: Option<(String, Instant)>, // агент в фокусе, отличный от активного, и с какого момента
     subs: Vec<UnixStream>,
+    voices: Vec<(String, String)>, // сессия → голос в порядке выдачи; первая держит голос по умолчанию
     seq: u64, // свежие ключи сообщений для фраз без своего id
     projects: HashMap<String, String>, // сессия → имя папки проекта (из хуков и окна в фокусе)
 }
@@ -162,6 +163,7 @@ pub fn run() {
         active: None,
         candidate: None,
         subs: Vec::new(),
+        voices: Vec::new(),
         seq: 0,
         projects: HashMap::new(),
     };
@@ -296,6 +298,7 @@ impl State {
     /// Настройки → поток воспроизведения и очередь, затем — подписчикам.
     fn apply(&mut self) {
         *self.shared.voice.lock().unwrap() = (self.cfg.speaker.clone(), self.cfg.rate.clone());
+        self.reassign_default();
         self.shared.queue.lock().unwrap().set_max_age(Duration::from_secs(self.cfg.max_age_secs));
         self.broadcast();
     }
@@ -377,7 +380,8 @@ impl State {
         let n = sentences.len();
         // образец — один элемент: каждый push Preview вытесняет прежний
         let sentences = if kind == Kind::Preview && !sentences.is_empty() { vec![sentences.join(" ")] } else { sentences };
-        let item = |text: String| Item { session: session.into(), text, kind: kind.clone(), born: Instant::now(), msg: msg.into() };
+        let speaker = if kind == Kind::Preview { String::new() } else { self.voice_of(session) };
+        let item = |text: String| Item { session: session.into(), text, kind: kind.clone(), born: Instant::now(), msg: msg.into(), speaker: speaker.clone() };
         let mut q = self.shared.queue.lock().unwrap();
         if only_new && kind == Kind::Manual {
             // добор финала — на свои места среди ещё не прозвучавших фраз хода
@@ -390,6 +394,33 @@ impl State {
         drop(q);
         self.shared.cv.notify_all();
         n
+    }
+
+    /// Голос сессии: первая — по умолчанию, новые — следующий свободный из SPEAKERS,
+    /// все заняты — тот, что выдавался давнее всех.
+    fn voice_of(&mut self, session: &str) -> String {
+        if let Some((_, sp)) = self.voices.iter().find(|(s, _)| s == session) {
+            return sp.clone();
+        }
+        let default = self.cfg.speaker.clone();
+        let others = crate::config::SPEAKERS.iter().map(|s| s.to_string()).filter(|s| *s != default);
+        let last = |sp: &String| self.voices.iter().rposition(|(_, v)| v == sp);
+        let sp = if self.voices.is_empty() { default } else { others.min_by_key(|sp| last(sp).map_or(0, |i| i + 1)).unwrap() };
+        self.voices.push((session.to_string(), sp.clone()));
+        sp
+    }
+
+    /// Новый голос по умолчанию — первой сессии; кто держал его — получает прежний.
+    fn reassign_default(&mut self) {
+        let new = self.cfg.speaker.clone();
+        let Some(old) = self.voices.first().map(|(_, sp)| sp.clone()).filter(|o| *o != new) else { return };
+        for (i, (_, sp)) in self.voices.iter_mut().enumerate() {
+            if i == 0 {
+                *sp = new.clone();
+            } else if *sp == new {
+                *sp = old.clone();
+            }
+        }
     }
 
     /// Конец хода: вживую — добрать непрозвучавшие фразы (начало до активации, хвост после ухода);
@@ -593,6 +624,7 @@ mod tests {
             active: None,
             candidate: None,
             subs: Vec::new(),
+            voices: Vec::new(),
             seq: 0,
         projects: HashMap::new(),
         }
@@ -1089,5 +1121,56 @@ mod tests {
         assert_eq!(pop1(&st), "Раз.");
         st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "a"}));
         assert_eq!(texts(&st), vec!["Два."]);
+    }
+
+    /// (сессия, голос) всех фраз очереди по порядку.
+    fn voices(st: &State) -> Vec<(String, String)> {
+        let mut q = st.shared.queue.lock().unwrap();
+        std::iter::from_fn(|| q.pop(Instant::now())).map(|i| (i.session, i.speaker)).collect()
+    }
+
+    fn v(s: &str, sp: &str) -> (String, String) {
+        (s.into(), sp.into())
+    }
+
+    #[test]
+    fn each_session_gets_own_stable_voice() {
+        let mut st = test_state(); // голос по умолчанию xenia
+        st.enqueue(Agent::Claude, "a", "Раз.", Kind::Manual);
+        st.enqueue(Agent::Claude, "b", "Два.", Kind::Manual);
+        st.enqueue(Agent::Claude, "a", "Три.", Kind::Urgent);
+        assert_eq!(voices(&st), vec![v("a", "xenia"), v("a", "xenia"), v("b", "baya")]);
+    }
+
+    #[test]
+    fn voices_wrap_around_least_recently_assigned() {
+        let mut st = test_state();
+        for s in ["a", "b", "c", "d", "e", "f", "g"] {
+            st.enqueue(Agent::Claude, s, "Раз.", Kind::Manual);
+        }
+        let got: Vec<String> = voices(&st).into_iter().map(|(_, sp)| sp).collect();
+        assert_eq!(got, vec!["xenia", "baya", "kseniya", "aidar", "eugene", "baya", "kseniya"]);
+    }
+
+    #[test]
+    fn default_change_moves_first_session_and_frees_old_default() {
+        let mut st = test_state();
+        st.enqueue(Agent::Claude, "a", "Раз.", Kind::Manual);
+        st.enqueue(Agent::Claude, "b", "Два.", Kind::Manual); // baya
+        voices(&st);
+        st.cfg.speaker = "baya".into();
+        st.apply();
+        st.enqueue(Agent::Claude, "a", "Раз.", Kind::Manual);
+        st.enqueue(Agent::Claude, "b", "Два.", Kind::Manual);
+        assert_eq!(voices(&st), vec![v("a", "baya"), v("b", "xenia")]);
+    }
+
+    #[test]
+    fn preview_uses_default_voice() {
+        let mut st = test_state();
+        st.enqueue(Agent::Claude, "a", "Раз.", Kind::Manual);
+        say(&mut st);
+        let it = st.shared.queue.lock().unwrap().pop(Instant::now()).unwrap();
+        assert_eq!((it.kind, it.speaker.as_str()), (Kind::Preview, ""));
     }
 }
