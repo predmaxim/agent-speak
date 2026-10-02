@@ -17,11 +17,16 @@ pub fn parse_line(line: &str) -> Vec<Block> {
     vec![Block { message_id: p["id"].as_str().unwrap_or_default().to_string(), text }]
 }
 
+fn injected(e: &Value) -> bool {
+    let t: String = e["payload"]["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect();
+    super::is_injected(&t)
+}
+
 pub fn last_turn(content: &str) -> Vec<String> {
     let (mut cur, mut prev): (Vec<String>, Vec<String>) = (vec![], vec![]);
     for line in content.lines() {
         let Ok(e) = serde_json::from_str::<Value>(line) else { continue };
-        if e["type"] == "response_item" && e["payload"]["type"] == "message" && e["payload"]["role"] == "user" {
+        if e["type"] == "response_item" && e["payload"]["type"] == "message" && e["payload"]["role"] == "user" && !injected(&e) {
             if !cur.is_empty() {
                 prev = std::mem::take(&mut cur);
             }
@@ -62,5 +67,15 @@ mod tests {
     fn main_session_not_subagent() {
         assert!(!is_subagent(FX.lines().next().unwrap()));
         assert!(is_subagent(r#"{"type":"session_meta","payload":{"thread_source":"subagent"}}"#));
+    }
+
+    #[test]
+    fn injected_user_messages_do_not_split_turn() {
+        let user = |t: &str| serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":t}]}}).to_string();
+        let said = |t: &str| serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","id":"i","content":[{"type":"output_text","text":t}]}}).to_string();
+        let lines = [user("вопрос"), said("раз"), user("<environment_context>x</environment_context>"), user("<user_instructions>y"), said("два")];
+        assert_eq!(last_turn(&lines.join("\n")), ["раз", "два"]);
+        let lines = [user("в"), said("раз"), user("ещё"), said("два")];
+        assert_eq!(last_turn(&lines.join("\n")), ["два"]);
     }
 }

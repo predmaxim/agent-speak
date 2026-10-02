@@ -374,7 +374,6 @@ impl State {
                     eprintln!("agent-speak: непонятный MessageDisplay: {p}");
                     return;
                 };
-                self.dedup.mark_display(&ev.session, &ev.message_id);
                 if !self.live() || !self.focused().is_some_and(|f| f.id == ev.session) {
                     self.asm.push(&ev); // держим буфер, чтобы не потерять при смене фокуса
                     return;
@@ -417,6 +416,10 @@ impl State {
             return;
         }
         let Some((agent, id)) = focus::session_of(path) else { return };
+        // Claude вживую — только хук MessageDisplay: id там UUID, в транскрипте msg_…, тексты не совпадают
+        if agent == Agent::Claude {
+            return;
+        }
         if !self.focused().is_some_and(|f| f.id == id) {
             return;
         }
@@ -426,7 +429,7 @@ impl State {
                 Agent::Codex => codex::parse_line(&line),
             };
             for b in blocks {
-                if self.dedup.from_transcript_ok(&id, &b.message_id) && self.dedup.first_time(&id, &b.text) {
+                if self.dedup.first_time(&id, &b.text) {
                     self.enqueue(agent.clone(), &id, &b.text, Kind::Status);
                 }
             }
@@ -604,5 +607,28 @@ mod tests {
         st.shared.set_busy(None);
         let v: serde_json::Value = serde_json::from_str(&st.status_line()).unwrap();
         assert_eq!(v["project"], "");
+    }
+
+    #[test]
+    fn live_claude_speaks_only_from_message_display_not_transcript() {
+        let dir = std::env::temp_dir().join(format!("agent-speak-live-{}/.claude/projects/p", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sess1.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let mut st = test_state();
+        st.cfg.mode = "auto".into();
+        st.focus_cache = (Instant::now() + Duration::from_secs(60), Some(SessionRef {
+            agent: Agent::Claude,
+            id: "sess1".into(),
+            transcript: path.clone(),
+            project: "p".into(),
+        }));
+        st.on_file(&path); // регистрирует смещение
+        let line = r#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"Привет, это текст."}]}}"#;
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        st.on_file(&path);
+        assert!(st.shared.queue.lock().unwrap().is_empty(), "транскрипт Claude в живом режиме не читается");
+        st.on_hook("message-display", &serde_json::json!({"session_id": "sess1", "message_id": "uuid-1", "delta": "Привет, это текст. ", "final": true}));
+        assert!(!st.shared.queue.lock().unwrap().is_empty());
     }
 }

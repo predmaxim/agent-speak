@@ -1,11 +1,10 @@
-//! Одна фраза может прийти из хука и из транскрипта — читаем один раз.
+//! Точные повторы фразы в сессии читаем один раз.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 #[derive(Default)]
 struct Session {
-    display_ids: HashSet<String>,
     hashes: HashSet<u64>,
 }
 
@@ -16,14 +15,6 @@ pub struct Dedup {
 impl Dedup {
     pub fn new() -> Dedup {
         Dedup { sessions: HashMap::new() }
-    }
-
-    pub fn mark_display(&mut self, session: &str, message_id: &str) {
-        self.sessions.entry(session.into()).or_default().display_ids.insert(message_id.into());
-    }
-
-    pub fn from_transcript_ok(&self, session: &str, message_id: &str) -> bool {
-        self.sessions.get(session).is_none_or(|s| !s.display_ids.contains(message_id))
     }
 
     pub fn first_time(&mut self, session: &str, text: &str) -> bool {
@@ -41,15 +32,6 @@ impl Dedup {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn display_suppresses_transcript_same_message() {
-        let mut d = Dedup::new();
-        d.mark_display("s1", "msg_1");
-        assert!(!d.from_transcript_ok("s1", "msg_1"));
-        assert!(d.from_transcript_ok("s1", "msg_2"));
-        assert!(d.from_transcript_ok("s2", "msg_1"));
-    }
 
     #[test]
     fn normalized_repeat_detected() {
