@@ -15,6 +15,8 @@ pub struct Shared {
     pub generation: AtomicU64,
     pub voice: Mutex<(String, String)>, // (speaker, rate)
     pub busy: AtomicBool,
+    pub current: Mutex<String>, // сессия звучащей фразы — для «Читаю: <проект>»
+    pub changed: Mutex<Option<std::sync::mpsc::Sender<()>>>, // смена «говорит/молчит» → основной цикл
 }
 
 /// Синтезатор и приёмник звука — трейты только ради тестов с подделками.
@@ -47,6 +49,8 @@ impl Shared {
             generation: AtomicU64::new(0),
             voice: Mutex::new((speaker, rate)),
             busy: AtomicBool::new(false),
+            current: Mutex::new(String::new()),
+            changed: Mutex::new(None),
         }
     }
 
@@ -70,6 +74,22 @@ impl Shared {
     pub fn resume(&self) {
         self.queue.lock().unwrap().resume(Instant::now());
         self.cv.notify_all();
+    }
+
+    /// Some(сессия) — говорит, None — молчит. Сообщает основному циклу только об изменении.
+    pub fn set_busy(&self, session: Option<&str>) {
+        let was = self.busy.swap(session.is_some(), Ordering::SeqCst);
+        let mut cur = self.current.lock().unwrap();
+        let changed = was != session.is_some() || session.is_some_and(|s| *cur != s);
+        if let Some(s) = session {
+            *cur = s.to_string();
+        }
+        drop(cur);
+        if changed {
+            if let Some(tx) = &*self.changed.lock().unwrap() {
+                let _ = tx.send(());
+            }
+        }
     }
 
     pub fn stop(&self) {
@@ -120,18 +140,18 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                     tail = None;
                     break (it, shared.generation.load(Ordering::SeqCst));
                 }
-                shared.busy.store(false, Ordering::SeqCst);
+                shared.set_busy(None);
                 let to = if tail.is_some() { Duration::from_millis(100) } else { Duration::from_millis(500) };
                 q = shared.cv.wait_timeout(q, to).unwrap().0;
             }
         };
-        shared.busy.store(true, Ordering::SeqCst);
+        shared.set_busy(Some(&item.session));
         let (speaker, rate) = shared.voice.lock().unwrap().clone();
         let Some(pcm) = tts.synth(&item.text, &speaker, &rate) else {
             // синтез упал: очередь ждёт, а не теряет фразу
             let mut q = shared.queue.lock().unwrap();
             requeue(&shared, &mut q, item, my_gen);
-            shared.busy.store(false, Ordering::SeqCst);
+            shared.set_busy(None);
             let deadline = Instant::now() + RETRY;
             while shared.generation.load(Ordering::SeqCst) == my_gen {
                 let left = deadline.saturating_duration_since(Instant::now());
@@ -237,6 +257,34 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         panic!("не дождались");
+    }
+
+    #[test]
+    fn busy_changes_are_reported_once() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = Shared::new(Queue::new(Duration::from_secs(30)), "x".into(), "m".into());
+        *shared.changed.lock().unwrap() = Some(tx);
+        shared.set_busy(Some("a"));
+        shared.set_busy(Some("a")); // без изменений — молчит
+        shared.set_busy(Some("b")); // другая сессия — сообщает
+        shared.set_busy(None);
+        shared.set_busy(None);
+        assert_eq!(rx.try_iter().count(), 3);
+        assert_eq!(*shared.current.lock().unwrap(), "b");
+        assert!(!shared.busy.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn speaker_reports_speaking_and_silence() {
+        let (shared, ev) = start(0, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        *shared.changed.lock().unwrap() = Some(tx);
+        say(&shared);
+        wait(|| count(&ev, "write") == 2);
+        rx.recv_timeout(Duration::from_secs(2)).unwrap(); // начал говорить
+        rx.recv_timeout(Duration::from_secs(3)).unwrap(); // замолчал
+        assert!(!shared.busy.load(Ordering::SeqCst));
+        assert_eq!(*shared.current.lock().unwrap(), "s");
     }
 
     #[test]
