@@ -98,6 +98,7 @@ Panel {
           Button {
             text: root.speech.paused ? root.tr("Resume") : root.tr("Pause")
             enabled: Model.busy(root.speech)
+            opacity: enabled ? 1 : 0.4
             bordered: true
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
@@ -107,6 +108,7 @@ Panel {
           Button {
             text: root.tr("Stop")
             enabled: Model.busy(root.speech)
+            opacity: enabled ? 1 : 0.4
             bordered: true
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
