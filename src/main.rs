@@ -47,6 +47,6 @@ fn main() {
     };
     let read = matches!(msg, Msg::Read);
     if !ipc::send(&msg) && read {
-        notice::notify("Сервис озвучки не запущен", "systemctl --user start agent-speakd");
+        eprintln!("agent-speak: сервис озвучки не запущен (systemctl --user start agent-speakd)");
     }
 }

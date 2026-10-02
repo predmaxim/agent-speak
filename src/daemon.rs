@@ -168,11 +168,14 @@ fn final_message(p: &serde_json::Value, transcript: &Path) -> Option<String> {
 // ponytail: поток на соединение без лимита — клиенты только свои (CLI, хуки, плагин)
 fn serve(conn: UnixStream, tx: Sender<Event>) {
     let Ok(input) = conn.try_clone() else { return };
+    // молчун без первой строки не держит поток вечно; подписка снимает таймаут
+    let _ = input.set_read_timeout(Some(Duration::from_secs(1)));
     for line in BufReader::new(input).lines() {
         let Ok(line) = line else { break };
         match serde_json::from_str::<Msg>(&line) {
             Ok(Msg::Subscribe) => match conn.try_clone() {
                 Ok(w) => {
+                    let _ = conn.set_read_timeout(None); // таймаут общий для клонов сокета
                     let _ = tx.send(Event::Subscribe(w));
                 }
                 Err(_) => break,
@@ -240,7 +243,7 @@ impl State {
     }
 
     fn subscribe(&mut self, mut s: UnixStream) {
-        let _ = s.set_write_timeout(Some(Duration::from_secs(1))); // зависший подписчик не держит цикл
+        let _ = s.set_write_timeout(Some(Duration::from_millis(100))); // зависший подписчик не держит цикл
         if s.write_all(self.status_line().as_bytes()).is_ok() {
             self.subs.push(s);
         }
@@ -287,11 +290,7 @@ impl State {
             Msg::Mode => {
                 self.cfg.mode = if self.auto() { "manual".into() } else { "auto".into() };
                 self.cfg.save();
-                if self.auto() {
-                    notice("Режим: авто", "Агент в фокусе читается по ходу работы");
-                } else {
-                    notice("Режим: вручную", "Чтение по хоткею");
-                }
+                eprintln!("agent-speak: режим: {}", self.cfg.mode);
             }
             Msg::Read => self.read(),
             Msg::Hook { kind, payload } => self.on_hook(&kind, &payload),
@@ -318,7 +317,6 @@ impl State {
         if busy {
             self.stop();
             eprintln!("agent-speak: read: остановлено");
-            notice("Чтение остановлено", "");
             return;
         }
         let Some(s) = self.focused() else {
@@ -337,7 +335,6 @@ impl State {
             notice("Нечего читать", "");
         } else {
             eprintln!("agent-speak: read: читаю {} из {}", texts.len(), s.transcript.display());
-            notice("Читаю…", &joined.chars().take(120).collect::<String>());
         }
     }
 
@@ -470,6 +467,18 @@ mod tests {
         client.write_all(b"{\"cmd\":\"subscribe\"}\n\xd0\xbc\xd1\x83\xd1\x81\xd0\xbe\xd1\x80\n{\"cmd\":\"nope\"}\n{\"cmd\":\"pause\"}\n").unwrap();
         assert!(matches!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Event::Subscribe(_)));
         assert!(matches!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Event::Msg(Msg::Pause)));
+    }
+
+    #[test]
+    fn serve_drops_silent_connection() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let (server, _client) = UnixStream::pair().unwrap();
+        let t = std::thread::spawn(move || serve(server, tx));
+        let start = Instant::now();
+        while !t.is_finished() && start.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(t.is_finished());
     }
 
     #[test]
