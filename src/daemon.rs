@@ -12,8 +12,9 @@ use crate::speaker::{self, Shared};
 use crate::text::{prepare, terms::Terms};
 use crate::tts::Tts;
 use ::notify::{RecursiveMode, Watcher};
-use std::io::BufRead;
-use std::os::unix::net::UnixListener;
+use serde::Serialize;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Sender};
@@ -24,6 +25,21 @@ enum Event {
     Msg(Msg),
     File(PathBuf),
     Config,
+    Subscribe(UnixStream),
+    Busy, // поток воспроизведения: начал или закончил говорить
+}
+
+/// Строка состояния для подписчиков (плагин панели). Порядок полей — протокол.
+#[derive(Serialize)]
+struct Status<'a> {
+    running: bool,
+    speaking: bool,
+    paused: bool,
+    mode: &'a str,
+    read_intermediate: bool,
+    speaker: &'a str,
+    rate: &'a str,
+    project: &'a str,
 }
 
 struct State {
@@ -35,6 +51,7 @@ struct State {
     asm: Assembler,
     tail: Tailer,
     focus_cache: (Instant, Option<SessionRef>),
+    subs: Vec<UnixStream>,
 }
 
 fn home() -> PathBuf {
@@ -63,6 +80,17 @@ pub fn run() {
     let learn = crate::learn::spawn(terms.clone());
 
     let (tx, rx) = mpsc::channel::<Event>();
+    {
+        // «говорит/молчит» из потока воспроизведения — в основной цикл
+        let (btx, brx) = mpsc::channel::<()>();
+        *shared.changed.lock().unwrap() = Some(btx);
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for () in brx {
+                let _ = tx.send(Event::Busy);
+            }
+        });
+    }
     let sock = ipc::socket_path();
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock).expect("bind agent-speak.sock");
@@ -70,16 +98,8 @@ pub fn run() {
         let tx = tx.clone();
         std::thread::spawn(move || {
             for conn in listener.incoming().flatten() {
-                let _ = conn.set_read_timeout(Some(Duration::from_secs(1)));
-                let mut line = String::new();
-                if std::io::BufReader::new(conn).read_line(&mut line).is_ok() {
-                    match serde_json::from_str::<Msg>(&line) {
-                        Ok(m) => {
-                            let _ = tx.send(Event::Msg(m));
-                        }
-                        Err(e) => eprintln!("agent-speak: плохое сообщение: {e}"),
-                    }
-                }
+                let tx = tx.clone();
+                std::thread::spawn(move || serve(conn, tx));
             }
         });
     }
@@ -118,12 +138,15 @@ pub fn run() {
         asm: Assembler::new(),
         tail: Tailer::new(),
         focus_cache: (Instant::now() - Duration::from_secs(10), None),
+        subs: Vec::new(),
     };
     for ev in rx {
         match ev {
             Event::Msg(m) => st.on_msg(m),
             Event::File(p) => st.on_file(&p),
             Event::Config => st.reload(),
+            Event::Subscribe(s) => st.subscribe(s),
+            Event::Busy => st.broadcast(),
         }
     }
 }
@@ -135,6 +158,28 @@ fn final_message(p: &serde_json::Value, transcript: &Path) -> Option<String> {
     }
     std::thread::sleep(Duration::from_millis(300));
     claude::last_turn(&std::fs::read_to_string(transcript).unwrap_or_default()).pop()
+}
+
+/// Одно соединение: команды построчно до закрытия (CLI и хуки — одна строка).
+/// subscribe — копия потока уходит в основной цикл подписчиком, чтение команд продолжается.
+// ponytail: поток на соединение без лимита — клиенты только свои (CLI, хуки, плагин)
+fn serve(conn: UnixStream, tx: Sender<Event>) {
+    let Ok(input) = conn.try_clone() else { return };
+    for line in BufReader::new(input).lines() {
+        let Ok(line) = line else { break };
+        match serde_json::from_str::<Msg>(&line) {
+            Ok(Msg::Subscribe) => match conn.try_clone() {
+                Ok(w) => {
+                    let _ = tx.send(Event::Subscribe(w));
+                }
+                Err(_) => break,
+            },
+            Ok(m) => {
+                let _ = tx.send(Event::Msg(m));
+            }
+            Err(e) => eprintln!("agent-speak: плохое сообщение: {e}"),
+        }
+    }
 }
 
 impl State {
@@ -157,8 +202,44 @@ impl State {
     /// config.toml изменён (интерфейсом или руками) — применить без перезапуска.
     fn reload(&mut self) {
         self.cfg = Config::load();
+        self.apply();
+    }
+
+    /// Настройки → поток воспроизведения и очередь, затем — подписчикам.
+    fn apply(&mut self) {
         *self.shared.voice.lock().unwrap() = (self.cfg.speaker.clone(), self.cfg.rate.clone());
         self.shared.queue.lock().unwrap().set_max_age(Duration::from_secs(self.cfg.max_age_secs));
+        self.broadcast();
+    }
+
+    fn status_line(&self) -> String {
+        let speaking = self.shared.busy.load(Ordering::SeqCst);
+        let paused = self.shared.queue.lock().unwrap().paused();
+        let project = String::new();
+        let st = Status {
+            running: true,
+            speaking,
+            paused,
+            mode: &self.cfg.mode,
+            read_intermediate: self.cfg.read_intermediate,
+            speaker: &self.cfg.speaker,
+            rate: &self.cfg.rate,
+            project: &project,
+        };
+        format!("{}\n", serde_json::to_string(&st).unwrap())
+    }
+
+    fn subscribe(&mut self, mut s: UnixStream) {
+        let _ = s.set_write_timeout(Some(Duration::from_secs(1))); // зависший подписчик не держит цикл
+        if s.write_all(self.status_line().as_bytes()).is_ok() {
+            self.subs.push(s);
+        }
+    }
+
+    /// Состояние всем подписчикам; отвалившиеся удаляются молча.
+    fn broadcast(&mut self) {
+        let line = self.status_line();
+        self.subs.retain_mut(|s| s.write_all(line.as_bytes()).is_ok());
     }
 
     /// Подготовить и поставить в очередь; незнакомые слова — в фон.
@@ -182,6 +263,7 @@ impl State {
     }
 
     fn on_msg(&mut self, m: Msg) {
+        let changes = matches!(m, Msg::Stop | Msg::Pause | Msg::Mode);
         match m {
             Msg::Stop => self.stop(),
             Msg::Pause => {
@@ -203,6 +285,10 @@ impl State {
             }
             Msg::Read => self.read(),
             Msg::Hook { kind, payload } => self.on_hook(&kind, &payload),
+            Msg::Subscribe => {} // приходит как Event::Subscribe
+        }
+        if changes {
+            self.broadcast();
         }
     }
 
@@ -322,6 +408,81 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::terms::Terms;
+
+    fn test_state() -> State {
+        let shared = Arc::new(Shared::new(Queue::new(Duration::from_secs(30)), "xenia".into(), "medium".into()));
+        State {
+            cfg: Config::default(),
+            shared,
+            terms: Arc::new(Mutex::new(Terms::from_str(""))),
+            learn: mpsc::channel().0,
+            dedup: Dedup::new(),
+            asm: Assembler::new(),
+            tail: Tailer::new(),
+            focus_cache: (Instant::now(), None), // свежий кэш: hyprctl в тестах не зовётся
+            subs: Vec::new(),
+        }
+    }
+
+    fn next(r: &mut BufReader<UnixStream>) -> serde_json::Value {
+        let mut l = String::new();
+        r.read_line(&mut l).unwrap();
+        serde_json::from_str(&l).unwrap()
+    }
+
+    fn reader(s: UnixStream) -> BufReader<UnixStream> {
+        s.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        BufReader::new(s)
+    }
+
+    #[test]
+    fn serve_reads_every_line_and_survives_garbage() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || serve(server, tx));
+        client.write_all(b"{\"cmd\":\"subscribe\"}\n\xd0\xbc\xd1\x83\xd1\x81\xd0\xbe\xd1\x80\n{\"cmd\":\"nope\"}\n{\"cmd\":\"pause\"}\n").unwrap();
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Event::Subscribe(_)));
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Event::Msg(Msg::Pause)));
+    }
+
+    #[test]
+    fn status_line_shape() {
+        let st = test_state();
+        assert_eq!(
+            st.status_line(),
+            "{\"running\":true,\"speaking\":false,\"paused\":false,\"mode\":\"manual\",\"read_intermediate\":true,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\"}\n"
+        );
+    }
+
+    #[test]
+    fn subscriber_gets_state_now_and_on_change() {
+        let mut st = test_state();
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut r = reader(ours);
+        st.subscribe(theirs);
+        assert_eq!(next(&mut r)["paused"], false);
+        st.on_msg(Msg::Pause);
+        assert_eq!(next(&mut r)["paused"], true);
+        st.shared.set_busy(Some("s"));
+        st.broadcast(); // так цикл отвечает на Event::Busy
+        assert_eq!(next(&mut r)["speaking"], true);
+    }
+
+    #[test]
+    fn dead_subscriber_dropped_live_one_kept() {
+        let mut st = test_state();
+        let (dead, a) = UnixStream::pair().unwrap();
+        let (live, b) = UnixStream::pair().unwrap();
+        let mut r = reader(live);
+        st.subscribe(a);
+        st.subscribe(b);
+        drop(dead);
+        st.on_msg(Msg::Stop);
+        assert_eq!(st.subs.len(), 1);
+        next(&mut r); // при подписке
+        next(&mut r); // после стопа
+    }
 
     #[test]
     fn final_message_prefers_payload() {
