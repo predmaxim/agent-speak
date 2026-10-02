@@ -15,6 +15,7 @@ pub struct SessionRef {
     pub agent: Agent,
     pub id: String,
     pub transcript: PathBuf,
+    pub project: String, // имя папки, где запущен агент — для «Читаю: <проект>»
 }
 
 fn home() -> PathBuf {
@@ -51,6 +52,14 @@ fn under(mut pid: u32, ancestor: u32) -> bool {
     false
 }
 
+/// Имя папки рабочего каталога процесса; нет процесса — пустая строка.
+fn project_of(pid: u32) -> String {
+    std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default()
+}
+
 pub fn focused() -> Option<SessionRef> {
     // timeout: зависший hyprctl не должен вешать цикл событий
     let out = Command::new("timeout").args(["2", "hyprctl", "activewindow", "-j"]).output().ok()?;
@@ -74,7 +83,7 @@ fn claude_under(win: u32) -> Option<SessionRef> {
         for d in std::fs::read_dir(home().join(".claude/projects")).ok()?.flatten() {
             let p = d.path().join(&name);
             if p.exists() {
-                return Some(SessionRef { agent: Agent::Claude, id: sid.to_string(), transcript: p });
+                return Some(SessionRef { agent: Agent::Claude, id: sid.to_string(), transcript: p, project: project_of(pid as u32) });
             }
         }
     }
@@ -90,7 +99,7 @@ fn codex_under(win: u32) -> Option<SessionRef> {
         for fd in std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?.flatten() {
             let Ok(target) = std::fs::read_link(fd.path()) else { continue };
             if let Some((Agent::Codex, id)) = session_of(&target) {
-                return Some(SessionRef { agent: Agent::Codex, id, transcript: target });
+                return Some(SessionRef { agent: Agent::Codex, id, transcript: target, project: project_of(pid) });
             }
         }
     }
@@ -146,5 +155,12 @@ mod tests {
         let asked = vec!["tokio".to_string(), "ssh".to_string()];
         let out = "tokio\tто\u{301}кио\nssh\tэс-эс-э\u{301}йч";
         assert_eq!(parse_learned(out, &asked), vec![("tokio".to_string(), "т+окио".to_string()), ("ssh".to_string(), "эс-эс-+эйч".to_string())]);
+    }
+
+    #[test]
+    fn project_is_process_cwd_dir_name() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(project_of(std::process::id()), cwd.file_name().unwrap().to_str().unwrap());
+        assert_eq!(project_of(u32::MAX), "");
     }
 }
