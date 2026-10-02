@@ -13,6 +13,7 @@ use crate::text::{prepare, terms::Terms};
 use crate::tts::Tts;
 use ::notify::{RecursiveMode, Watcher};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -52,6 +53,7 @@ struct State {
     tail: Tailer,
     focus_cache: (Instant, Option<SessionRef>),
     subs: Vec<UnixStream>,
+    projects: HashMap<String, String>, // сессия → имя папки проекта (из хуков и окна в фокусе)
 }
 
 fn home() -> PathBuf {
@@ -139,6 +141,7 @@ pub fn run() {
         tail: Tailer::new(),
         focus_cache: (Instant::now() - Duration::from_secs(10), None),
         subs: Vec::new(),
+        projects: HashMap::new(),
     };
     for ev in rx {
         match ev {
@@ -186,6 +189,9 @@ impl State {
     fn focused(&mut self) -> Option<SessionRef> {
         if self.focus_cache.0.elapsed() > Duration::from_millis(500) {
             self.focus_cache = (Instant::now(), focus::focused());
+            if let Some(f) = &self.focus_cache.1 {
+                self.projects.insert(f.id.clone(), f.project.clone());
+            }
         }
         self.focus_cache.1.clone()
     }
@@ -215,7 +221,11 @@ impl State {
     fn status_line(&self) -> String {
         let speaking = self.shared.busy.load(Ordering::SeqCst);
         let paused = self.shared.queue.lock().unwrap().paused();
-        let project = String::new();
+        let project = if speaking {
+            self.projects.get(&*self.shared.current.lock().unwrap()).cloned().unwrap_or_default()
+        } else {
+            String::new()
+        };
         let st = Status {
             running: true,
             speaking,
@@ -285,6 +295,17 @@ impl State {
             }
             Msg::Read => self.read(),
             Msg::Hook { kind, payload } => self.on_hook(&kind, &payload),
+            Msg::Set { key, value } => {
+                if self.cfg.set(&key, &value) {
+                    self.cfg.save();
+                    self.apply();
+                } else {
+                    eprintln!("agent-speak: set: неверно {key} = {value}");
+                }
+            }
+            Msg::Say { text } => {
+                self.enqueue(Agent::Claude, "say", &text, Kind::Manual);
+            }
             Msg::Subscribe => {} // приходит как Event::Subscribe
         }
         if changes {
@@ -322,6 +343,10 @@ impl State {
 
     fn on_hook(&mut self, kind: &str, p: &serde_json::Value) {
         let session = p["session_id"].as_str().unwrap_or_default().to_string();
+        if let Some(cwd) = p["cwd"].as_str().filter(|_| !session.is_empty()) {
+            let name = Path::new(cwd).file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            self.projects.insert(session.clone(), name.to_string());
+        }
         match kind {
             "user-prompt-submit" => {
                 self.shared.queue.lock().unwrap().clear_session(&session);
@@ -422,6 +447,7 @@ mod tests {
             tail: Tailer::new(),
             focus_cache: (Instant::now(), None), // свежий кэш: hyprctl в тестах не зовётся
             subs: Vec::new(),
+            projects: HashMap::new(),
         }
     }
 
@@ -489,5 +515,54 @@ mod tests {
         let p = serde_json::json!({"last_assistant_message": "Готово"});
         assert_eq!(final_message(&p, Path::new("/nonexistent")), Some("Готово".into()));
         assert_eq!(final_message(&serde_json::json!({"last_assistant_message": " "}), Path::new("/nonexistent")), None);
+    }
+
+    #[test]
+    fn set_applies_saves_broadcasts_and_rejects_bad() {
+        // единственный тест, трогающий HOME: config::path() читает его при каждом вызове
+        let home = std::env::temp_dir().join(format!("agent-speak-set-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        unsafe { std::env::set_var("HOME", &home) };
+        let mut st = test_state();
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut r = reader(ours);
+        st.subscribe(theirs);
+        next(&mut r);
+        st.on_msg(Msg::Set { key: "speaker".into(), value: serde_json::json!("baya") });
+        assert_eq!(next(&mut r)["speaker"], "baya");
+        assert_eq!(st.shared.voice.lock().unwrap().0, "baya");
+        let saved = std::fs::read_to_string(home.join(".config/agent-speak/config.toml")).unwrap();
+        assert!(saved.contains("speaker = \"baya\""), "{saved}");
+        st.on_msg(Msg::Set { key: "speaker".into(), value: serde_json::json!("nobody") });
+        st.on_msg(Msg::Set { key: "read_intermediate".into(), value: serde_json::json!("false") });
+        st.on_msg(Msg::Set { key: "volume".into(), value: serde_json::json!("loud") });
+        let mut l = String::new();
+        assert!(r.read_line(&mut l).is_err(), "неверный set ничего не рассылает: {l}");
+        assert_eq!((st.cfg.speaker.as_str(), st.cfg.read_intermediate), ("baya", true));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn say_queues_manual_reading() {
+        let mut st = test_state();
+        st.on_msg(Msg::Say { text: "Так звучит этот голос.".into() });
+        let it = st.shared.queue.lock().unwrap().pop(Instant::now()).unwrap();
+        assert_eq!(it.kind, Kind::Manual);
+        assert!(it.text.contains("голос"), "{}", it.text);
+    }
+
+    #[test]
+    fn project_of_spoken_session_from_hook_cwd() {
+        let mut st = test_state();
+        st.on_msg(Msg::Hook {
+            kind: "user-prompt-submit".into(),
+            payload: serde_json::json!({"session_id": "s1", "cwd": "/home/u/Projects/agent-speak"}),
+        });
+        st.shared.set_busy(Some("s1"));
+        let v: serde_json::Value = serde_json::from_str(&st.status_line()).unwrap();
+        assert_eq!((v["speaking"].clone(), v["project"].clone()), (serde_json::json!(true), serde_json::json!("agent-speak")));
+        st.shared.set_busy(None);
+        let v: serde_json::Value = serde_json::from_str(&st.status_line()).unwrap();
+        assert_eq!(v["project"], "");
     }
 }
