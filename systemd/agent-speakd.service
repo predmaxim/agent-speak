@@ -1,6 +1,7 @@
 [Unit]
 Description=agent-speak: озвучка ИИ-агентов
-After=pipewire.service
+After=graphical-session.target pipewire.service
+PartOf=graphical-session.target
 
 [Service]
 ExecStart=%h/.local/bin/agent-speak daemon
