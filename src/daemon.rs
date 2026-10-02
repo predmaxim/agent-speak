@@ -263,7 +263,7 @@ impl State {
         }
         let n = sentences.len();
         // образец — один элемент: каждый push Preview вытесняет прежний
-        let sentences = if kind == Kind::Preview { vec![sentences.join(" ")] } else { sentences };
+        let sentences = if kind == Kind::Preview && !sentences.is_empty() { vec![sentences.join(" ")] } else { sentences };
         let mut q = self.shared.queue.lock().unwrap();
         for text in sentences {
             q.push(Item { session: session.into(), text, kind: kind.clone(), born: Instant::now() });
