@@ -414,6 +414,7 @@ impl State {
         if !self.is_active(&s.id) {
             self.set_active(s.clone()); // без выдержки: пользователь сам попросил
         }
+        self.shared.queue.lock().unwrap().clear_session(&s.id); // ждавший финал — часть читаемого хода
         let content = std::fs::read_to_string(&s.transcript).unwrap_or_default();
         let texts = match s.agent {
             Agent::Claude => claude::last_turn(&content),
@@ -890,5 +891,19 @@ mod tests {
         at(&mut st, &env, Some("a"), 0);
         st.on_hook("notification", &serde_json::json!({"session_id": "b", "cwd": "/p/проект", "message": "Нужно разрешение"}));
         assert_eq!(texts(&st), vec!["проект: Нужно разрешение."]);
+    }
+
+    #[test]
+    fn read_does_not_repeat_queued_final_of_same_session() {
+        let dir = std::env::temp_dir().join(format!("agent-speak-read2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("b.jsonl");
+        std::fs::write(&path, r#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"Ответ бэ."}]}}"#).unwrap();
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        st.on_hook("stop", &serde_json::json!({"session_id": "b", "last_assistant_message": "Ответ бэ."}));
+        *env.0.lock().unwrap() = Some(SessionRef { transcript: path, ..sref("b") });
+        st.on_msg(Msg::Read);
+        assert_eq!(texts(&st), vec!["Ответ бэ."]);
     }
 }

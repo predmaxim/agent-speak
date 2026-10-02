@@ -94,7 +94,7 @@ impl Shared {
 
     pub fn stop(&self) {
         self.bump(&mut self.queue.lock().unwrap(), |q| {
-            q.clear();
+            q.clear_active();
             q.resume(Instant::now());
         });
     }

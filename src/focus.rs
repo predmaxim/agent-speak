@@ -3,6 +3,7 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Agent {
@@ -63,13 +64,16 @@ fn project_of(pid: u32) -> String {
 pub fn focused() -> Option<SessionRef> {
     // timeout: зависший hyprctl не должен вешать цикл событий
     let out = Command::new("timeout").args(["2", "hyprctl", "activewindow", "-j"]).output().ok()?;
-    let Some(win) = serde_json::from_slice::<Value>(&out.stdout).ok().and_then(|v| v["pid"].as_u64()) else {
-        eprintln!("agent-speak: hyprctl: нет pid окна ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim());
-        return None;
-    };
-    let win = win as u32;
-    claude_under(win).or_else(|| codex_under(win))
+    let win = serde_json::from_slice::<Value>(&out.stdout).ok().and_then(|v| v["pid"].as_u64());
+    // опрос раз в секунду: пишем в журнал только переход «есть окно → нет окна»
+    if NO_WINDOW.swap(win.is_none(), Ordering::Relaxed) || win.is_some() {
+        return win.and_then(|w| claude_under(w as u32).or_else(|| codex_under(w as u32)));
+    }
+    eprintln!("agent-speak: hyprctl: нет pid окна ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim());
+    None
 }
+
+static NO_WINDOW: AtomicBool = AtomicBool::new(false);
 
 fn claude_under(win: u32) -> Option<SessionRef> {
     for f in std::fs::read_dir(home().join(".claude/sessions")).ok()?.flatten() {
