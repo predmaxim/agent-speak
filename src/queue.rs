@@ -116,6 +116,17 @@ impl Queue {
         }
     }
 
+    /// Новый ход сессии: выбросить её не начатые статусы. Возвращает (выброшенные, оставшиеся) тексты.
+    pub fn new_turn(&mut self, session: &str) -> (Vec<String>, Vec<String>) {
+        let started = &self.started;
+        let (keep, dropped): (Vec<Item>, Vec<Item>) = std::mem::take(&mut self.items)
+            .into_iter()
+            .partition(|i| i.session != session || i.kind != Kind::Status || started.contains(&(i.session.clone(), i.msg.clone())));
+        self.items = keep.into();
+        let kept = self.items.iter().filter(|i| i.session == session).map(|i| i.text.clone()).collect();
+        (dropped.into_iter().map(|i| i.text).collect(), kept)
+    }
+
     /// Смена активной сессии: не начатые чужие статусы выбрасываются, остальное ждёт возврата.
     /// Возвращает выброшенные.
     pub fn set_active(&mut self, session: &str) -> Vec<Item> {
