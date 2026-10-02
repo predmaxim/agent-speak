@@ -1,0 +1,12 @@
+[Unit]
+Description=agent-speak: озвучка ИИ-агентов
+After=pipewire.service
+
+[Service]
+ExecStart=%h/.local/bin/agent-speak daemon
+Restart=on-failure
+RestartSec=2
+Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/bin
+
+[Install]
+WantedBy=graphical-session.target
