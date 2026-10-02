@@ -28,7 +28,11 @@ enum Event {
     Config,
     Subscribe(UnixStream),
     Busy, // поток воспроизведения: начал или закончил говорить
+    Tick, // раз в секунду: заметить смену фокуса, даже когда больше ничего не происходит
 }
+
+/// Сколько фокус должен простоять на другом агенте, чтобы озвучка переключилась на него.
+const SWITCH_AFTER: Duration = Duration::from_secs(5);
 
 /// Строка состояния для подписчиков (плагин панели). Порядок полей — протокол.
 #[derive(Serialize)]
@@ -51,7 +55,11 @@ struct State {
     dedup: Dedup,
     asm: Assembler,
     tail: Tailer,
-    focus_cache: (Instant, Option<SessionRef>),
+    focus_cache: Option<(Instant, Option<SessionRef>)>, // None — устарел
+    focus_src: Box<dyn FnMut() -> Option<SessionRef>>, // окно в фокусе; в тестах — подделка
+    clock: Box<dyn Fn() -> Instant>,
+    active: Option<SessionRef>,          // озвучиваемая сессия
+    candidate: Option<(String, Instant)>, // агент в фокусе, отличный от активного, и с какого момента
     subs: Vec<UnixStream>,
     projects: HashMap<String, String>, // сессия → имя папки проекта (из хуков и окна в фокусе)
 }
@@ -105,6 +113,14 @@ pub fn run() {
             }
         });
     }
+    {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            while tx.send(Event::Tick).is_ok() {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        });
+    }
     let ftx = tx.clone();
     let mut watcher = ::notify::recommended_watcher(move |res: ::notify::Result<::notify::Event>| {
         if let Ok(ev) = res {
@@ -139,12 +155,18 @@ pub fn run() {
         dedup: Dedup::new(),
         asm: Assembler::new(),
         tail: Tailer::new(),
-        focus_cache: (Instant::now() - Duration::from_secs(10), None),
+        focus_cache: None,
+        focus_src: Box::new(focus::focused),
+        clock: Box::new(Instant::now),
+        active: None,
+        candidate: None,
         subs: Vec::new(),
         projects: HashMap::new(),
     };
     for ev in rx {
+        st.poll_focus();
         match ev {
+            Event::Tick => {}
             Event::Msg(m) => st.on_msg(m),
             Event::File(p) => st.on_file(&p),
             Event::Config => st.reload(),
@@ -190,13 +212,57 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
 
 impl State {
     fn focused(&mut self) -> Option<SessionRef> {
-        if self.focus_cache.0.elapsed() > Duration::from_millis(500) {
-            self.focus_cache = (Instant::now(), focus::focused());
-            if let Some(f) = &self.focus_cache.1 {
+        let now = (self.clock)();
+        if !self.focus_cache.as_ref().is_some_and(|(t, _)| now.saturating_duration_since(*t) < Duration::from_millis(500)) {
+            let f = (self.focus_src)();
+            if let Some(f) = &f {
                 self.projects.insert(f.id.clone(), f.project.clone());
             }
+            self.focus_cache = Some((now, f));
         }
-        self.focus_cache.1.clone()
+        self.focus_cache.as_ref().and_then(|(_, f)| f.clone())
+    }
+
+    /// Активная сессия меняется, только если фокус ≥ SWITCH_AFTER стоит на другом агенте;
+    /// окна не-агентов не в счёт. Текущую фразу не обрываем — speaker сам возьмёт следующую.
+    fn poll_focus(&mut self) {
+        let now = (self.clock)();
+        let Some(f) = self.focused() else {
+            self.candidate = None;
+            return;
+        };
+        if self.active.as_ref().is_some_and(|a| a.id == f.id) {
+            self.candidate = None;
+            return;
+        }
+        match &self.candidate {
+            _ if self.active.is_none() => self.set_active(f),
+            Some((id, since)) if *id == f.id => {
+                if now.saturating_duration_since(*since) >= SWITCH_AFTER {
+                    self.set_active(f);
+                }
+            }
+            _ => self.candidate = Some((f.id, now)),
+        }
+    }
+
+    fn set_active(&mut self, s: SessionRef) {
+        eprintln!("agent-speak: озвучиваю {} ({})", s.project, s.id);
+        self.shared.queue.lock().unwrap().set_active(&s.id);
+        self.shared.cv.notify_all();
+        self.active = Some(s);
+        self.candidate = None;
+    }
+
+    fn is_active(&self, session: &str) -> bool {
+        self.active.as_ref().is_some_and(|a| a.id == session)
+    }
+
+    /// Финальный ответ сессии ждёт в очереди или звучит — статусы за ним не ставим.
+    fn final_pending(&self, session: &str) -> bool {
+        let q = self.shared.queue.lock().unwrap();
+        q.has_final(session)
+            || (self.shared.busy.load(Ordering::SeqCst) && *self.shared.current.lock().unwrap() == session && q.popped_final(session))
     }
 
     fn auto(&self) -> bool {
@@ -257,6 +323,10 @@ impl State {
 
     /// Подготовить и поставить в очередь; незнакомые слова — в фон.
     fn enqueue(&mut self, agent: Agent, session: &str, raw: &str, kind: Kind) -> usize {
+        // статусы только вживую: не для активной сессии или за финалом — опоздали
+        if kind == Kind::Status && (!self.is_active(session) || self.final_pending(session)) {
+            return 0;
+        }
         let (sentences, unknown) = prepare(raw, &self.terms.lock().unwrap());
         for w in unknown {
             let _ = self.learn.send((agent.clone(), w));
@@ -320,17 +390,22 @@ impl State {
     }
 
     fn read(&mut self) {
-        let busy = self.shared.busy.load(Ordering::SeqCst) || !self.shared.queue.lock().unwrap().is_empty();
+        // фразы неактивных сессий ждут в очереди — чтению не мешают
+        let busy = self.shared.busy.load(Ordering::SeqCst) || self.shared.queue.lock().unwrap().ready();
         if busy {
             self.stop();
             eprintln!("agent-speak: read: остановлено");
             return;
         }
+        self.focus_cache = None; // ручное чтение — по свежему фокусу
         let Some(s) = self.focused() else {
             eprintln!("agent-speak: read: нет агента в фокусе");
             notice("В фокусе нет агента", "");
             return;
         };
+        if !self.is_active(&s.id) {
+            self.set_active(s.clone()); // без выдержки: пользователь сам попросил
+        }
         let content = std::fs::read_to_string(&s.transcript).unwrap_or_default();
         let texts = match s.agent {
             Agent::Claude => claude::last_turn(&content),
@@ -355,7 +430,8 @@ impl State {
             "user-prompt-submit" => {
                 self.shared.queue.lock().unwrap().clear_session(&session);
                 self.dedup.forget(&session);
-                if self.focused().is_some_and(|f| f.id == session) {
+                // обрываем только речь этой же сессии
+                if self.shared.busy.load(Ordering::SeqCst) && *self.shared.current.lock().unwrap() == session {
                     self.shared.interrupt();
                 }
             }
@@ -374,8 +450,8 @@ impl State {
                     eprintln!("agent-speak: непонятный MessageDisplay: {p}");
                     return;
                 };
-                if !self.live() || !self.focused().is_some_and(|f| f.id == ev.session) {
-                    self.asm.push(&ev); // держим буфер, чтобы не потерять при смене фокуса
+                if !self.live() || !self.is_active(&ev.session) {
+                    self.asm.push(&ev); // держим буфер; неактивной сессии финал придёт в Stop
                     return;
                 }
                 for s in self.asm.push(&ev) {
@@ -386,21 +462,27 @@ impl State {
             }
             "stop" => {
                 let rest = self.asm.flush_session(&session);
-                let Some(f) = self.focused().filter(|f| self.auto() && f.id == session) else { return };
-                if self.cfg.read_intermediate {
+                if !self.auto() {
+                    return;
+                }
+                if self.cfg.read_intermediate && self.is_active(&session) {
+                    // активная сессия уже прозвучала вживую — дочитать хвост
                     for s in rest {
                         if self.dedup.first_time(&session, &s) {
                             self.enqueue(Agent::Claude, &session, &s, Kind::Status);
                         }
                     }
-                } else if let Some(last) = final_message(p, &f.transcript) {
-                    self.enqueue(Agent::Claude, &session, &last, Kind::Manual); // только финальный ответ
+                } else {
+                    let transcript = PathBuf::from(p["transcript_path"].as_str().unwrap_or_default());
+                    if let Some(last) = final_message(p, &transcript) {
+                        self.enqueue(Agent::Claude, &session, &last, Kind::Manual); // финальный ответ ждёт своей сессии
+                    }
                 }
             }
             "codex-notify" => {
-                // в живом режиме весь текст уже пришёл из rollout; без промежуточных — читаем финальный
+                // активная в живом режиме уже прозвучала из rollout; иначе — финальный ответ
                 let thread = p["thread-id"].as_str().unwrap_or_default().to_string();
-                if self.auto() && !self.cfg.read_intermediate && self.focused().is_some_and(|f| f.id == thread) {
+                if self.auto() && !(self.cfg.read_intermediate && self.is_active(&thread)) {
                     if let Some(last) = p["last-assistant-message"].as_str() {
                         self.enqueue(Agent::Codex, &thread, last, Kind::Manual);
                     }
@@ -420,7 +502,7 @@ impl State {
         if agent == Agent::Claude {
             return;
         }
-        if !self.focused().is_some_and(|f| f.id == id) {
+        if !self.is_active(&id) {
             return;
         }
         for line in lines {
@@ -452,7 +534,11 @@ mod tests {
             dedup: Dedup::new(),
             asm: Assembler::new(),
             tail: Tailer::new(),
-            focus_cache: (Instant::now(), None), // свежий кэш: hyprctl в тестах не зовётся
+            focus_cache: None,
+            focus_src: Box::new(|| None), // hyprctl в тестах не зовётся
+            clock: Box::new(Instant::now),
+            active: None,
+            candidate: None,
             subs: Vec::new(),
             projects: HashMap::new(),
         }
@@ -617,12 +703,7 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         let mut st = test_state();
         st.cfg.mode = "auto".into();
-        st.focus_cache = (Instant::now() + Duration::from_secs(60), Some(SessionRef {
-            agent: Agent::Claude,
-            id: "sess1".into(),
-            transcript: path.clone(),
-            project: "p".into(),
-        }));
+        st.set_active(SessionRef { agent: Agent::Claude, id: "sess1".into(), transcript: path.clone(), project: "p".into() });
         st.on_file(&path); // регистрирует смещение
         let line = r#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"Привет, это текст."}]}}"#;
         std::fs::write(&path, format!("{line}\n")).unwrap();
@@ -630,5 +711,175 @@ mod tests {
         assert!(st.shared.queue.lock().unwrap().is_empty(), "транскрипт Claude в живом режиме не читается");
         st.on_hook("message-display", &serde_json::json!({"session_id": "sess1", "message_id": "uuid-1", "delta": "Привет, это текст. ", "final": true}));
         assert!(!st.shared.queue.lock().unwrap().is_empty());
+    }
+
+    // --- фокус и активная сессия: подставные окно в фокусе и часы ---
+
+    type Env = (Arc<Mutex<Option<SessionRef>>>, Arc<Mutex<Instant>>);
+
+    fn sref(id: &str) -> SessionRef {
+        SessionRef { agent: Agent::Claude, id: id.into(), transcript: PathBuf::from("/nonexistent"), project: id.into() }
+    }
+
+    fn env_state() -> (State, Env) {
+        let mut st = test_state();
+        st.cfg.mode = "auto".into();
+        let focus: Arc<Mutex<Option<SessionRef>>> = Default::default();
+        let now = Arc::new(Mutex::new(Instant::now()));
+        let (f, n) = (focus.clone(), now.clone());
+        st.focus_src = Box::new(move || f.lock().unwrap().clone());
+        st.clock = Box::new(move || *n.lock().unwrap());
+        (st, (focus, now))
+    }
+
+    /// Фокус на окно (None — не агент) и прошло secs секунд, затем опрос.
+    fn at(st: &mut State, env: &Env, focus: Option<&str>, secs: u64) {
+        *env.0.lock().unwrap() = focus.map(sref);
+        *env.1.lock().unwrap() += Duration::from_secs(secs);
+        st.poll_focus();
+    }
+
+    fn active(st: &State) -> Option<String> {
+        st.active.as_ref().map(|a| a.id.clone())
+    }
+
+    fn texts(st: &State) -> Vec<String> {
+        let mut q = st.shared.queue.lock().unwrap();
+        std::iter::from_fn(|| q.pop(Instant::now())).map(|i| i.text).collect()
+    }
+
+    fn md(st: &mut State, session: &str, text: &str) {
+        st.on_hook("message-display", &serde_json::json!({"session_id": session, "message_id": "m", "delta": text, "final": true}));
+    }
+
+    #[test]
+    fn active_switches_only_after_5s_on_other_agent() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        assert_eq!(active(&st).as_deref(), Some("a")); // активной не было — сразу
+        at(&mut st, &env, Some("b"), 1);
+        at(&mut st, &env, Some("b"), 4);
+        assert_eq!(active(&st).as_deref(), Some("a"));
+        at(&mut st, &env, Some("b"), 1);
+        assert_eq!(active(&st).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn short_visits_and_non_agent_windows_keep_active() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        at(&mut st, &env, Some("b"), 1);
+        at(&mut st, &env, Some("a"), 3);
+        at(&mut st, &env, Some("b"), 1);
+        at(&mut st, &env, Some("b"), 3);
+        assert_eq!(active(&st).as_deref(), Some("a"));
+        at(&mut st, &env, None, 1);
+        at(&mut st, &env, None, 60);
+        assert_eq!(active(&st).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn read_switches_active_immediately() {
+        let dir = std::env::temp_dir().join(format!("agent-speak-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("b.jsonl");
+        std::fs::write(&path, r#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"Ответ бэ."}]}}"#).unwrap();
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        *env.0.lock().unwrap() = Some(SessionRef { transcript: path, ..sref("b") });
+        st.on_msg(Msg::Read);
+        assert_eq!(active(&st).as_deref(), Some("b"));
+        assert_eq!(texts(&st), vec!["Ответ бэ."]);
+    }
+
+    #[test]
+    fn status_of_non_active_session_dropped() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        md(&mut st, "b", "Статус бэ. ");
+        md(&mut st, "a", "Статус а. ");
+        assert_eq!(texts(&st), vec!["Статус а."]);
+    }
+
+    #[test]
+    fn status_not_queued_behind_final_of_same_session() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        st.enqueue(Agent::Claude, "a", "Финал.", Kind::Manual);
+        md(&mut st, "a", "Поздний статус. ");
+        assert_eq!(texts(&st), vec!["Финал."]); // финал «играет» после pop
+        st.shared.set_busy(Some("a"));
+        md(&mut st, "a", "Ещё статус. ");
+        assert!(texts(&st).is_empty());
+        st.shared.set_busy(None);
+        md(&mut st, "a", "Новый статус. ");
+        assert_eq!(texts(&st), vec!["Новый статус."]);
+    }
+
+    #[test]
+    fn final_of_non_active_waits_until_focused() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        md(&mut st, "b", "Живой текст бэ. ");
+        st.on_hook("stop", &serde_json::json!({"session_id": "b", "last_assistant_message": "Готово, бэ."}));
+        assert!(texts(&st).is_empty());
+        at(&mut st, &env, Some("b"), 1);
+        at(&mut st, &env, Some("b"), 5);
+        assert_eq!(texts(&st), vec!["Готово, бэ."]);
+    }
+
+    #[test]
+    fn stop_of_active_live_session_does_not_repeat_final() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        md(&mut st, "a", "Готово. ");
+        st.on_hook("stop", &serde_json::json!({"session_id": "a", "last_assistant_message": "Готово."}));
+        assert_eq!(texts(&st), vec!["Готово."]);
+    }
+
+    #[test]
+    fn codex_final_of_non_active_queued() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        st.on_hook("codex-notify", &serde_json::json!({"thread-id": "x", "last-assistant-message": "Кодекс готов."}));
+        st.on_hook("codex-notify", &serde_json::json!({"thread-id": "a", "last-assistant-message": "Живой уже прочитан."}));
+        at(&mut st, &env, Some("x"), 1);
+        at(&mut st, &env, Some("x"), 5);
+        assert_eq!(texts(&st), vec!["Кодекс готов."]);
+    }
+
+    #[test]
+    fn switch_back_continues_where_left() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        st.enqueue(Agent::Claude, "a", "Раз. Два.", Kind::Manual);
+        assert_eq!(st.shared.queue.lock().unwrap().pop(Instant::now()).unwrap().text, "Раз.");
+        at(&mut st, &env, Some("b"), 1);
+        at(&mut st, &env, Some("b"), 5);
+        assert!(texts(&st).is_empty());
+        at(&mut st, &env, Some("a"), 1);
+        at(&mut st, &env, Some("a"), 5);
+        assert_eq!(texts(&st), vec!["Два."]);
+    }
+
+    #[test]
+    fn prompt_submit_interrupts_only_own_speech() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("b"), 0);
+        st.shared.set_busy(Some("a"));
+        let g = || st.shared.generation.load(Ordering::SeqCst);
+        let g0 = g();
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "b"}));
+        assert_eq!(st.shared.generation.load(Ordering::SeqCst), g0);
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "a"}));
+        assert_eq!(st.shared.generation.load(Ordering::SeqCst), g0 + 1);
+    }
+
+    #[test]
+    fn urgent_from_any_session_plays() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        st.on_hook("notification", &serde_json::json!({"session_id": "b", "cwd": "/p/проект", "message": "Нужно разрешение"}));
+        assert_eq!(texts(&st), vec!["проект: Нужно разрешение."]);
     }
 }
