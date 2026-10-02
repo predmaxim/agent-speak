@@ -23,6 +23,7 @@ Item {
   }
 
   visible: false
+  onWantedChanged: if (!wanted) { up = false; speech = Model.OFFLINE }
 
   Loader {
     id: sockLoader
