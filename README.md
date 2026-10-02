@@ -19,7 +19,7 @@
 | Прочитать ход окна в фокусе / остановить | `agent-speak read` (хоткей Super+Alt+R) |
 | Авто ↔ вручную | `agent-speak mode` (Super+Alt+Shift+R) |
 | Пауза / продолжить (с начала предложения) | `agent-speak pause` (Super+Alt+P), правый клик по значку |
-| Стоп | `agent-speak stop` (диктовка voxtype тоже останавливает — у автора `Ctrl+Space`) |
+| Стоп | `agent-speak stop` (диктовка voxtype тоже останавливает — у автора `Alt+Space`) |
 | Настройки | окно плагина — левый клик по значку |
 
 Хоткеи задаются в Hyprland (у автора — `omarchy-dotfiles`, `hyprland.lua`).
