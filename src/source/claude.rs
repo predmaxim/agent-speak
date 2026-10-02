@@ -35,13 +35,20 @@ fn is_narration(signature: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn is_real_user(e: &Value) -> bool {
+/// Граница хода: сообщение человека или реплика, набранная пока агент работал (queued_command).
+fn is_turn_start(e: &Value) -> bool {
+    if e["type"] == "attachment" {
+        return e["attachment"]["type"] == "queued_command";
+    }
     if e["type"] != "user" || e["isMeta"] == true {
         return false;
     }
     match &e["message"]["content"] {
-        Value::String(_) => true,
-        Value::Array(a) => !a.iter().any(|c| c["type"] == "tool_result"),
+        Value::String(t) => !super::is_injected(t),
+        Value::Array(a) if !a.iter().any(|c| c["type"] == "tool_result") => {
+            let t: String = a.iter().filter_map(|c| c["text"].as_str()).collect();
+            !super::is_injected(&t)
+        }
         _ => false,
     }
 }
@@ -50,7 +57,7 @@ pub fn last_turn(content: &str) -> Vec<String> {
     let (mut cur, mut prev): (Vec<String>, Vec<String>) = (vec![], vec![]);
     for line in content.lines() {
         let Ok(e) = serde_json::from_str::<Value>(line) else { continue };
-        if is_real_user(&e) {
+        if is_turn_start(&e) {
             if !cur.is_empty() {
                 prev = std::mem::take(&mut cur);
             }
@@ -90,5 +97,38 @@ mod tests {
     #[test]
     fn garbage_line_ignored() {
         assert!(parse_line("{not json").is_empty());
+    }
+
+    fn user(content: &str) -> String {
+        serde_json::json!({"type":"user","message":{"content":content}}).to_string()
+    }
+    fn said(text: &str) -> String {
+        serde_json::json!({"type":"assistant","message":{"id":"m","content":[{"type":"text","text":text}]}}).to_string()
+    }
+    fn turn(lines: &[String]) -> Vec<String> {
+        last_turn(&lines.join("\n"))
+    }
+
+    #[test]
+    fn injected_user_entries_do_not_split_turn() {
+        for inj in ["<task-notification>x</task-notification>", "<system-reminder>x", "<local-command-stdout>", "<command-name>/x", "Caveat: foo"] {
+            let t = turn(&[user("вопрос"), said("раз"), user(inj), said("два")]);
+            assert_eq!(t, ["раз", "два"], "{inj}");
+        }
+        let blocks = serde_json::json!({"type":"user","message":{"content":[{"type":"text","text":" <task-notification>x"}]}}).to_string();
+        assert_eq!(turn(&[user("в"), said("раз"), blocks, said("два")]), ["раз", "два"]);
+    }
+
+    #[test]
+    fn queued_command_splits_turn() {
+        let q = r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"эй"}}"#.to_string();
+        assert_eq!(turn(&[user("в"), said("раз"), q, said("два")]), ["два"]);
+    }
+
+    #[test]
+    fn string_prompt_splits_and_meta_does_not() {
+        assert_eq!(turn(&[user("в"), said("раз"), user("ещё"), said("два")]), ["два"]);
+        let meta = r#"{"type":"user","isMeta":true,"message":{"content":"обычный текст"}}"#.to_string();
+        assert_eq!(turn(&[user("в"), said("раз"), meta, said("два")]), ["раз", "два"]);
     }
 }
