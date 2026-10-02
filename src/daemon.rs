@@ -489,11 +489,14 @@ impl State {
         }
         match kind {
             "user-prompt-submit" => {
-                self.shared.queue.lock().unwrap().clear_session(&session);
+                // новый ход ничего не обрывает: финалы, чтение и начатые сообщения дочитываются
+                let (dropped, kept) = self.shared.queue.lock().unwrap().new_turn(&session);
+                for t in dropped {
+                    eprintln!("agent-speak: статус пропущен: новое сообщение ({session}): {}", t.chars().take(40).collect::<String>());
+                }
                 self.dedup.forget(&session);
-                // обрываем только речь этой же сессии
-                if self.shared.busy.load(Ordering::SeqCst) && *self.shared.current.lock().unwrap() == session {
-                    self.shared.interrupt();
+                for t in kept {
+                    self.dedup.first_time(&session, &t); // оставшееся не доберётся повторно в следующем Stop
                 }
             }
             "notification" => {
@@ -914,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_submit_interrupts_only_own_speech() {
+    fn prompt_submit_never_interrupts() {
         let (mut st, env) = env_state();
         at(&mut st, &env, Some("b"), 0);
         st.shared.set_busy(Some("a"));
@@ -923,7 +926,7 @@ mod tests {
         st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "b"}));
         assert_eq!(st.shared.generation.load(Ordering::SeqCst), g0);
         st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "a"}));
-        assert_eq!(st.shared.generation.load(Ordering::SeqCst), g0 + 1);
+        assert_eq!(st.shared.generation.load(Ordering::SeqCst), g0);
     }
 
     #[test]
@@ -1046,12 +1049,12 @@ mod tests {
     }
 
     #[test]
-    fn stop_and_prompt_submit_end_pinned_read() {
+    fn stop_ends_pinned_read_prompt_submit_does_not() {
         let (mut st, _env) = read_then_switch("Раз. Два.");
         st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "b"}));
         assert_eq!(pop1(&st), "Раз.");
         st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "a"}));
-        assert!(texts(&st).is_empty());
+        assert_eq!(texts(&st), vec!["Два."]);
 
         let (mut st, _env) = read_then_switch("Раз. Два.");
         st.on_msg(Msg::Read); // повторный read — стоп
@@ -1060,5 +1063,31 @@ mod tests {
         let (mut st, _env) = read_then_switch("Раз. Два.");
         st.on_msg(Msg::Stop);
         assert!(texts(&st).is_empty());
+    }
+
+    #[test]
+    fn prompt_submit_keeps_playing_final_and_next_stop_adds_only_new() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        st.on_hook("stop", &serde_json::json!({"session_id": "a", "last_assistant_message": "Раз.\n\nДва."}));
+        assert_eq!(pop1(&st), "Раз.");
+        st.shared.set_busy(Some("a"));
+        let g0 = st.shared.generation.load(Ordering::SeqCst);
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "a"}));
+        assert_eq!(st.shared.generation.load(Ordering::SeqCst), g0);
+        md_id(&mut st, "a", "n1", "Новый статус. "); // за финалом — выброшен
+        st.on_hook("stop", &serde_json::json!({"session_id": "a", "last_assistant_message": "Два.\n\nНовый ответ."}));
+        assert_eq!(texts(&st), vec!["Два.", "Новый ответ."]);
+    }
+
+    #[test]
+    fn prompt_submit_drops_unstarted_statuses_finishes_started() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        md_id(&mut st, "a", "m1", "Раз. Два. ");
+        md_id(&mut st, "a", "m2", "Три. ");
+        assert_eq!(pop1(&st), "Раз.");
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "a"}));
+        assert_eq!(texts(&st), vec!["Два."]);
     }
 }

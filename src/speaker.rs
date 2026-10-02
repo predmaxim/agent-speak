@@ -62,7 +62,8 @@ impl Shared {
         self.cv.notify_all();
     }
 
-    /// Оборвать текущую фразу (сессионные прерывания).
+    /// Оборвать текущую фразу (в тестах — разбудить ожидание).
+    #[cfg(test)]
     pub fn interrupt(&self) {
         self.bump(&mut self.queue.lock().unwrap(), |_| {});
     }
