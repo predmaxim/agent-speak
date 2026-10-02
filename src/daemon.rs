@@ -262,6 +262,8 @@ impl State {
             let _ = self.learn.send((agent.clone(), w));
         }
         let n = sentences.len();
+        // образец — один элемент: каждый push Preview вытесняет прежний
+        let sentences = if kind == Kind::Preview { vec![sentences.join(" ")] } else { sentences };
         let mut q = self.shared.queue.lock().unwrap();
         for text in sentences {
             q.push(Item { session: session.into(), text, kind: kind.clone(), born: Instant::now() });
@@ -303,7 +305,12 @@ impl State {
                 }
             }
             Msg::Say { text } => {
-                self.enqueue(Agent::Claude, "say", &text, Kind::Manual);
+                // говорит и не на паузе — смену голоса слышно в самом чтении, образец не нужен
+                if self.shared.busy.load(Ordering::SeqCst) && !self.shared.queue.lock().unwrap().paused() {
+                    eprintln!("agent-speak: say: образец пропущен, идёт чтение");
+                } else {
+                    self.enqueue(Agent::Claude, "say", &text, Kind::Preview);
+                }
             }
             Msg::Subscribe => {} // приходит как Event::Subscribe
         }
@@ -551,13 +558,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    #[test]
-    fn say_queues_manual_reading() {
-        let mut st = test_state();
+    fn say(st: &mut State) {
         st.on_msg(Msg::Say { text: "Так звучит этот голос.".into() });
+    }
+
+    #[test]
+    fn say_queues_preview_when_idle() {
+        let mut st = test_state();
+        say(&mut st);
         let it = st.shared.queue.lock().unwrap().pop(Instant::now()).unwrap();
-        assert_eq!(it.kind, Kind::Manual);
+        assert_eq!(it.kind, Kind::Preview);
         assert!(it.text.contains("голос"), "{}", it.text);
+    }
+
+    #[test]
+    fn say_ignored_while_speaking_not_paused() {
+        let mut st = test_state();
+        st.shared.set_busy(Some("s"));
+        say(&mut st);
+        assert!(st.shared.queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn say_queued_while_paused_and_plays_on_pause() {
+        let mut st = test_state();
+        st.shared.set_busy(Some("s"));
+        st.shared.pause();
+        say(&mut st);
+        say(&mut st); // второй образец вытесняет первый
+        let mut q = st.shared.queue.lock().unwrap();
+        assert_eq!(q.pop(Instant::now()).unwrap().kind, Kind::Preview);
+        assert!(q.pop(Instant::now()).is_none() && q.paused());
     }
 
     #[test]
