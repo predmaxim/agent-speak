@@ -11,6 +11,9 @@ ln -sfn "$PWD/target/release/agent-speak" ~/.local/bin/agent-speak
 ln -sfn "$PWD/python/silero_tts.py" "$DATA/silero_tts.py"
 [[ -f $DATA/terms.tsv ]] || cp data/terms.tsv "$DATA/terms.tsv"
 ln -sfn "$PWD/systemd/agent-speakd.service" ~/.config/systemd/user/agent-speakd.service
+# Плагин панели Omarchy; значок в группе индикаторов копирует хук patch_indicators (omarchy-dotfiles)
+mkdir -p ~/.config/omarchy/plugins
+ln -sfn "$PWD/plugin" ~/.config/omarchy/plugins/predmaxim.agent-speak
 
 # Silero: venv и модель, если ещё нет
 if ! "$DATA/venv/bin/python" -c 'import torch, numpy, scipy' 2>/dev/null; then
