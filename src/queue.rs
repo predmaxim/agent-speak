@@ -99,10 +99,15 @@ impl Queue {
     }
 
     /// Смена активной сессии: не начатые чужие статусы выбрасываются, остальное ждёт возврата.
-    pub fn set_active(&mut self, session: &str) {
+    /// Возвращает выброшенные.
+    pub fn set_active(&mut self, session: &str) -> Vec<Item> {
         self.active = session.to_string();
         let started = &self.started;
-        self.items.retain(|i| i.kind != Kind::Status || i.session == session || started.contains(&(i.session.clone(), i.msg.clone())));
+        let (keep, dropped): (Vec<Item>, Vec<Item>) = std::mem::take(&mut self.items)
+            .into_iter()
+            .partition(|i| i.kind != Kind::Status || i.session == session || started.contains(&(i.session.clone(), i.msg.clone())));
+        self.items = keep.into();
+        dropped
     }
 
     /// Есть ли что играть сейчас (без учёта паузы).
