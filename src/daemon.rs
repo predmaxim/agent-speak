@@ -348,6 +348,7 @@ impl State {
         for w in unknown {
             let _ = self.learn.send((agent.clone(), w));
         }
+        let all = sentences.clone();
         let sentences: Vec<String> = if only_new { sentences.into_iter().filter(|t| !self.dedup.seen(session, t)).collect() } else { sentences };
         // статусы только вживую: не для активной сессии или за финалом — опоздали; финал доберёт
         if kind == Kind::Status && (!self.is_active(session) || self.final_pending(session)) {
@@ -364,9 +365,15 @@ impl State {
         let n = sentences.len();
         // образец — один элемент: каждый push Preview вытесняет прежний
         let sentences = if kind == Kind::Preview && !sentences.is_empty() { vec![sentences.join(" ")] } else { sentences };
+        let item = |text: String| Item { session: session.into(), text, kind: kind.clone(), born: Instant::now(), msg: msg.into() };
         let mut q = self.shared.queue.lock().unwrap();
-        for text in sentences {
-            q.push(Item { session: session.into(), text, kind: kind.clone(), born: Instant::now(), msg: msg.into() });
+        if only_new && kind == Kind::Manual {
+            // добор финала — на свои места среди ещё не прозвучавших фраз хода
+            q.fill(all.into_iter().map(|t| (sentences.contains(&t), item(t))).collect());
+        } else {
+            for text in sentences {
+                q.push(item(text));
+            }
         }
         drop(q);
         self.shared.cv.notify_all();
@@ -381,6 +388,7 @@ impl State {
         } else {
             self.enqueue(agent, session, text, Kind::Manual);
         }
+        self.dedup.forget(session); // ход закончен: те же фразы в следующем звучат снова
     }
 
     fn stop(&mut self) {
@@ -972,5 +980,30 @@ mod tests {
         assert_eq!(texts(&st), vec!["Раз.", "Два."]);
         st.on_hook("stop", &serde_json::json!({"session_id": "a", "last_assistant_message": "Раз. Два."}));
         assert!(texts(&st).is_empty());
+    }
+
+    #[test]
+    fn gap_fill_plays_before_queued_rest_of_turn() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        md_id(&mut st, "b", "m1", "Раз. ");
+        at(&mut st, &env, Some("b"), 1);
+        at(&mut st, &env, Some("b"), 5);
+        md_id(&mut st, "b", "m2", "Два. Три. ");
+        assert_eq!(pop1(&st), "Два.");
+        st.on_hook("stop", &serde_json::json!({"session_id": "b", "last_assistant_message": "Раз.\n\nДва.\n\nТри.\n\nЧетыре."}));
+        assert_eq!(texts(&st), vec!["Раз.", "Три.", "Четыре."]);
+    }
+
+    #[test]
+    fn same_sentence_spoken_again_next_codex_turn() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("x"), 0);
+        st.enqueue_new(Agent::Codex, "x", "Готово.", Kind::Status);
+        assert_eq!(texts(&st), vec!["Готово."]);
+        st.on_hook("codex-notify", &serde_json::json!({"thread-id": "x", "last-assistant-message": "Готово."}));
+        assert!(texts(&st).is_empty());
+        st.enqueue_new(Agent::Codex, "x", "Готово.", Kind::Status);
+        assert_eq!(texts(&st), vec!["Готово."]);
     }
 }
