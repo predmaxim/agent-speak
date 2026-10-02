@@ -3,7 +3,7 @@
 
 use crate::audio::Player;
 use crate::queue::Queue;
-use crate::queue::Item;
+use crate::queue::{Item, Kind};
 use crate::tts::Tts;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -106,7 +106,8 @@ const RETRY: Duration = Duration::from_secs(10);
 
 /// Вернуть фразу в голову очереди, если её не отменили (стоп) — пауза не отменяет.
 fn requeue(shared: &Shared, q: &mut Queue, item: Item, my_gen: u64) {
-    if shared.generation.load(Ordering::SeqCst) == my_gen || q.paused() {
+    // образец не возвращается: на паузе pop отдал бы его снова
+    if item.kind != Kind::Preview && (shared.generation.load(Ordering::SeqCst) == my_gen || q.paused()) {
         q.push_front(item);
     }
 }
@@ -130,7 +131,7 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                         let (it, _, _) = tail.take().unwrap();
                         if changed {
                             player.reset();
-                            if q.paused() {
+                            if q.paused() && it.kind != Kind::Preview {
                                 q.push_front(it); // после паузы — с начала предложения
                             }
                         }
@@ -167,7 +168,7 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
             if shared.generation.load(Ordering::SeqCst) != my_gen {
                 player.reset();
                 let mut q = shared.queue.lock().unwrap();
-                if q.paused() {
+                if q.paused() && item.kind != Kind::Preview {
                     q.push_front(item.clone()); // после паузы — с начала предложения
                 }
                 done = false;
@@ -194,7 +195,6 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::queue::Kind;
 
     struct FakeSynth(Arc<Mutex<u32>>); // сколько первых вызовов провалить
     impl Synth for FakeSynth {
@@ -307,6 +307,19 @@ mod tests {
         wait(|| count(&ev, "reset") == 1);
         shared.resume();
         wait(|| count(&ev, "write") == 4);
+    }
+
+    #[test]
+    fn preview_not_replayed_after_pause() {
+        let (shared, ev) = start(0, 0);
+        shared.queue.lock().unwrap().push(Item { session: "s".into(), text: "образец".into(), kind: Kind::Preview, born: Instant::now() });
+        shared.cv.notify_all();
+        wait(|| count(&ev, "write") == 2);
+        shared.pause();
+        wait(|| count(&ev, "reset") == 1);
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(count(&ev, "write"), 2);
+        assert!(shared.queue.lock().unwrap().is_empty());
     }
 
     #[test]
