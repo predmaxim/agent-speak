@@ -8,6 +8,7 @@ pub enum Kind {
     Status,
     Urgent,
     Manual,
+    Preview, // образец голоса: один в очереди, впереди всех, играет и на паузе
 }
 
 #[derive(Clone, Debug)]
@@ -38,7 +39,10 @@ impl Queue {
     /// возраст = (now - paused_total) - born = now - born - пауза_после_постановки.
     pub fn push(&mut self, mut item: Item) {
         item.born = item.born.checked_sub(self.paused_total).unwrap_or(item.born);
-        if item.kind == Kind::Urgent {
+        if item.kind == Kind::Preview {
+            self.items.retain(|i| i.kind != Kind::Preview);
+            self.items.push_front(item);
+        } else if item.kind == Kind::Urgent {
             let pos = self.items.iter().take_while(|i| i.kind == Kind::Urgent).count();
             self.items.insert(pos, item);
         } else {
@@ -46,13 +50,15 @@ impl Queue {
         }
     }
 
+    /// Прерванная фраза встаёт за образцом голоса: образец играет первым (на паузе — иначе он застрянет).
     pub fn push_front(&mut self, item: Item) {
-        self.items.push_front(item);
+        let pos = self.items.iter().take_while(|i| i.kind == Kind::Preview).count();
+        self.items.insert(pos, item);
     }
 
     pub fn pop(&mut self, now: Instant) -> Option<Item> {
         if self.paused_at.is_some() {
-            return None;
+            return if self.items.front().is_some_and(|i| i.kind == Kind::Preview) { self.items.pop_front() } else { None };
         }
         let eff_now = now.checked_sub(self.paused_total).unwrap_or(now);
         while let Some(item) = self.items.pop_front() {
@@ -141,5 +147,45 @@ mod tests {
         q.push(Item { session: "b".into(), text: "2".into(), kind: Kind::Status, born: t0 });
         q.clear_session("a");
         assert_eq!(q.pop(t0).unwrap().text, "2");
+    }
+
+    #[test]
+    fn preview_supersedes_previous_and_goes_first() {
+        let t0 = Instant::now();
+        let mut q = Queue::new(Duration::from_secs(30));
+        q.push(it("m", Kind::Manual, t0));
+        q.push(it("p1", Kind::Preview, t0));
+        q.push(it("u", Kind::Urgent, t0));
+        q.push(it("p2", Kind::Preview, t0));
+        let got: Vec<String> = std::iter::from_fn(|| q.pop(t0 + Duration::from_secs(999))).map(|i| i.text).collect();
+        assert_eq!(got, vec!["p2", "u", "m"]);
+    }
+
+    #[test]
+    fn paused_pop_returns_only_front_preview() {
+        let t0 = Instant::now();
+        let mut q = Queue::new(Duration::from_secs(30));
+        q.push(it("m", Kind::Manual, t0));
+        q.pause(t0);
+        assert!(q.pop(t0).is_none());
+        q.push(it("p", Kind::Preview, t0));
+        assert_eq!(q.pop(t0).unwrap().text, "p");
+        assert!(q.paused());
+        assert!(q.pop(t0).is_none());
+    }
+
+    #[test]
+    fn interrupted_item_stays_behind_preview_and_next_after_it() {
+        let t0 = Instant::now();
+        let mut q = Queue::new(Duration::from_secs(30));
+        q.push(it("rest", Kind::Manual, t0));
+        q.pause(t0);
+        q.push(it("p", Kind::Preview, t0)); // образец пришёл раньше, чем speaker вернул фразу
+        q.push_front(it("interrupted", Kind::Manual, t0));
+        assert_eq!(q.pop(t0).unwrap().text, "p");
+        assert!(q.pop(t0).is_none());
+        q.resume(t0);
+        assert_eq!(q.pop(t0).unwrap().text, "interrupted");
+        assert_eq!(q.pop(t0).unwrap().text, "rest");
     }
 }
