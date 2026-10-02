@@ -15,6 +15,10 @@ pub enum Msg {
     Mode,
     /// Соединение остаётся открытым: сервис пишет строку состояния сразу и при каждом изменении.
     Subscribe,
+    /// Настройка из плагина: сервис проверяет, сохраняет config.toml и рассылает состояние.
+    Set { key: String, value: serde_json::Value },
+    /// Прочитать текст как ручное чтение (образец голоса).
+    Say { text: String },
 }
 
 pub fn socket_path() -> PathBuf {
@@ -38,6 +42,9 @@ mod tests {
         assert!(matches!(serde_json::from_str::<Msg>(&s).unwrap(), Msg::Hook { .. }));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"pause\"}").unwrap(), Msg::Pause));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"subscribe\"}").unwrap(), Msg::Subscribe));
+        let set = serde_json::from_str::<Msg>("{\"cmd\":\"set\",\"key\":\"read_intermediate\",\"value\":false}").unwrap();
+        assert!(matches!(set, Msg::Set { ref key, ref value } if key == "read_intermediate" && *value == serde_json::json!(false)));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"say\",\"text\":\"т\"}").unwrap(), Msg::Say { .. }));
     }
 
     #[test]
