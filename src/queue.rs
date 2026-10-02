@@ -98,6 +98,23 @@ impl Queue {
         Some(item)
     }
 
+    /// Финал хода по порядку: (true, фраза) — вставить; (false, фраза) — уже в очереди или прозвучала,
+    /// служит ориентиром. Вставка — после предыдущего ориентира, до него — перед первой фразой сессии.
+    pub fn fill(&mut self, order: Vec<(bool, Item)>) {
+        let mut cursor: Option<usize> = None;
+        for (new, mut item) in order {
+            item.born = item.born.checked_sub(self.paused_total).unwrap_or(item.born); // как в push
+            let mine = |i: &Item| i.session == item.session && !matches!(i.kind, Kind::Urgent | Kind::Preview);
+            if new {
+                let pos = cursor.unwrap_or_else(|| self.items.iter().position(mine).unwrap_or(self.items.len()));
+                self.items.insert(pos, item);
+                cursor = Some(pos + 1);
+            } else if let Some(p) = self.items.iter().position(|i| mine(i) && i.text == item.text) {
+                cursor = Some(p + 1);
+            }
+        }
+    }
+
     /// Смена активной сессии: не начатые чужие статусы выбрасываются, остальное ждёт возврата.
     /// Возвращает выброшенные.
     pub fn set_active(&mut self, session: &str) -> Vec<Item> {
