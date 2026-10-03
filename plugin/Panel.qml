@@ -44,20 +44,28 @@ Panel {
     root.curIdx = idx
   }
 
+  // curSec -1 is the Pause/Stop row above the chips (shown while the daemon runs).
   function moveCursor(dx, dy) {
     if (!root.speech.running || root.sections.length === 0) return
     if (!root.cursorActive) { root.setCursor(0, 0); return }
-    var sec = Math.max(0, Math.min(root.sections.length - 1, root.curSec + dy))
-    var n = root.rowCount(sec)
+    var sec = Math.max(-1, Math.min(root.sections.length - 1, root.curSec + dy))
+    var n = sec < 0 ? 2 : root.rowCount(sec)
     root.setCursor(sec, Math.max(0, Math.min(n - 1, root.curIdx + dx)))
   }
 
   function activate() {
     if (!root.cursorActive || !root.speech.running) return
+    if (root.curSec < 0) {
+      if (Model.busy(root.speech)) link.send(Model.cmd(root.curIdx === 0 ? "pause" : "stop"))
+      return
+    }
     var sec = root.sections[root.curSec]
     var opt = sec ? sec.options[root.curIdx] : null
     if (opt) root.choose(sec.key, opt.value, sec.sample)
   }
+
+  // The rows vanish with the daemon: drop the cursor with them.
+  onSpeechChanged: if (!speech.running) cursorActive = false
 
   function back() { root.close() }
 
@@ -140,6 +148,7 @@ Panel {
             enabled: Model.busy(root.speech)
             opacity: enabled ? 1 : 0.4
             bordered: true
+            hasCursor: root.cursorActive && root.curSec === -1 && root.curIdx === 0
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
             onClicked: link.send(Model.cmd("pause"))
@@ -150,6 +159,7 @@ Panel {
             enabled: Model.busy(root.speech)
             opacity: enabled ? 1 : 0.4
             bordered: true
+            hasCursor: root.cursorActive && root.curSec === -1 && root.curIdx === 1
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
             onClicked: link.send(Model.cmd("stop"))
