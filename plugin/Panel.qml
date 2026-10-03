@@ -31,7 +31,45 @@ Panel {
   implicitWidth: 0
   implicitHeight: 0
 
-  onOpenedChanged: if (opened) Qt.callLater(function() { escCatcher.forceActiveFocus() })
+  // One cursor for mouse and keyboard: section `curSec`, chip `curIdx`.
+  property bool cursorActive: false
+  property int curSec: 0
+  property int curIdx: 0
+
+  function rowCount(sec) { return root.sections[sec] ? root.sections[sec].options.length : 0 }
+
+  function setCursor(sec, idx) {
+    root.cursorActive = true
+    root.curSec = sec
+    root.curIdx = idx
+  }
+
+  function moveCursor(dx, dy) {
+    if (!root.speech.running || root.sections.length === 0) return
+    if (!root.cursorActive) { root.setCursor(0, 0); return }
+    var sec = Math.max(0, Math.min(root.sections.length - 1, root.curSec + dy))
+    var n = root.rowCount(sec)
+    root.setCursor(sec, Math.max(0, Math.min(n - 1, root.curIdx + dx)))
+  }
+
+  function activate() {
+    if (!root.cursorActive || !root.speech.running) return
+    var sec = root.sections[root.curSec]
+    var opt = sec ? sec.options[root.curIdx] : null
+    if (opt) root.choose(sec.key, opt.value, sec.sample)
+  }
+
+  function back() { root.close() }
+
+  onOpenedChanged: {
+    if (opened) {
+      cursorActive = false
+      moveGate.reset()
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    }
+  }
+
+  PointerMoveGate { id: moveGate; referenceItem: card }
 
   // Own subscription while the window is open.
   Link { id: link; wanted: root.opened }
@@ -51,10 +89,12 @@ Panel {
 
     MouseArea { anchors.fill: parent; onClicked: root.close() }
 
-    Item {
-      id: escCatcher
-      focus: true
-      Keys.onEscapePressed: root.close()
+    PanelKeyCatcher {
+      id: keyCatcher
+      anchors.fill: parent
+      onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
+      onActivateRequested: root.activate()
+      onCloseRequested: root.back()
     }
 
     BorderSurface {
@@ -149,6 +189,7 @@ Panel {
           Column {
             id: group
             required property var modelData
+            required property int index
             width: column.width
             spacing: Style.space(6)
 
@@ -168,10 +209,11 @@ Panel {
                 CursorSurface {
                   id: chip
                   required property var modelData
+                  required property int index
                   width: chipLabel.implicitWidth + Style.spacing.rowPaddingX * 2
                   height: chipLabel.implicitHeight + Style.spacing.xl
                   current: root.speech[group.modelData.key] === chip.modelData.value
-                  hasCursor: chipMouse.containsMouse
+                  hasCursor: root.cursorActive && root.curSec === group.index && root.curIdx === chip.index
                   foreground: root.bar.foreground
 
                   Text {
@@ -190,6 +232,9 @@ Panel {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
+                    onPositionChanged: function(mouse) {
+                      if (moveGate.moved(chipMouse, mouse)) root.setCursor(group.index, chip.index)
+                    }
                     onClicked: root.choose(group.modelData.key, chip.modelData.value, group.modelData.sample)
                   }
                 }
