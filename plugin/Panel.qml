@@ -1,12 +1,13 @@
 import QtQuick
 import Quickshell
+import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "."
 import "Model.js" as Model
 import "I18n.js" as I18n
 
-// predmaxim.agent-speak: the settings panel of agent-speakd. The bar icon is
+// predmaxim.agent-speak: the settings window of agent-speakd. The bar icon is
 // Indicator.qml in the predmaxim.indicators clone; this widget stays in the
 // layout hidden, for the IPC toggle. Settings live in the daemon's
 // config.toml: a choice goes out as `set`, and the window lights what the
@@ -70,47 +71,31 @@ Panel {
 
   onOpenedChanged: {
     if (opened) {
-      anchor = findAnchor()
       cursorActive = false
       moveGate.reset()
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
     }
   }
 
-  PointerMoveGate { id: moveGate; referenceItem: column }
+  PointerMoveGate { id: moveGate; referenceItem: card }
 
   // Own subscription while the window is open.
   Link { id: link; wanted: root.opened }
 
-  // The panel hangs off the icon in the indicator group (Indicator.qml, id
-  // "AgentSpeak" there); while the group is collapsed the icon has no width,
-  // so it hangs off the group itself.
-  property Item anchor: root
-  // The plugin bar API only lists our own widgets, so walk the bar window
-  // we live in (same screen) for the icon, else the group.
-  function find(item, test) {
-    if (!item) return null
-    if (test(item)) return item
-    for (var i = 0; i < item.children.length; i++) {
-      var hit = root.find(item.children[i], test)
-      if (hit) return hit
-    }
-    return null
-  }
-  function findAnchor() {
-    var top = root.QsWindow.window ? root.QsWindow.window.contentItem : null
-    var group = root.find(top, function(it) { return "revealInactiveIndicators" in it && "indicatorEntries" in it })
-    return root.find(group, function(it) { return it.moduleName === "AgentSpeak" && it.visible && it.width > 0 && it.opacity > 0 }) || group || root
-  }
+  // A modal in the middle of the screen, like predmaxim.todo: a click on the
+  // dimmed screen or Esc closes it.
+  PanelWindow {
+    id: modal
+    screen: root.QsWindow.window ? root.QsWindow.window.screen : null
+    visible: root.opened
+    color: Color.menu.scrim
+    exclusionMode: ExclusionMode.Ignore
+    anchors { top: true; bottom: true; left: true; right: true }
+    WlrLayershell.namespace: "predmaxim-agent-speak"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: visible ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
 
-  KeyboardPanel {
-    id: panel
-    anchorItem: root.anchor
-    owner: root
-    bar: root.bar
-    open: root.opened
-    focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(480))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight)
+    MouseArea { anchors.fill: parent; onClicked: root.close() }
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -118,13 +103,27 @@ Panel {
       onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
       onActivateRequested: root.activate()
       onCloseRequested: root.back()
-      onTabRequested: function(direction) { root.switchPanel(direction) }
+    }
+
+    BorderSurface {
+      id: card
+      anchors.centerIn: parent
+      width: Math.min(Style.space(480), modal.width - Style.space(80))
+      height: Math.min(column.implicitHeight + card.contentTopInset + card.contentBottomInset, modal.height * 0.85)
+      color: Color.popups.background
+      borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
+      padding: Style.spacing.panelPadding
+      radius: Style.cornerRadius
+
+      MouseArea { anchors.fill: parent }   // clicks on the card stay on it
 
       Column {
         id: column
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.top: parent.top
+        anchors.fill: parent
+        anchors.topMargin: card.contentTopInset
+        anchors.rightMargin: card.contentRightInset
+        anchors.bottomMargin: card.contentBottomInset
+        anchors.leftMargin: card.contentLeftInset
         spacing: Style.space(14)
 
         PanelHero {
