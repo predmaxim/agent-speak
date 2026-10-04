@@ -8,8 +8,9 @@ import "@PLUGIN_DIR@/I18n.js" as I18n
 
 // predmaxim.agent-speak among the bar's indicators: lit while speaking, paused
 // or in auto mode, otherwise only when the group is hovered. Left click
-// toggles the settings window (the hidden widget, Panel.qml); right click
-// pauses or resumes, and only while there is something to pause.
+// toggles the settings panel (the hidden widget, Panel.qml, anchors it here);
+// right click pauses or resumes while there is something to pause, otherwise
+// acts like left click.
 // keep-custom-widgets.sh copies this file into the predmaxim.indicators clone
 // as indicators/AgentSpeak.qml and fills in @PLUGIN_DIR@.
 BarIndicator {
@@ -25,9 +26,9 @@ BarIndicator {
   inactiveTooltipText: root.tr(look.tip, look.arg)
 
   onPressed: function(button) {
-    if (button === Qt.RightButton) {
-      if (Model.busy(link.speech)) link.send(Model.cmd("pause"))
-    } else if (button === Qt.LeftButton) {
+    if (button === Qt.RightButton && Model.busy(link.speech)) {
+      link.send(Model.cmd("pause"))
+    } else if (button === Qt.LeftButton || button === Qt.RightButton) {
       Quickshell.execDetached(["omarchy-shell", "predmaxim.agent-speak", "toggle"])
     }
   }
