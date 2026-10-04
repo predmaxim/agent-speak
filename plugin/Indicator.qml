@@ -8,7 +8,7 @@ import "@PLUGIN_DIR@/I18n.js" as I18n
 
 // predmaxim.agent-speak among the bar's indicators: lit while speaking, paused
 // or in auto mode, otherwise only when the group is hovered. Left click
-// toggles the settings panel (the hidden widget, Panel.qml, anchors it here);
+// toggles the settings window (the hidden widget, Panel.qml);
 // right click pauses or resumes while there is something to pause, otherwise
 // acts like left click.
 // keep-custom-widgets.sh copies this file into the predmaxim.indicators clone
