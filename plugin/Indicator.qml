@@ -19,6 +19,8 @@ BarIndicator {
   readonly property var tr: I18n.translator(I18n.textLanguage(function(name) { return Quickshell.env(name) }))
   readonly property var look: Model.view(link.speech)
 
+  // The speaker glyph is drawn small at the group's caption size, like the microphone.
+  fontSize: Style.font.body
   active: look.lit
   activeText: look.icon
   inactiveText: look.icon
