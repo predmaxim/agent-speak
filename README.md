@@ -16,9 +16,9 @@
 
 | Что | Как |
 |---|---|
-| Прочитать ход окна в фокусе / остановить | `agent-speak read` (хоткей Super+Alt+R) |
+| Прочитать ход окна в фокусе / остановить | `agent-speak read` (хоткей Super+Shift+Alt+S) |
 | Авто ↔ вручную | `agent-speak mode` (Super+Alt+Shift+R) |
-| Пауза / продолжить (с начала предложения) | `agent-speak pause` (Super+Alt+P), правый клик по значку |
+| Пауза / продолжить (с начала предложения) | `agent-speak pause` (Super+Ctrl+Shift+Alt+S), правый клик по значку |
 | Стоп | `agent-speak stop` (диктовка voxtype тоже останавливает — у автора `Alt+Space`) |
 | Настройки | окно плагина — левый клик по значку |
 
