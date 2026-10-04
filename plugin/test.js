@@ -23,7 +23,7 @@ assert.deepStrictEqual(v(st), [M.ICONS.speaking, true, "Читаю: agent-speak"
 assert.deepStrictEqual(v(at({ project: "" })), [M.ICONS.speaking, true, "Читаю…"])
 assert.deepStrictEqual(v(at({ speaking: false, paused: true })), [M.ICONS.paused, true, "Пауза — правый клик продолжит"])
 assert.deepStrictEqual(v(at({ speaking: false })), [M.ICONS.idle, true, "Авто: агент в фокусе читается сам"])
-assert.deepStrictEqual(v(at({ speaking: false, mode: "manual" })), [M.ICONS.idle, false, "Вручную: Super+Alt+R"])
+assert.deepStrictEqual(v(at({ speaking: false, mode: "manual" })), [M.ICONS.idle, false, "Вручную: Super+Shift+Alt+S"])
 assert.deepStrictEqual(v(M.OFFLINE), [M.ICONS.off, false, "Сервис озвучки не запущен"])
 assert.deepStrictEqual(v(null), [M.ICONS.off, false, "Сервис озвучки не запущен"])
 assert.strictEqual(new Set(Object.values(M.ICONS)).size, 4)

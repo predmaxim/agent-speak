@@ -31,7 +31,7 @@ function view(st) {
     ? { icon: ICONS.speaking, lit: true, tip: "Reading: %1", arg: st.project }
     : { icon: ICONS.speaking, lit: true, tip: "Reading…", arg: "" }
   if (st.mode === "auto") return { icon: ICONS.idle, lit: true, tip: "Auto: the focused agent is read aloud", arg: "" }
-  return { icon: ICONS.idle, lit: false, tip: "Manual: Super+Alt+R", arg: "" }
+  return { icon: ICONS.idle, lit: false, tip: "Manual: Super+Shift+Alt+S", arg: "" }
 }
 
 // Something to pause, resume or stop.

@@ -9,7 +9,7 @@ var TABLES = {
     "Reading: %1": "Читаю: %1", "Reading…": "Читаю…",
     "Paused — right click resumes": "Пауза — правый клик продолжит",
     "Auto: the focused agent is read aloud": "Авто: агент в фокусе читается сам",
-    "Manual: Super+Alt+R": "Вручную: Super+Alt+R",
+    "Manual: Super+Shift+Alt+S": "Вручную: Super+Shift+Alt+S",
     "Speech service is not running": "Сервис озвучки не запущен",
     "Pause": "Пауза", "Resume": "Продолжить", "Stop": "Стоп",
     "MODE": "РЕЖИМ", "Auto": "Авто", "Manual": "Вручную",
