@@ -56,8 +56,6 @@ function say(text) {
 function sections(tr) {
   var voices = ["xenia", "baya", "kseniya", "aidar", "eugene"]
   return [
-    { key: "mode", caption: tr("MODE"), sample: false,
-      options: [{ value: "auto", label: tr("Auto") }, { value: "manual", label: tr("Manual") }] },
     { key: "read_intermediate", caption: tr("INTERMEDIATE STATUSES"), sample: false,
       options: [{ value: true, label: tr("Read") }, { value: false, label: tr("Final answer only") }] },
     { key: "speaker", caption: tr("VOICE"), sample: true,

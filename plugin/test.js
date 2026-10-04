@@ -47,15 +47,14 @@ assert.strictEqual(M.say(M.SAMPLE), '{"cmd":"say","text":"Так звучит э
 
 // Window sections: keys, values the daemon accepts, value types as in the state line
 const secs = M.sections(ru)
-assert.deepStrictEqual(secs.map(s => s.key), ["mode", "read_intermediate", "speaker", "rate"])
-assert.deepStrictEqual(secs.map(s => s.sample), [false, false, true, true])
-assert.deepStrictEqual(secs.map(s => s.caption), ["РЕЖИМ", "ПРОМЕЖУТОЧНЫЕ СТАТУСЫ", "ГОЛОС", "СКОРОСТЬ"])
-assert.deepStrictEqual(secs[0].options, [{ value: "auto", label: "Авто" }, { value: "manual", label: "Вручную" }])
-assert.deepStrictEqual(secs[1].options, [{ value: true, label: "Читать" }, { value: false, label: "Только итог" }])
-assert.deepStrictEqual(secs[2].options.map(o => o.value), ["xenia", "baya", "kseniya", "aidar", "eugene"])
-assert.deepStrictEqual(secs[2].options.map(o => o.label), ["Xenia", "Baya", "Kseniya", "Aidar", "Eugene"])
-assert.deepStrictEqual(secs[3].options.map(o => o.value), ["x-slow", "slow", "medium", "fast", "x-fast"])
-assert.deepStrictEqual(secs[3].options.map(o => o.label), ["Очень медленно", "Медленно", "Обычно", "Быстро", "Очень быстро"])
+assert.deepStrictEqual(secs.map(s => s.key), ["read_intermediate", "speaker", "rate"])
+assert.deepStrictEqual(secs.map(s => s.sample), [false, true, true])
+assert.deepStrictEqual(secs.map(s => s.caption), ["ПРОМЕЖУТОЧНЫЕ СТАТУСЫ", "ГОЛОС", "СКОРОСТЬ"])
+assert.deepStrictEqual(secs[0].options, [{ value: true, label: "Читать" }, { value: false, label: "Только итог" }])
+assert.deepStrictEqual(secs[1].options.map(o => o.value), ["xenia", "baya", "kseniya", "aidar", "eugene"])
+assert.deepStrictEqual(secs[1].options.map(o => o.label), ["Xenia", "Baya", "Kseniya", "Aidar", "Eugene"])
+assert.deepStrictEqual(secs[2].options.map(o => o.value), ["x-slow", "slow", "medium", "fast", "x-fast"])
+assert.deepStrictEqual(secs[2].options.map(o => o.label), ["Очень медленно", "Медленно", "Обычно", "Быстро", "Очень быстро"])
 for (const s of secs) for (const o of s.options) assert.strictEqual(typeof o.value, typeof st[s.key], s.key)
 
 // Every tr("…") has a Russian line
