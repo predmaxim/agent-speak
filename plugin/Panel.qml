@@ -44,19 +44,20 @@ Panel {
     root.curIdx = idx
   }
 
-  // curSec -1 is the Pause/Stop row above the chips (shown while the daemon runs).
+  // curSec -1 is the header: Pause, Stop, the Auto switch (while the daemon runs).
   function moveCursor(dx, dy) {
     if (!root.speech.running || root.sections.length === 0) return
     if (!root.cursorActive) { root.setCursor(0, 0); return }
     var sec = Math.max(-1, Math.min(root.sections.length - 1, root.curSec + dy))
-    var n = sec < 0 ? 2 : root.rowCount(sec)
+    var n = sec < 0 ? 3 : root.rowCount(sec)
     root.setCursor(sec, Math.max(0, Math.min(n - 1, root.curIdx + dx)))
   }
 
   function activate() {
     if (!root.cursorActive || !root.speech.running) return
     if (root.curSec < 0) {
-      if (Model.busy(root.speech)) link.send(Model.cmd(root.curIdx === 0 ? "pause" : "stop"))
+      if (root.curIdx === 2) root.toggleAuto()
+      else if (Model.busy(root.speech)) link.send(Model.cmd(root.curIdx === 0 ? "pause" : "stop"))
       return
     }
     var sec = root.sections[root.curSec]
@@ -66,6 +67,8 @@ Panel {
 
   // The rows vanish with the daemon: drop the cursor with them.
   onSpeechChanged: if (!speech.running) cursorActive = false
+
+  function toggleAuto() { root.choose("mode", root.speech.mode === "auto" ? "manual" : "auto", false) }
 
   function back() { root.close() }
 
@@ -137,32 +140,52 @@ Panel {
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.display
           }
-        }
-
-        Row {
-          visible: root.speech.running
-          spacing: Style.space(8)
-
-          Button {
-            text: root.speech.paused ? root.tr("Resume") : root.tr("Pause")
-            enabled: Model.busy(root.speech)
-            opacity: enabled ? 1 : 0.4
-            bordered: true
-            hasCursor: root.cursorActive && root.curSec === -1 && root.curIdx === 0
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-            onClicked: link.send(Model.cmd("pause"))
-          }
-
-          Button {
-            text: root.tr("Stop")
-            enabled: Model.busy(root.speech)
-            opacity: enabled ? 1 : 0.4
-            bordered: true
-            hasCursor: root.cursorActive && root.curSec === -1 && root.curIdx === 1
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-            onClicked: link.send(Model.cmd("stop"))
+          // The common header (dotfiles rules.md): Pause and Stop as square
+          // borderless icons, the Auto switch at the right edge.
+          trailingControl: Row {
+            visible: root.speech.running
+            spacing: Style.space(10)
+            Button {
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: root.speech.paused ? "\u{F040A}" : "\u{F03E4}"
+              iconSize: Style.font.subtitle * 1.5
+              horizontalPadding: Style.space(5)
+              verticalPadding: Style.space(2)
+              width: Math.max(implicitWidth, implicitHeight)   // square, like an icon button
+              height: width
+              tooltipText: root.speech.paused ? root.tr("Resume") : root.tr("Pause")
+              enabled: Model.busy(root.speech)
+              opacity: enabled ? 1 : 0.4
+              hasCursor: root.cursorActive && root.curSec === -1 && root.curIdx === 0
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              onClicked: link.send(Model.cmd("pause"))
+            }
+            Button {
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "\u{F04DB}"
+              iconSize: Style.font.subtitle * 1.5
+              horizontalPadding: Style.space(5)
+              verticalPadding: Style.space(2)
+              width: Math.max(implicitWidth, implicitHeight)   // square, like an icon button
+              height: width
+              tooltipText: root.tr("Stop")
+              enabled: Model.busy(root.speech)
+              opacity: enabled ? 1 : 0.4
+              hasCursor: root.cursorActive && root.curSec === -1 && root.curIdx === 1
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              onClicked: link.send(Model.cmd("stop"))
+            }
+            ToggleSwitch {
+              id: autoSwitch
+              anchors.verticalCenter: parent.verticalCenter
+              checked: root.speech.mode === "auto"
+              hasCursor: root.cursorActive && root.curSec === -1 && root.curIdx === 2
+              foreground: root.bar.foreground
+              onToggled: root.toggleAuto()
+              PanelToolTip { visible: autoSwitch.containsMouse; text: root.tr("Auto: the focused agent is read aloud") }
+            }
           }
         }
 
