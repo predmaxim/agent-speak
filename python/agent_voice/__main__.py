@@ -28,10 +28,9 @@ async def main(agent_name, cwd):
     from .ear import listen, load_whisper
 
     loop = asyncio.get_running_loop()
-    # EOF на stdin — демон умер: выходим, микрофон не остаётся открытым
-    loop.add_reader(sys.stdin.fileno(), lambda: sys.stdin.buffer.read1(1) or os._exit(0))
-
     events = asyncio.Queue()
+    # EOF на stdin — демон умер: выходим штатно (finally в listen убьёт pw-record)
+    loop.add_reader(sys.stdin.fileno(), lambda: sys.stdin.buffer.read1(1) or events.put_nowait(("eof",)))
     agent = make_agent(agent_name, events)
     cv = Conversation()
     model = await asyncio.to_thread(load_whisper)
@@ -43,7 +42,7 @@ async def main(agent_name, cwd):
                 try:
                     await agent.send(a[1])
                 except Exception as e:  # сбой адаптера (например RPC-ошибка Codex)
-                    events.put_nowait(("error", f"agent: {e}"))
+                    events.put_nowait(("error", f"agent: {e!r}"))
             elif a[0] == "interrupt":
                 await agent.interrupt()
             elif a[0] == "stop":
@@ -56,8 +55,9 @@ async def main(agent_name, cwd):
     async def guard(coro, name):  # исключение фоновой задачи → в главный цикл
         try:
             await coro
+            events.put_nowait(("error", f"{name}: завершилось"))
         except Exception as e:
-            events.put_nowait(("error", f"{name}: {e}"))
+            events.put_nowait(("error", f"{name}: {e!r}"))
 
     tasks = [  # держим ссылки: иначе задачи может собрать GC
         asyncio.create_task(guard(link.watch_speaking(lambda busy: events.put_nowait(("audio", busy))), "watch_speaking")),
@@ -67,6 +67,10 @@ async def main(agent_name, cwd):
     while True:
         ev = await events.get()
         kind = ev[0]
+        if kind == "eof":
+            loop.remove_reader(sys.stdin.fileno())
+            await agent.close()
+            return
         if kind == "error":
             raise RuntimeError(ev[1])
         if kind == "warn":

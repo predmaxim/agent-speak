@@ -1,6 +1,7 @@
 """Слух: pw-record → Silero VAD (кадры 32 мс) → Segmenter → faster-whisper.
 В очередь out: ("start",) — начало речи, ("phrase", текст) — распознанная фраза."""
 import asyncio
+import contextlib
 import subprocess
 
 import numpy as np
@@ -46,7 +47,11 @@ async def listen(out, model):
     async def recognize():  # отдельно: распознавание не задерживает чтение микрофона (перебивание)
         while True:
             pcm = await phrases.get()
-            await out.put(("phrase", await asyncio.to_thread(transcribe, model, pcm)))
+            try:
+                await out.put(("phrase", await asyncio.to_thread(transcribe, model, pcm)))
+            except Exception as e:
+                await out.put(("error", f"recognize: {e!r}"))
+                return
 
     task = asyncio.create_task(recognize())
     seg = Segmenter()
@@ -61,4 +66,6 @@ async def listen(out, model):
                     phrases.put_nowait(ev[1])
     finally:
         task.cancel()
-        proc.kill()
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
