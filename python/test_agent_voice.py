@@ -90,3 +90,44 @@ def test_short_answer_under_min_len():
     cv.phrase("Ты тут?")
     cv.delta("Да.")
     assert cv.done() == [("say", "Да."), ("state", "speaking")]
+
+
+import json
+from types import SimpleNamespace
+from agent_voice.agents import CodexProtocol, claude_events
+
+
+def test_codex_requests_and_turn_filter():
+    p = CodexProtocol()
+    rid, line = p.request("turn/start", {"threadId": "t1", "input": [{"type": "text", "text": "привет"}]})
+    assert json.loads(line) == {"id": rid, "method": "turn/start", "params": {"threadId": "t1", "input": [{"type": "text", "text": "привет"}]}}
+    assert line.endswith("\n")
+    assert p.handle(json.dumps({"id": rid, "result": {"turn": {"id": "u1", "items": [], "status": "inProgress"}}})) == [("response", rid, {"turn": {"id": "u1", "items": [], "status": "inProgress"}})]
+    p.turn_id = "u1"
+    d = lambda turn, text: json.dumps({"method": "item/agentMessage/delta", "params": {"delta": text, "itemId": "i", "threadId": "t1", "turnId": turn}})
+    assert p.handle(d("u1", "Привет")) == [("delta", "Привет")]
+    assert p.handle(d("u0", "старое")) == []  # дельта прерванного хода
+    done = lambda turn: json.dumps({"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": turn, "items": [], "status": "completed"}}})
+    assert p.handle(done("u0")) == []
+    assert p.handle(done("u1")) == [("done", None)]
+    assert p.turn_id is None
+    assert p.handle("не json") == []
+
+
+def test_codex_error_response():
+    p = CodexProtocol()
+    rid, _ = p.request("thread/start", {})
+    assert p.handle(json.dumps({"id": rid, "error": {"code": -1, "message": "not logged in"}})) == [("error", "not logged in")]
+
+
+def test_claude_events_text_and_skip():
+    st = {"skip": False}
+    delta = lambda t: SimpleNamespace(event={"type": "content_block_delta", "delta": {"type": "text_delta", "text": t}})
+    ResultMessage = type("ResultMessage", (), {})
+    assert claude_events(delta("Да"), st) == [("delta", "Да")]
+    assert claude_events(SimpleNamespace(event={"type": "message_start"}), st) == []
+    assert claude_events(ResultMessage(), st) == [("done", None)]
+    st["skip"] = True  # после interrupt: хвост прерванного хода не нужен
+    assert claude_events(delta("хвост"), st) == []
+    assert claude_events(ResultMessage(), st) == []
+    assert st["skip"] is False
