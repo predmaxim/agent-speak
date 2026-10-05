@@ -45,9 +45,6 @@ class Conversation:
         if not self.turn:
             return []
         self.turn = False
-        if self.state != "speaking":
-            self.chunker.reset()
-            return []
         said = [("say", s) for s in self.chunker.flush()]
         if said:
             return said + self._to("speaking")
