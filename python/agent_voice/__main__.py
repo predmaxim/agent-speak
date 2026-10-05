@@ -2,6 +2,7 @@
 python -m agent_voice --agent claude|codex --cwd DIR"""
 import argparse
 import asyncio
+import contextlib
 import glob
 import os
 import subprocess
@@ -30,7 +31,12 @@ async def main(agent_name, cwd):
     loop = asyncio.get_running_loop()
     events = asyncio.Queue()
     # EOF на stdin — демон умер: выходим штатно (finally в listen убьёт pw-record)
-    loop.add_reader(sys.stdin.fileno(), lambda: sys.stdin.buffer.read1(1) or events.put_nowait(("eof",)))
+    def on_stdin():
+        if not sys.stdin.buffer.read1(1):
+            loop.remove_reader(sys.stdin.fileno())  # закрытый пипе всегда читаем: один eof
+            events.put_nowait(("eof",))
+
+    loop.add_reader(sys.stdin.fileno(), on_stdin)
     agent = make_agent(agent_name, events)
     cv = Conversation()
     model = await asyncio.to_thread(load_whisper)
@@ -63,29 +69,32 @@ async def main(agent_name, cwd):
         asyncio.create_task(guard(link.watch_speaking(lambda busy: events.put_nowait(("audio", busy))), "watch_speaking")),
         asyncio.create_task(guard(listen(events, model), "listen")),
     ]
-    link.send({"cmd": "voice_state", "state": "listening"})
-    while True:
-        ev = await events.get()
-        kind = ev[0]
-        if kind == "eof":
-            loop.remove_reader(sys.stdin.fileno())
-            await agent.close()
-            return
-        if kind == "error":
-            raise RuntimeError(ev[1])
-        if kind == "warn":
-            notify(ev[1])
-        elif kind == "start":
-            await act(cv.speech_start())
-        elif kind == "phrase":
-            print(f"agent_voice: > {ev[1]}", flush=True)
-            await act(cv.phrase(ev[1]))
-        elif kind == "delta":
-            await act(cv.delta(ev[1]))
-        elif kind == "done":
-            await act(cv.done())
-        elif kind == "audio":
-            await act(cv.audio(ev[1]))
+    try:
+        link.send({"cmd": "voice_state", "state": "listening"})
+        while True:
+            ev = await events.get()
+            kind = ev[0]
+            if kind == "eof":
+                return
+            if kind == "error":
+                raise RuntimeError(ev[1])
+            if kind == "warn":
+                notify(ev[1])
+            elif kind == "start":
+                await act(cv.speech_start())
+            elif kind == "phrase":
+                print(f"agent_voice: > {ev[1]}", flush=True)
+                await act(cv.phrase(ev[1]))
+            elif kind == "delta":
+                await act(cv.delta(ev[1]))
+            elif kind == "done":
+                await act(cv.done())
+            elif kind == "audio":
+                await act(cv.audio(ev[1]))
+
+    finally:  # codex app-server не должен остаться сиротой
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(agent.close(), 3)
 
 
 if __name__ == "__main__":
