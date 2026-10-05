@@ -76,6 +76,7 @@ struct State {
     projects: HashMap<String, String>, // сессия → имя папки проекта (из хуков и окна в фокусе)
     voice: Option<VoiceSession>,
     last_cwd: String, // cwd последнего хука — рабочая папка голосового разговора
+    voice_cmd: Vec<String>, // запуск agent_voice; в тестах — заглушка
 }
 
 fn home() -> PathBuf {
@@ -180,11 +181,16 @@ pub fn run() {
         projects: HashMap::new(),
         voice: None,
         last_cwd: String::new(),
+        voice_cmd: vec![
+            data.join("voice-venv/bin/python").to_string_lossy().into(),
+            "-m".into(),
+            "agent_voice".into(),
+        ],
     };
     for ev in rx {
         st.poll_focus();
         match ev {
-            Event::Tick => {}
+            Event::Tick => st.tick(),
             Event::Msg(m) => st.on_msg(m),
             Event::File(p) => st.on_file(&p),
             Event::Config => st.reload(),
@@ -460,8 +466,60 @@ impl State {
         self.shared.stop();
     }
 
+    /// Голосовой разговор: agent_voice — дочерний процесс; вывод — в узел эхоподавления.
+    fn voice_start(&mut self, agent: String) {
+        if self.voice.is_some() || !["claude", "codex"].contains(&agent.as_str()) {
+            eprintln!("agent-speak: voice_start пропущен: {agent}");
+            return;
+        }
+        let cwd = if self.last_cwd.is_empty() { home().to_string_lossy().into_owned() } else { self.last_cwd.clone() };
+        let data = home().join(".local/share/agent-speak");
+        let _ = std::fs::create_dir_all(&data); // current_dir должен существовать
+        let child = std::process::Command::new(&self.voice_cmd[0])
+            .args(&self.voice_cmd[1..])
+            .args(["--agent", &agent, "--cwd", &cwd])
+            .current_dir(&data)
+            .env("AGENT_SPEAK", "1")
+            .stdin(std::process::Stdio::piped()) // EOF — демон умер, agent_voice выходит
+            .spawn();
+        let child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("agent-speak: agent_voice не запустился: {e}");
+                notice("Голос: не запустился", &e.to_string());
+                return;
+            }
+        };
+        self.cfg.voice_last_agent = agent.clone();
+        self.cfg.save();
+        *self.shared.sink.lock().unwrap() = "echo-cancel-sink".into();
+        self.stop(); // терминальное чтение обрывается, pw-cat перезапустится с новым выводом
+        self.voice = Some(VoiceSession { agent, state: "starting".into(), child: Some(child) });
+    }
+
+    fn voice_stop(&mut self) {
+        if let Some(mut v) = self.voice.take() {
+            if let Some(c) = v.child.as_mut() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+        *self.shared.sink.lock().unwrap() = String::new();
+        self.stop();
+    }
+
+    /// Раз в секунду: agent_voice завершился сам (ошибка — он уже уведомил) — режим выключен.
+    fn tick(&mut self) {
+        let dead = self.voice.as_mut().and_then(|v| v.child.as_mut()).is_some_and(|c| !matches!(c.try_wait(), Ok(None)));
+        if dead {
+            eprintln!("agent-speak: agent_voice завершился");
+            self.voice_stop();
+            self.broadcast();
+        }
+    }
+
     fn on_msg(&mut self, m: Msg) {
-        let changes = matches!(m, Msg::Stop | Msg::Pause | Msg::Mode | Msg::VoiceState { .. });
+        let changes = matches!(m, Msg::Stop | Msg::Pause | Msg::Mode | Msg::VoiceState { .. } | Msg::VoiceStart { .. } | Msg::VoiceStop | Msg::VoiceToggle);
         match m {
             Msg::Stop => self.stop(),
             Msg::Voice { text } => {
@@ -472,7 +530,20 @@ impl State {
                     v.state = state;
                 }
             }
-            Msg::VoiceStart { .. } | Msg::VoiceStop | Msg::VoiceToggle => {} // Task 2
+            Msg::VoiceStart { agent } => self.voice_start(agent),
+            Msg::VoiceStop => self.voice_stop(),
+            Msg::VoiceToggle => {
+                if self.voice.is_some() {
+                    self.voice_stop();
+                } else {
+                    // окно плагина: первая строка — выбор агента
+                    let mut cmd = std::process::Command::new("omarchy-shell");
+                    cmd.args(["predmaxim.agent-speak", "voice"]);
+                    std::thread::spawn(move || {
+                        let _ = cmd.status();
+                    });
+                }
+            }
             Msg::Pause => {
                 let paused = self.shared.queue.lock().unwrap().paused();
                 if paused {
@@ -663,8 +734,11 @@ mod tests {
         projects: HashMap::new(),
             voice: None,
             last_cwd: String::new(),
+            voice_cmd: vec!["sh".into(), "-c".into(), "sleep 30".into(), "x".into()],
         }
     }
+
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn next(r: &mut BufReader<UnixStream>) -> serde_json::Value {
         let mut l = String::new();
@@ -791,8 +865,47 @@ mod tests {
     }
 
     #[test]
+    fn voice_start_spawns_child_remembers_agent_and_routes_sink() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("agent-speak-voice-{}", std::process::id()));
+        unsafe { std::env::set_var("HOME", &home) };
+        let mut st = test_state();
+        st.on_msg(Msg::VoiceStart { agent: "codex".into() });
+        let v = st.voice.as_ref().unwrap();
+        assert_eq!((v.agent.as_str(), v.state.as_str()), ("codex", "starting"));
+        assert!(v.child.is_some());
+        assert_eq!(st.cfg.voice_last_agent, "codex");
+        assert_eq!(*st.shared.sink.lock().unwrap(), "echo-cancel-sink");
+        st.on_msg(Msg::VoiceStart { agent: "claude".into() }); // уже идёт — не второй процесс
+        assert_eq!(st.voice.as_ref().unwrap().agent, "codex");
+        st.on_msg(Msg::VoiceStop);
+        assert!(st.voice.is_none());
+        assert_eq!(*st.shared.sink.lock().unwrap(), "");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn voice_start_rejects_unknown_agent() {
+        let mut st = test_state();
+        st.on_msg(Msg::VoiceStart { agent: "rm -rf".into() });
+        assert!(st.voice.is_none());
+    }
+
+    #[test]
+    fn dead_child_turns_voice_off() {
+        let _g = HOME_LOCK.lock().unwrap(); // voice_start пишет конфиг в HOME
+        let mut st = test_state();
+        st.voice_cmd = vec!["true".into()];
+        st.on_msg(Msg::VoiceStart { agent: "claude".into() });
+        std::thread::sleep(Duration::from_millis(200));
+        st.tick();
+        assert!(st.voice.is_none());
+    }
+
+    #[test]
     fn set_applies_saves_broadcasts_and_rejects_bad() {
-        // единственный тест, трогающий HOME: config::path() читает его при каждом вызове
+        let _g = HOME_LOCK.lock().unwrap();
+        // трогает HOME (как и voice-тест): config::path() читает его при каждом вызове
         let home = std::env::temp_dir().join(format!("agent-speak-set-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         unsafe { std::env::set_var("HOME", &home) };
