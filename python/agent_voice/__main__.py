@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import glob
 import os
+import signal
 import subprocess
 import sys
 
@@ -37,6 +38,7 @@ async def main(agent_name, cwd):
             events.put_nowait(("eof",))
 
     loop.add_reader(sys.stdin.fileno(), on_stdin)
+    loop.add_signal_handler(signal.SIGTERM, events.put_nowait, ("eof",))  # voice_stop: штатный выход
     agent = make_agent(agent_name, events)
     cv = Conversation()
     model = await asyncio.to_thread(load_whisper)
