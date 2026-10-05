@@ -17,6 +17,7 @@ pub struct Shared {
     pub busy: AtomicBool,
     pub current: Mutex<String>, // сессия звучащей фразы — для «Читаю: <проект>»
     pub changed: Mutex<Option<std::sync::mpsc::Sender<()>>>, // смена «говорит/молчит» → основной цикл
+    pub sink: Arc<Mutex<String>>, // узел PipeWire для pw-cat --target; пусто — вывод по умолчанию
 }
 
 /// Синтезатор и приёмник звука — трейты только ради тестов с подделками.
@@ -51,6 +52,7 @@ impl Shared {
             busy: AtomicBool::new(false),
             current: Mutex::new(String::new()),
             changed: Mutex::new(None),
+            sink: Arc::new(Mutex::new(String::new())),
         }
     }
 
@@ -116,7 +118,8 @@ fn requeue(shared: &Shared, q: &mut Queue, item: Item, my_gen: u64) {
 // ponytail: «синтез наперёд» — за счёт буфера канала pw-cat (~0,7 с): пока доигрывает хвост,
 // синтезируется следующая фраза. Явный конвейер на 1–2 фразы — если паузы между фразами заметны.
 pub fn run(shared: Arc<Shared>, tts: Tts) {
-    run_with(shared, tts, Player::new())
+    let player = Player::new(shared.sink.clone());
+    run_with(shared, tts, player)
 }
 
 fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {

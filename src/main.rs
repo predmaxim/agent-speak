@@ -24,6 +24,7 @@ fn main() {
         Some("stop") => Msg::Stop,
         Some("pause") => Msg::Pause,
         Some("mode") => Msg::Mode,
+        Some("voice") => Msg::VoiceToggle,
         Some("hook") => {
             // вложенные вызовы моделей словаря не должны озвучиваться
             if std::env::var_os("AGENT_SPEAK").is_some() {
@@ -41,7 +42,7 @@ fn main() {
             Msg::Hook { kind, payload: serde_json::from_str(&raw).unwrap_or_default() }
         }
         _ => {
-            eprintln!("agent-speak daemon | read | stop | pause | mode | hook <kind> [json]");
+            eprintln!("agent-speak daemon | read | stop | pause | mode | voice | hook <kind> [json]");
             std::process::exit(2);
         }
     };
