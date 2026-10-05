@@ -225,3 +225,22 @@ def test_real_vad_one_phrase_from_synthetic_speech():
         x = torch.from_numpy(np.frombuffer(b, np.int16).astype(np.float32) / 32768)
         evs += seg.feed(vad(x, 16000).item(), b)
     assert [e[0] for e in evs] == ["start", "phrase"]
+
+
+def test_link_reconnects_after_server_closes(tmp_path):
+    import socket
+    from agent_voice import link
+    path = str(tmp_path / "s.sock")
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind(path)
+    srv.listen(2)
+    link.SOCK, link._conn = path, None
+    assert link.send({"a": 1})
+    c1, _ = srv.accept()
+    assert link.send({"a": 2})  # то же соединение
+    assert c1.recv(100) == b'{"a": 1}\n{"a": 2}\n'
+    c1.close()  # демон закрыл молчуна
+    ok = [link.send({"a": i}) for i in (3, 4)]  # первая запись может «уйти» в закрытый сокет
+    assert all(ok)
+    c2, _ = srv.accept()
+    assert b'{"a": 4}' in c2.recv(100)

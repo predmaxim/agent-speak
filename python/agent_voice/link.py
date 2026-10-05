@@ -7,14 +7,24 @@ import socket
 SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "agent-speak.sock")
 
 
+_conn = None  # одно соединение: порядок сообщений (демон читает построчно, поток на соединение)
+
+
 def send(cmd):
-    try:
-        with socket.socket(socket.AF_UNIX) as s:
-            s.connect(SOCK)
-            s.sendall((json.dumps(cmd, ensure_ascii=False) + "\n").encode())
-        return True
-    except OSError:
-        return False
+    global _conn
+    data = (json.dumps(cmd, ensure_ascii=False) + "\n").encode()
+    for _ in range(2):  # демон мог закрыть соединение — одно переподключение
+        try:
+            if _conn is None:
+                _conn = socket.socket(socket.AF_UNIX)
+                _conn.connect(SOCK)
+            _conn.sendall(data)
+            return True
+        except OSError:
+            if _conn is not None:
+                _conn.close()
+            _conn = None
+    return False
 
 
 async def watch_speaking(cb):

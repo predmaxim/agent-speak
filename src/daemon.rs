@@ -218,6 +218,7 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
     let _ = input.set_read_timeout(Some(Duration::from_secs(1)));
     for line in BufReader::new(input).lines() {
         let Ok(line) = line else { break };
+        let _ = conn.set_read_timeout(None); // первая строка пришла — постоянное соединение (agent_voice) живёт молча
         match serde_json::from_str::<Msg>(&line) {
             Ok(Msg::Subscribe) => match conn.try_clone() {
                 Ok(w) => {
@@ -377,7 +378,9 @@ impl State {
     /// only_new: пропустить уже поставленные фразы, поставленные — запомнить (dedup).
     fn enqueue_msg(&mut self, agent: Agent, session: &str, raw: &str, kind: Kind, msg: &str, only_new: bool) -> usize {
         // голосовой разговор: терминальные агенты молчат; Voice без разговора — опоздавшая фраза
-        if self.voice.is_some() != (kind == Kind::Voice) && kind != Kind::Preview {
+        // Urgent (запрос разрешения) и Read (явная горячая клавиша) слышны и в разговоре
+        let passes = kind == Kind::Preview || (self.voice.is_some() && matches!(kind, Kind::Urgent | Kind::Read));
+        if self.voice.is_some() != (kind == Kind::Voice) && !passes {
             eprintln!("agent-speak: пропущено (голосовой режим: {}): {}", self.voice.is_some(), raw.chars().take(40).collect::<String>());
             return 0;
         }
@@ -500,8 +503,16 @@ impl State {
     fn voice_stop(&mut self) {
         if let Some(mut v) = self.voice.take() {
             if let Some(c) = v.child.as_mut() {
-                let _ = c.kill();
-                let _ = c.wait();
+                // SIGTERM: agent_voice закрывает агента сам; через 2 с — SIGKILL
+                unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+                let end = Instant::now() + Duration::from_secs(2);
+                while matches!(c.try_wait(), Ok(None)) && Instant::now() < end {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if matches!(c.try_wait(), Ok(None)) {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
             }
         }
         *self.shared.sink.lock().unwrap() = String::new();
@@ -835,9 +846,22 @@ mod tests {
     fn terminal_agents_muted_in_voice_mode() {
         let mut st = test_state();
         voice_on(&mut st);
-        st.on_hook("notification", &serde_json::json!({"session_id": "b", "cwd": "/p/x", "message": "Нужно разрешение"}));
         st.enqueue(Agent::Claude, "a", "Финал.", Kind::Manual);
+        st.enqueue(Agent::Claude, "a", "Статус.", Kind::Status);
         assert!(st.shared.queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn urgent_and_read_pass_in_voice_mode_manual_muted() {
+        let mut st = test_state();
+        voice_on(&mut st);
+        st.enqueue(Agent::Claude, "a", "Нужно разрешение.", Kind::Urgent);
+        st.enqueue(Agent::Claude, "a", "Читаю по клавише.", Kind::Read);
+        st.enqueue(Agent::Claude, "a", "Финал.", Kind::Manual);
+        let mut q = st.shared.queue.lock().unwrap();
+        let kinds: Vec<Kind> = std::iter::from_fn(|| q.pop(Instant::now())).map(|i| i.kind).collect();
+        assert_eq!(kinds.len(), 2);
+        assert!(!kinds.contains(&Kind::Manual));
     }
 
     #[test]
