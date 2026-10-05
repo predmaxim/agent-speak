@@ -24,6 +24,15 @@ fi
   curl -fsSL -o "$DATA/v5_ru.pt.tmp" https://models.silero.ai/models/tts/ru/v5_ru.pt && mv "$DATA/v5_ru.pt.tmp" "$DATA/v5_ru.pt"
 }
 
+# Голосовой разговор: отдельный venv на Python 3.12 (колёса faster-whisper/ctranslate2), whisper на GPU
+ln -sfn "$PWD/python/agent_voice" "$DATA/agent_voice"
+if ! "$DATA/voice-venv/bin/python" -c 'import faster_whisper, silero_vad, claude_agent_sdk' 2>/dev/null; then
+  uv venv -q --python 3.12 "$DATA/voice-venv"
+  uv pip install -q --python "$DATA/voice-venv/bin/python" torch --index-url https://download.pytorch.org/whl/cpu
+  uv pip install -q --python "$DATA/voice-venv/bin/python" faster-whisper silero-vad claude-agent-sdk \
+    nvidia-cublas-cu12 'nvidia-cudnn-cu12==9.*' pytest
+fi
+
 systemctl --user daemon-reload
 systemctl --user enable --now agent-speakd.service
 systemctl --user restart agent-speakd.service
