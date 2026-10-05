@@ -5,8 +5,6 @@ from agent_voice.segment import Segmenter
 from agent_voice.chunker import Chunker
 from agent_voice.conversation import Conversation
 
-F = b"\x00\x00" * 512
-
 
 def feed(seg, probs):
     out = []
