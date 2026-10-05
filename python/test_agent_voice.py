@@ -81,7 +81,14 @@ def test_speech_while_listening_does_nothing():
 def test_barge_in_after_turn_done_only_stops_audio():
     cv = Conversation()
     cv.phrase("Скажи")
-    cv.delta("Готово, всё проверил полностью.")
+    cv.delta("Готово, всё проверил полностью. ")
     cv.audio(True)  # ответ ещё звучит, когда ход закончился
     assert cv.done() == []
     assert cv.speech_start() == [("stop",), ("state", "listening")]
+
+
+def test_short_answer_under_min_len():
+    cv = Conversation()
+    cv.phrase("Ты тут?")
+    cv.delta("Да.")
+    assert cv.done() == [("say", "Да."), ("state", "speaking")]
