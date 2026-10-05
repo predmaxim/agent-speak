@@ -117,7 +117,7 @@ def test_codex_requests_and_turn_filter():
 def test_codex_error_response():
     p = CodexProtocol()
     rid, _ = p.request("thread/start", {})
-    assert p.handle(json.dumps({"id": rid, "error": {"code": -1, "message": "not logged in"}})) == [("error", "not logged in")]
+    assert p.handle(json.dumps({"id": rid, "error": {"code": -1, "message": "not logged in"}})) == [("response_error", rid, "not logged in")]
 
 
 def test_claude_events_text_and_skip():
@@ -144,3 +144,61 @@ def test_codex_failed_turn_is_error():
     p.turn_id = "u2"
     failed["params"]["turn"]["id"] = "u2"
     assert p.handle(json.dumps(failed)) == [("error", "Codex: ход не удался")]
+
+
+import asyncio
+from agent_voice.agents import CodexAgent
+
+
+def _fake_agent():
+    a = CodexAgent(asyncio.Queue())
+    out = []
+    a.proc = SimpleNamespace(
+        stdin=SimpleNamespace(write=out.append, drain=lambda: asyncio.sleep(0)),
+        stdout=asyncio.StreamReader())
+    a.reader = asyncio.create_task(a._read())
+    return a, out
+
+
+def test_codex_plumbing_error_response_and_eof():
+    async def run():
+        a, out = _fake_agent()
+        call = asyncio.create_task(a._call("thread/start", {}))
+        await asyncio.sleep(0)
+        rid = json.loads(out[0])["id"]
+        a.proc.stdout.feed_data(json.dumps({"id": rid, "error": {"message": "no auth"}}).encode() + b"\n")
+        try:
+            await call
+            assert False, "must raise"
+        except RuntimeError as e:
+            assert "no auth" in str(e)
+        pending = asyncio.create_task(a._call("turn/start", {}))
+        await asyncio.sleep(0)
+        a.proc.stdout.feed_eof()
+        try:
+            await asyncio.wait_for(pending, 1)
+            assert False, "must raise"
+        except RuntimeError:
+            pass
+        assert (await a.events.get())[0] == "error"
+    asyncio.run(run())
+
+
+def test_codex_interrupt_during_send():
+    async def run():
+        a, out = _fake_agent()
+        a.p.thread_id = "t1"
+        send = asyncio.create_task(a.send("привет"))
+        await asyncio.sleep(0)
+        intr = asyncio.create_task(a.interrupt())
+        await asyncio.sleep(0)
+        rid = json.loads(out[0])["id"]
+        a.proc.stdout.feed_data(json.dumps({"id": rid, "result": {"turn": {"id": "u1"}}}).encode() + b"\n")
+        await asyncio.sleep(0.01)
+        req = json.loads(out[1])
+        assert req["method"] == "turn/interrupt" and req["params"]["turnId"] == "u1"
+        a.proc.stdout.feed_data(json.dumps({"id": req["id"], "result": {}}).encode() + b"\n")
+        await asyncio.wait_for(asyncio.gather(send, intr), 1)
+        assert a.p.turn_id is None
+        a.proc.stdout.feed_eof()
+    asyncio.run(run())
