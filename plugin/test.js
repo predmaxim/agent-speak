@@ -26,7 +26,7 @@ assert.deepStrictEqual(v(at({ speaking: false })), [M.ICONS.idle, true, "Авт�
 assert.deepStrictEqual(v(at({ speaking: false, mode: "manual" })), [M.ICONS.idle, false, "Вручную: Super+Shift+Alt+S"])
 assert.deepStrictEqual(v(M.OFFLINE), [M.ICONS.off, false, "Сервис озвучки не запущен"])
 assert.deepStrictEqual(v(null), [M.ICONS.off, false, "Сервис озвучки не запущен"])
-assert.strictEqual(new Set(Object.values(M.ICONS)).size, 4)
+assert.strictEqual(new Set(Object.values(M.ICONS)).size, 5)
 assert.strictEqual(M.view(st).tip, "Reading: %1") // English without a table
 assert.strictEqual(I.translator("en")(M.view(st).tip, "x"), "Reading: x")
 
@@ -56,6 +56,19 @@ assert.deepStrictEqual(secs[1].options.map(o => o.label), ["Xenia", "Baya", "Kse
 assert.deepStrictEqual(secs[2].options.map(o => o.value), ["x-slow", "slow", "medium", "fast", "x-fast"])
 assert.deepStrictEqual(secs[2].options.map(o => o.label), ["Очень медленно", "Медленно", "Обычно", "Быстро", "Очень быстро"])
 for (const s of secs) for (const o of s.options) assert.strictEqual(typeof o.value, typeof st[s.key], s.key)
+
+// Voice conversation
+const M2 = load("Model.js", "OFFLINE, ICONS, view, voiceSection")
+const vs = M2.voiceSection(at({ voice: "off", voice_last_agent: "codex" }), ru)
+assert.deepStrictEqual(vs.options.map(o => o.value), ["codex", "claude"]) // the last one first
+assert.strictEqual(vs.options[0].cmd, JSON.stringify({ cmd: "voice_start", agent: "codex" }) + "\n")
+const on = M2.voiceSection(at({ voice: "listening", voice_agent: "claude", voice_last_agent: "claude" }), ru)
+assert.deepStrictEqual(on.options.map(o => o.value), ["stop"])
+assert.strictEqual(on.options[0].cmd, JSON.stringify({ cmd: "voice_stop" }) + "\n")
+assert.strictEqual(on.options[0].label, "Закончить разговор с Claude")
+assert.deepStrictEqual(v(at({ voice: "thinking", voice_agent: "codex" })), [M2.ICONS.voice, true, "Разговор с Codex: думает"])
+assert.deepStrictEqual(v(at({ voice: "listening", voice_agent: "claude" })), [M2.ICONS.voice, true, "Разговор с Claude: слушаю"])
+assert.strictEqual(M2.OFFLINE.voice, "off")
 
 // Every tr("…") has a Russian line
 for (const f of ["Panel.qml", "Indicator.qml", "Link.qml", "Model.js"]) {

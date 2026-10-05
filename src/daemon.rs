@@ -538,7 +538,7 @@ impl State {
                 } else {
                     // окно плагина: первая строка — выбор агента
                     let mut cmd = std::process::Command::new("omarchy-shell");
-                    cmd.args(["predmaxim.agent-speak", "voice"]);
+                    cmd.args(["predmaxim.agent-speak.voice", "voice"]);
                     std::thread::spawn(move || {
                         let _ = cmd.status();
                     });

@@ -14,6 +14,9 @@ var TABLES = {
     "Pause": "Пауза", "Resume": "Продолжить", "Stop": "Стоп",
     "MODE": "РЕЖИМ", "Auto": "Авто", "Manual": "Вручную",
     "INTERMEDIATE STATUSES": "ПРОМЕЖУТОЧНЫЕ СТАТУСЫ", "Read": "Читать", "Final answer only": "Только итог",
+    "VOICE CHAT": "РАЗГОВОР", "Finish talking to %1": "Закончить разговор с %1",
+    "Talking to %1: starting": "Разговор с %1: запуск", "Talking to %1: listening": "Разговор с %1: слушаю",
+    "Talking to %1: thinking": "Разговор с %1: думает", "Talking to %1: speaking": "Разговор с %1: говорит",
     "VOICE": "ГОЛОС", "SPEED": "СКОРОСТЬ",
     "Very slow": "Очень медленно", "Slow": "Медленно", "Normal": "Обычно", "Fast": "Быстро", "Very fast": "Очень быстро"
   }
