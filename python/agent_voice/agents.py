@@ -62,6 +62,7 @@ class CodexProtocol:
         self.ids = itertools.count(1)
         self.thread_id = None
         self.turn_id = None
+        self.turn_error = None
 
     def request(self, method, params):
         rid = next(self.ids)
@@ -79,8 +80,12 @@ class CodexProtocol:
         p = m.get("params") or {}
         if m.get("method") == "item/agentMessage/delta" and p.get("turnId") == self.turn_id:
             return [("delta", p.get("delta", ""))]
+        if m.get("method") == "error" and p.get("turnId") == self.turn_id:
+            self.turn_error = (p.get("error") or {}).get("message")
         if m.get("method") == "turn/completed" and (p.get("turn") or {}).get("id") == self.turn_id:
-            self.turn_id = None
+            self.turn_id, err, self.turn_error = None, self.turn_error, None
+            if p["turn"].get("status") == "failed":
+                return [("error", f"Codex: {err or 'ход не удался'}")]
             return [("done", None)]
         return []
 

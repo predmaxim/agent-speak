@@ -131,3 +131,16 @@ def test_claude_events_text_and_skip():
     assert claude_events(delta("хвост"), st) == []
     assert claude_events(ResultMessage(), st) == []
     assert st["skip"] is False
+
+
+def test_codex_failed_turn_is_error():
+    p = CodexProtocol()
+    p.turn_id = "u1"
+    err = {"method": "error", "params": {"error": {"message": "model not supported"}, "threadId": "t1", "turnId": "u1", "willRetry": False}}
+    assert p.handle(json.dumps(err)) == []
+    failed = {"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": "u1", "items": [], "status": "failed"}}}
+    assert p.handle(json.dumps(failed)) == [("error", "Codex: model not supported")]
+    assert p.turn_id is None
+    p.turn_id = "u2"
+    failed["params"]["turn"]["id"] = "u2"
+    assert p.handle(json.dumps(failed)) == [("error", "Codex: ход не удался")]
