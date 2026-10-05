@@ -14,6 +14,7 @@ pub enum Kind {
     Manual,
     Read,    // ручное чтение (read): играет до конца при любой активной сессии
     Preview, // образец голоса: один в очереди, впереди всех, играет и на паузе
+    Voice,   // голосовой разговор: играет при любой активной сессии
 }
 
 #[derive(Clone, Debug)]
@@ -87,7 +88,7 @@ impl Queue {
         });
         let active = &self.active;
         let pos = self.items.iter().position(|i| {
-            active.is_empty() || i.session == *active || matches!(i.kind, Kind::Urgent | Kind::Preview | Kind::Read)
+            active.is_empty() || i.session == *active || matches!(i.kind, Kind::Urgent | Kind::Preview | Kind::Read | Kind::Voice)
         })?;
         let item = self.items.remove(pos)?;
         self.popped = Some((item.session.clone(), item.kind.clone()));
@@ -142,7 +143,7 @@ impl Queue {
 
     /// Есть ли что играть сейчас (без учёта паузы).
     pub fn ready(&self) -> bool {
-        self.items.iter().any(|i| self.active.is_empty() || i.session == self.active || matches!(i.kind, Kind::Urgent | Kind::Preview | Kind::Read))
+        self.items.iter().any(|i| self.active.is_empty() || i.session == self.active || matches!(i.kind, Kind::Urgent | Kind::Preview | Kind::Read | Kind::Voice))
     }
 
     /// Ручное чтение ждёт в очереди или отдано последним (звучит ли — знает speaker через busy).
@@ -198,6 +199,15 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn voice_plays_whatever_session_is_active() {
+        let mut q = Queue::new(Duration::from_secs(30));
+        q.set_active("a");
+        q.push(Item { session: "voice".into(), text: "ответ".into(), kind: Kind::Voice, born: Instant::now(), msg: "m".into(), speaker: String::new() });
+        assert!(q.ready());
+        assert_eq!(q.pop(Instant::now()).unwrap().kind, Kind::Voice);
+    }
 
     fn it(text: &str, kind: Kind, born: Instant) -> Item {
         Item { session: "s".into(), text: text.into(), kind, born, msg: "m".into(), speaker: String::new() }

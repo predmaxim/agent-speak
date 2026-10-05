@@ -19,6 +19,15 @@ pub enum Msg {
     Set { key: String, value: serde_json::Value },
     /// Прочитать текст как ручное чтение (образец голоса).
     Say { text: String },
+    /// Фраза голосового разговора (от agent_voice).
+    Voice { text: String },
+    /// Включить голосовой разговор с агентом (claude | codex).
+    VoiceStart { agent: String },
+    VoiceStop,
+    /// Хоткей: выключен — открыть окно выбора агента, включён — выключить.
+    VoiceToggle,
+    /// Фаза разговора от agent_voice: listening | thinking | speaking.
+    VoiceState { state: String },
 }
 
 pub fn socket_path() -> PathBuf {
@@ -45,6 +54,11 @@ mod tests {
         let set = serde_json::from_str::<Msg>("{\"cmd\":\"set\",\"key\":\"read_intermediate\",\"value\":false}").unwrap();
         assert!(matches!(set, Msg::Set { ref key, ref value } if key == "read_intermediate" && *value == serde_json::json!(false)));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"say\",\"text\":\"т\"}").unwrap(), Msg::Say { .. }));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice\",\"text\":\"т\"}").unwrap(), Msg::Voice { .. }));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice_start\",\"agent\":\"codex\"}").unwrap(), Msg::VoiceStart { ref agent } if agent == "codex"));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice_stop\"}").unwrap(), Msg::VoiceStop));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice_toggle\"}").unwrap(), Msg::VoiceToggle));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice_state\",\"state\":\"thinking\"}").unwrap(), Msg::VoiceState { .. }));
     }
 
     #[test]
