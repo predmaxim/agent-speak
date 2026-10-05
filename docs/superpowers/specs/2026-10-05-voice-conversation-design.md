@@ -25,9 +25,10 @@
 
 ## Архитектура
 
-Новый процесс `agent-voice` (Python, `python/agent_voice/`), запускается
-демоном agent-speak как дочерний на время разговора — отдельный systemd unit не
-нужен. Три части:
+Новый процесс `agent_voice` (Python 3.12, отдельный venv
+`~/.local/share/agent-speak/voice-venv` через `uv` — у системного Python 3.14 нет
+надёжных колёс faster-whisper), запускается демоном agent-speak как дочерний на
+время разговора — отдельный systemd unit не нужен. Три части:
 
 ### Слух
 
@@ -37,8 +38,10 @@
 
 Эхоподавление — штатный модуль PipeWire `libpipewire-module-echo-cancel`,
 подключается конфигом `~/.config/pipewire/pipewire.conf.d/echo-cancel.conf`
-(через omarchy-dotfiles, регистрируется в watch.tsv) и становится источником по
-умолчанию. Без него режим работает, но при старте предупреждает.
+(через omarchy-dotfiles, регистрируется в watch.tsv). Устройства по умолчанию не
+меняются: эхо вычитается только из звука, прошедшего через `echo-cancel-sink`,
+поэтому демон в голосовом режиме играет туда (`pw-cat --target`), а `agent_voice`
+слушает `echo-cancel-source`. Без модуля режим работает, но при старте предупреждает.
 
 ### Мозг — адаптер агента
 
@@ -112,8 +115,8 @@ listening ──фраза──▶ thinking ──первая дельта─�
 
 ## Выбор агента (плагин)
 
-Хоткей → `agent-speak voice` → окно плагина `predmaxim.agent-speak`: Claude /
-Codex, последний выбранный первым и в фокусе, Enter — старт (`voice_start`),
+Хоткей → `agent-speak voice` → окно плагина `predmaxim.agent-speak`, первая
+строка «Разговор»: Claude / Codex (во время разговора — «Закончить»), последний выбранный первым и в фокусе, Enter — старт (`voice_start`),
 Esc — отмена. Вид — по `~/omarchy-dotfiles/docs/rules.md` §9. Последний выбор
 хранится в config.toml (`voice_last_agent`). Индикатор показывает фазу голосового
 режима (иконка микрофона вместо обычной). Хоткей — свободная комбинация в
