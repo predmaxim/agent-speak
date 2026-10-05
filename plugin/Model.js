@@ -5,16 +5,17 @@
 
 var SAMPLE = "Так звучит этот голос."
 
-// Nerd Font glyphs: volume-high, pause, volume-low, volume-off.
+// Nerd Font glyphs: volume-high, pause, volume-low, volume-off, microphone.
 var ICONS = {
   speaking: String.fromCodePoint(0xF057E),
   paused: String.fromCodePoint(0xF03E4),
   idle: String.fromCodePoint(0xF057F),
-  off: String.fromCodePoint(0xF0581)
+  off: String.fromCodePoint(0xF0581),
+  voice: String.fromCodePoint(0xF036C)
 }
 
 // No connection to the daemon.
-var OFFLINE = { running: false, speaking: false, paused: false, mode: "", read_intermediate: false, speaker: "", rate: "", project: "" }
+var OFFLINE = { running: false, speaking: false, paused: false, mode: "", read_intermediate: false, speaker: "", rate: "", project: "", voice: "off", voice_agent: "", voice_last_agent: "" }
 
 // A state line, or null for anything else (a broken line must not blank the icon).
 function parse(line) {
@@ -23,9 +24,22 @@ function parse(line) {
   return s && typeof s.running === "boolean" ? s : null
 }
 
+var AGENTS = { claude: "Claude", codex: "Codex" }
+
+// The voice row: off - agents to start (the last one first); on - finish.
+function voiceSection(st, tr) {
+  if (st.voice && st.voice !== "off")
+    return { caption: tr("VOICE CHAT"), options: [{ value: "stop", label: tr("Finish talking to %1", AGENTS[st.voice_agent] || st.voice_agent),
+      cmd: cmd("voice_stop") }] }
+  var order = st.voice_last_agent === "codex" ? ["codex", "claude"] : ["claude", "codex"]
+  return { caption: tr("VOICE CHAT"), options: order.map(function(a) {
+    return { value: a, label: AGENTS[a], cmd: JSON.stringify({ cmd: "voice_start", agent: a }) + "\n" } }) }
+}
+
 // Icon, whether it is lit in the indicator group, and the tooltip key for tr(tip, arg).
 function view(st) {
   if (!st || !st.running) return { icon: ICONS.off, lit: false, tip: "Speech service is not running", arg: "" }
+  if (st.voice && st.voice !== "off") return { icon: ICONS.voice, lit: true, tip: "Talking to %1: " + st.voice, arg: AGENTS[st.voice_agent] || st.voice_agent }
   if (st.paused) return { icon: ICONS.paused, lit: true, tip: "Paused — right click resumes", arg: "" }
   if (st.speaking) return st.project
     ? { icon: ICONS.speaking, lit: true, tip: "Reading: %1", arg: st.project }

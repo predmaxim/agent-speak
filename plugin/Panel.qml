@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
@@ -20,7 +21,19 @@ Panel {
   readonly property var tr: I18n.translator(I18n.textLanguage(function(name) { return Quickshell.env(name) }))
   readonly property var speech: link.speech
   readonly property var look: Model.view(root.speech)
-  readonly property var sections: Model.sections(root.tr)
+  readonly property var sections: [Model.voiceSection(root.speech, root.tr)].concat(Model.sections(root.tr))
+
+  // A chip of the voice row carries its own command line instead of a `set`.
+  function pick(group, chip) {
+    if (chip.cmd) { link.send(chip.cmd); if (chip.value !== "stop") root.close() }
+    else root.choose(group.key, chip.value, group.sample)
+  }
+
+  // Hotkey (`voice` IPC): open with the cursor on the first agent of the voice row.
+  function voice() {
+    if (!root.opened) root.open()
+    Qt.callLater(function() { root.setCursor(0, 0) })
+  }
 
   function choose(key, value, sample) {
     link.send(Model.set(key, value))
@@ -62,7 +75,7 @@ Panel {
     }
     var sec = root.sections[root.curSec]
     var opt = sec ? sec.options[root.curIdx] : null
-    if (opt) root.choose(sec.key, opt.value, sec.sample)
+    if (opt) root.pick(sec, opt)
   }
 
   // The rows vanish with the daemon: drop the cursor with them.
@@ -78,6 +91,11 @@ Panel {
       moveGate.reset()
       Qt.callLater(function() { keyCatcher.forceActiveFocus() })
     }
+  }
+
+  IpcHandler {
+    target: "predmaxim.agent-speak.voice"
+    function voice(): void { root.voice() }
   }
 
   PointerMoveGate { id: moveGate; referenceItem: card }
@@ -268,7 +286,7 @@ Panel {
                     onPositionChanged: function(mouse) {
                       if (moveGate.moved(chipMouse, mouse)) root.setCursor(group.index, chip.index)
                     }
-                    onClicked: root.choose(group.modelData.key, chip.modelData.value, group.modelData.sample)
+                    onClicked: root.pick(group.modelData, chip.modelData)
                   }
                 }
               }
