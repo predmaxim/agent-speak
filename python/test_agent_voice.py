@@ -202,3 +202,26 @@ def test_codex_interrupt_during_send():
         assert a.p.turn_id is None
         a.proc.stdout.feed_eof()
     asyncio.run(run())
+
+
+def test_real_vad_one_phrase_from_synthetic_speech():
+    # 512 отсчётов float32 @16 кГц → вероятность; реальный Silero VAD + Segmenter, без микрофона
+    import pytest
+    pytest.importorskip("silero_vad")
+    import numpy as np, torch
+    from silero_vad import load_silero_vad
+    vad = load_silero_vad()
+    # речь — внешний файл (s16 моно 16 кГц, напр. из Silero TTS): AGENT_VOICE_SPEECH_PCM
+    silence = vad(torch.zeros(512), 16000).item()
+    assert silence < 0.5
+    path = os.environ.get("AGENT_VOICE_SPEECH_PCM")
+    if not path or not os.path.exists(path):
+        pytest.skip("AGENT_VOICE_SPEECH_PCM не задан")
+    pcm = np.frombuffer(open(path, "rb").read(), np.int16)
+    pcm = np.concatenate([np.zeros(8000, np.int16), pcm, np.zeros(16000, np.int16)])
+    seg, evs = Segmenter(), []
+    for i in range(len(pcm) // 512):
+        b = pcm[i * 512:(i + 1) * 512].tobytes()
+        x = torch.from_numpy(np.frombuffer(b, np.int16).astype(np.float32) / 32768)
+        evs += seg.feed(vad(x, 16000).item(), b)
+    assert [e[0] for e in evs] == ["start", "phrase"]
