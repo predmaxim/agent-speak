@@ -12,11 +12,13 @@ pub struct Config {
     pub max_age_secs: u64,
     /// false — в авторежиме только финальный ответ хода, без промежуточных статусов
     pub read_intermediate: bool,
+    /// агент последнего голосового разговора: первым в окне выбора
+    pub voice_last_agent: String,
 }
 
 impl Default for Config {
     fn default() -> Config {
-        Config { mode: "manual".into(), speaker: "xenia".into(), rate: "medium".into(), max_age_secs: 30, read_intermediate: true }
+        Config { mode: "manual".into(), speaker: "xenia".into(), rate: "medium".into(), max_age_secs: 30, read_intermediate: true, voice_last_agent: "claude".into() }
     }
 }
 

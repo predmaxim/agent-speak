@@ -45,6 +45,16 @@ struct Status<'a> {
     speaker: &'a str,
     rate: &'a str,
     project: &'a str,
+    voice: &'a str,
+    voice_agent: &'a str,
+    voice_last_agent: &'a str,
+}
+
+/// Идущий голосовой разговор; child — процесс agent_voice (в тестах нет).
+struct VoiceSession {
+    agent: String,
+    state: String,
+    child: Option<std::process::Child>,
 }
 
 struct State {
@@ -64,6 +74,8 @@ struct State {
     voices: Vec<(String, String)>, // сессия → голос в порядке выдачи; первая держит голос по умолчанию
     seq: u64, // свежие ключи сообщений для фраз без своего id
     projects: HashMap<String, String>, // сессия → имя папки проекта (из хуков и окна в фокусе)
+    voice: Option<VoiceSession>,
+    last_cwd: String, // cwd последнего хука — рабочая папка голосового разговора
 }
 
 fn home() -> PathBuf {
@@ -166,6 +178,8 @@ pub fn run() {
         voices: Vec::new(),
         seq: 0,
         projects: HashMap::new(),
+        voice: None,
+        last_cwd: String::new(),
     };
     for ev in rx {
         st.poll_focus();
@@ -320,6 +334,9 @@ impl State {
             speaker: &self.cfg.speaker,
             rate: &self.cfg.rate,
             project: &project,
+            voice: self.voice.as_ref().map_or("off", |v| v.state.as_str()),
+            voice_agent: self.voice.as_ref().map_or("", |v| v.agent.as_str()),
+            voice_last_agent: &self.cfg.voice_last_agent,
         };
         format!("{}\n", serde_json::to_string(&st).unwrap())
     }
@@ -353,6 +370,11 @@ impl State {
 
     /// only_new: пропустить уже поставленные фразы, поставленные — запомнить (dedup).
     fn enqueue_msg(&mut self, agent: Agent, session: &str, raw: &str, kind: Kind, msg: &str, only_new: bool) -> usize {
+        // голосовой разговор: терминальные агенты молчат; Voice без разговора — опоздавшая фраза
+        if self.voice.is_some() != (kind == Kind::Voice) && kind != Kind::Preview {
+            eprintln!("agent-speak: пропущено (голосовой режим: {}): {}", self.voice.is_some(), raw.chars().take(40).collect::<String>());
+            return 0;
+        }
         let (sentences, unknown) = prepare(raw, &self.terms.lock().unwrap());
         for w in unknown {
             let _ = self.learn.send((agent.clone(), w));
@@ -380,7 +402,7 @@ impl State {
         let n = sentences.len();
         // образец — один элемент: каждый push Preview вытесняет прежний
         let sentences = if kind == Kind::Preview && !sentences.is_empty() { vec![sentences.join(" ")] } else { sentences };
-        let speaker = if kind == Kind::Preview { String::new() } else { self.voice_of(session) };
+        let speaker = if matches!(kind, Kind::Preview | Kind::Voice) { String::new() } else { self.voice_of(session) };
         let item = |text: String| Item { session: session.into(), text, kind: kind.clone(), born: Instant::now(), msg: msg.into(), speaker: speaker.clone() };
         let mut q = self.shared.queue.lock().unwrap();
         if only_new && kind == Kind::Manual {
@@ -439,9 +461,18 @@ impl State {
     }
 
     fn on_msg(&mut self, m: Msg) {
-        let changes = matches!(m, Msg::Stop | Msg::Pause | Msg::Mode);
+        let changes = matches!(m, Msg::Stop | Msg::Pause | Msg::Mode | Msg::VoiceState { .. });
         match m {
             Msg::Stop => self.stop(),
+            Msg::Voice { text } => {
+                self.enqueue(Agent::Claude, "voice", &text, Kind::Voice);
+            }
+            Msg::VoiceState { state } => {
+                if let Some(v) = self.voice.as_mut() {
+                    v.state = state;
+                }
+            }
+            Msg::VoiceStart { .. } | Msg::VoiceStop | Msg::VoiceToggle => {} // Task 2
             Msg::Pause => {
                 let paused = self.shared.queue.lock().unwrap().paused();
                 if paused {
@@ -517,6 +548,9 @@ impl State {
         if let Some(cwd) = p["cwd"].as_str().filter(|_| !session.is_empty()) {
             let name = Path::new(cwd).file_name().and_then(|n| n.to_str()).unwrap_or_default();
             self.projects.insert(session.clone(), name.to_string());
+        }
+        if let Some(cwd) = p["cwd"].as_str().filter(|c| !c.is_empty()) {
+            self.last_cwd = cwd.to_string();
         }
         match kind {
             "user-prompt-submit" => {
@@ -627,6 +661,8 @@ mod tests {
             voices: Vec::new(),
             seq: 0,
         projects: HashMap::new(),
+            voice: None,
+            last_cwd: String::new(),
         }
     }
 
@@ -668,8 +704,54 @@ mod tests {
         let st = test_state();
         assert_eq!(
             st.status_line(),
-            "{\"running\":true,\"speaking\":false,\"paused\":false,\"mode\":\"manual\",\"read_intermediate\":true,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\"}\n"
+            "{\"running\":true,\"speaking\":false,\"paused\":false,\"mode\":\"manual\",\"read_intermediate\":true,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"voice\":\"off\",\"voice_agent\":\"\",\"voice_last_agent\":\"claude\"}\n"
         );
+    }
+
+    fn voice_on(st: &mut State) {
+        st.voice = Some(VoiceSession { agent: "claude".into(), state: "listening".into(), child: None });
+    }
+
+    #[test]
+    fn voice_text_queued_with_default_voice() {
+        let mut st = test_state();
+        voice_on(&mut st);
+        st.on_msg(Msg::Voice { text: "Привет, слушаю.".into() });
+        let it = st.shared.queue.lock().unwrap().pop(Instant::now()).unwrap();
+        assert_eq!(it.kind, Kind::Voice);
+        assert_eq!(it.speaker, "");
+    }
+
+    #[test]
+    fn voice_text_ignored_when_mode_off() {
+        let mut st = test_state();
+        st.on_msg(Msg::Voice { text: "Опоздавшая фраза.".into() });
+        assert!(st.shared.queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn terminal_agents_muted_in_voice_mode() {
+        let mut st = test_state();
+        voice_on(&mut st);
+        st.on_hook("notification", &serde_json::json!({"session_id": "b", "cwd": "/p/x", "message": "Нужно разрешение"}));
+        st.enqueue(Agent::Claude, "a", "Финал.", Kind::Manual);
+        assert!(st.shared.queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn voice_state_broadcast_and_hook_cwd_remembered() {
+        let mut st = test_state();
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut r = reader(ours);
+        st.subscribe(theirs);
+        assert_eq!(next(&mut r)["voice"], "off");
+        voice_on(&mut st);
+        st.on_msg(Msg::VoiceState { state: "thinking".into() });
+        let s = next(&mut r);
+        assert_eq!(s["voice"], "thinking");
+        assert_eq!(s["voice_agent"], "claude");
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s", "cwd": "/home/u/p"}));
+        assert_eq!(st.last_cwd, "/home/u/p");
     }
 
     #[test]
