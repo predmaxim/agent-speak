@@ -740,6 +740,34 @@ mod tests {
 
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Тесты, доходящие до cfg.save()/voice_start: под замком, HOME — временная папка, по выходу восстановлен.
+    struct TempHome {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        old: Option<std::ffi::OsString>,
+        dir: PathBuf,
+    }
+
+    impl TempHome {
+        fn new(tag: &str) -> TempHome {
+            let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = std::env::temp_dir().join(format!("agent-speak-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let old = std::env::var_os("HOME");
+            unsafe { std::env::set_var("HOME", &dir) };
+            TempHome { _lock: lock, old, dir }
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(h) => unsafe { std::env::set_var("HOME", h) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
     fn next(r: &mut BufReader<UnixStream>) -> serde_json::Value {
         let mut l = String::new();
         r.read_line(&mut l).unwrap();
@@ -866,9 +894,7 @@ mod tests {
 
     #[test]
     fn voice_start_spawns_child_remembers_agent_and_routes_sink() {
-        let _g = HOME_LOCK.lock().unwrap();
-        let home = std::env::temp_dir().join(format!("agent-speak-voice-{}", std::process::id()));
-        unsafe { std::env::set_var("HOME", &home) };
+        let _home = TempHome::new("voice");
         let mut st = test_state();
         st.on_msg(Msg::VoiceStart { agent: "codex".into() });
         let v = st.voice.as_ref().unwrap();
@@ -881,7 +907,6 @@ mod tests {
         st.on_msg(Msg::VoiceStop);
         assert!(st.voice.is_none());
         assert_eq!(*st.shared.sink.lock().unwrap(), "");
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -893,7 +918,7 @@ mod tests {
 
     #[test]
     fn dead_child_turns_voice_off() {
-        let _g = HOME_LOCK.lock().unwrap(); // voice_start пишет конфиг в HOME
+        let _home = TempHome::new("dead"); // voice_start пишет конфиг в HOME
         let mut st = test_state();
         st.voice_cmd = vec!["true".into()];
         st.on_msg(Msg::VoiceStart { agent: "claude".into() });
@@ -904,11 +929,7 @@ mod tests {
 
     #[test]
     fn set_applies_saves_broadcasts_and_rejects_bad() {
-        let _g = HOME_LOCK.lock().unwrap();
-        // трогает HOME (как и voice-тест): config::path() читает его при каждом вызове
-        let home = std::env::temp_dir().join(format!("agent-speak-set-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        unsafe { std::env::set_var("HOME", &home) };
+        let _home = TempHome::new("set"); // config::path() читает HOME при каждом вызове
         let mut st = test_state();
         let (ours, theirs) = UnixStream::pair().unwrap();
         let mut r = reader(ours);
@@ -917,7 +938,7 @@ mod tests {
         st.on_msg(Msg::Set { key: "speaker".into(), value: serde_json::json!("baya") });
         assert_eq!(next(&mut r)["speaker"], "baya");
         assert_eq!(st.shared.voice.lock().unwrap().0, "baya");
-        let saved = std::fs::read_to_string(home.join(".config/agent-speak/config.toml")).unwrap();
+        let saved = std::fs::read_to_string(_home.dir.join(".config/agent-speak/config.toml")).unwrap();
         assert!(saved.contains("speaker = \"baya\""), "{saved}");
         st.on_msg(Msg::Set { key: "speaker".into(), value: serde_json::json!("nobody") });
         st.on_msg(Msg::Set { key: "read_intermediate".into(), value: serde_json::json!("false") });
@@ -925,7 +946,6 @@ mod tests {
         let mut l = String::new();
         assert!(r.read_line(&mut l).is_err(), "неверный set ничего не рассылает: {l}");
         assert_eq!((st.cfg.speaker.as_str(), st.cfg.read_intermediate), ("baya", true));
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     fn say(st: &mut State) {
