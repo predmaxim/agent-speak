@@ -75,7 +75,7 @@ class CodexProtocol:
             return []
         if "id" in m and "method" not in m:
             if "error" in m:
-                return [("error", m["error"].get("message", str(m["error"])))]
+                return [("response_error", m["id"], m["error"].get("message", str(m["error"])))]
             return [("response", m["id"], m.get("result"))]
         p = m.get("params") or {}
         if m.get("method") == "item/agentMessage/delta" and p.get("turnId") == self.turn_id:
@@ -93,6 +93,7 @@ class CodexProtocol:
 class CodexAgent:
     def __init__(self, events):
         self.events, self.p, self.proc, self.waiting = events, CodexProtocol(), None, {}
+        self.reader, self.sending, self.cancel = None, False, False
 
     async def _call(self, method, params):
         rid, line = self.p.request(method, params)
@@ -104,7 +105,8 @@ class CodexAgent:
 
     async def start(self, cwd):
         self.proc = await asyncio.create_subprocess_exec(
-            "codex", "app-server", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+            "codex", "app-server", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            limit=16 * 1024 * 1024)
         self.reader = asyncio.create_task(self._read())
         await self._call("initialize", {"clientInfo": {"name": "agent-speak", "version": "1"}})
         self.proc.stdin.write(b'{"method":"initialized"}\n')
@@ -114,24 +116,46 @@ class CodexAgent:
         self.p.thread_id = r["thread"]["id"]
 
     async def _read(self):
-        async for raw in self.proc.stdout:
-            for e in self.p.handle(raw.decode(errors="replace")):
-                if e[0] == "response":
-                    fut = self.waiting.pop(e[1], None)
-                    if fut and not fut.done():
-                        fut.set_result(e[2])
-                else:
-                    await self.events.put(e)
-        await self.events.put(("error", "Codex: app-server завершился"))
+        try:
+            async for raw in self.proc.stdout:
+                for e in self.p.handle(raw.decode(errors="replace")):
+                    if e[0] in ("response", "response_error"):
+                        fut = self.waiting.pop(e[1], None)
+                        if fut and not fut.done():
+                            if e[0] == "response":
+                                fut.set_result(e[2])
+                            else:
+                                fut.set_exception(RuntimeError(f"Codex: {e[2]}"))
+                    else:
+                        await self.events.put(e)
+            await self.events.put(("error", "Codex: app-server завершился"))
+        except Exception as e:
+            await self.events.put(("error", f"Codex: {e}"))
+        finally:  # никто не должен висеть на _call
+            for fut in self.waiting.values():
+                if not fut.done():
+                    fut.set_exception(RuntimeError("Codex: app-server завершился"))
+            self.waiting.clear()
 
     async def send(self, text):
-        r = await self._call("turn/start", {"threadId": self.p.thread_id, "input": [{"type": "text", "text": text}]})
-        self.p.turn_id = r["turn"]["id"]
+        self.sending = True
+        try:
+            r = await self._call("turn/start", {"threadId": self.p.thread_id, "input": [{"type": "text", "text": text}]})
+        finally:
+            self.sending = False
+        turn = r["turn"]["id"]
+        if self.cancel:  # interrupt пришёл, пока ждали turn/start: дельты хода не отдаём
+            self.cancel = False
+            await self._call("turn/interrupt", {"threadId": self.p.thread_id, "turnId": turn})
+        else:
+            self.p.turn_id = turn
 
     async def interrupt(self):
         turn, self.p.turn_id = self.p.turn_id, None  # дальнейшие дельты этого хода отсекаются
         if turn:
             await self._call("turn/interrupt", {"threadId": self.p.thread_id, "turnId": turn})
+        elif self.sending:
+            self.cancel = True
 
     async def close(self):
         if self.proc and self.proc.returncode is None:
