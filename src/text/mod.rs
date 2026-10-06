@@ -1,3 +1,4 @@
+pub mod abbr;
 pub mod clean;
 pub mod numbers;
 pub mod sentences;
@@ -7,11 +8,11 @@ use terms::Terms;
 
 /// Сырой текст агента → предложения для синтеза + незнакомые латинские слова.
 pub fn prepare(raw: &str, terms: &Terms) -> (Vec<String>, Vec<String>) {
-    let cleaned = clean::clean(raw);
+    let cleaned = abbr::abbreviations(&clean::clean(raw));
     let mut out = Vec::new();
     let mut unknown = Vec::new();
     for s in sentences::drop_gutted(sentences::split(&cleaned)) {
-        let (s, u) = terms.apply(&numbers::numbers_to_words(&s));
+        let (s, u) = terms.apply(&numbers::numbers_to_words(&abbr::cyrillic(&s, terms)));
         for w in u {
             if !unknown.contains(&w) {
                 unknown.push(w);

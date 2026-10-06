@@ -29,6 +29,10 @@ impl Terms {
         self.map.contains_key(&word.to_lowercase())
     }
 
+    pub fn get(&self, word: &str) -> Option<&str> {
+        self.map.get(&word.to_lowercase()).map(String::as_str)
+    }
+
     pub fn add(&mut self, word: &str, pron: &str) {
         let w = word.to_lowercase();
         if let Some(p) = &self.path {
@@ -99,10 +103,15 @@ fn speak_unknown(word: &str) -> String {
     let upper = word.len() >= 2 && word.len() <= 5 && word.chars().all(|c| c.is_ascii_uppercase());
     let no_vowels = lower.len() <= 4 && !lower.chars().any(|c| "aeiouy".contains(c));
     if upper || no_vowels {
-        lower.chars().map(letter).collect::<Vec<_>>().join("-")
+        join_letters(&lower.chars().map(letter).collect::<Vec<_>>())
     } else {
         transliterate(&lower)
     }
+}
+
+/// Названия букв → одна строка. Дефис Silero склеивает («пи-ар» → «пивар»).
+pub fn join_letters(names: &[&str]) -> String {
+    names.join("-")
 }
 
 fn letter(c: char) -> &'static str {
