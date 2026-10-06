@@ -495,8 +495,8 @@ impl State {
         };
         self.cfg.voice_last_agent = agent.clone();
         self.cfg.save();
-        *self.shared.sink.lock().unwrap() = "echo-cancel-sink".into();
-        self.stop(); // терминальное чтение обрывается, pw-cat перезапустится с новым выводом
+        // Озвучка идёт в выход по умолчанию: эхо гасит тракт микрофона (omarchy-mic-denoise).
+        self.stop(); // терминальное чтение обрывается
         self.voice = Some(VoiceSession { agent, state: "starting".into(), child: Some(child) });
     }
 
@@ -917,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn voice_start_spawns_child_remembers_agent_and_routes_sink() {
+    fn voice_start_spawns_child_and_remembers_agent() {
         let _home = TempHome::new("voice");
         let mut st = test_state();
         st.on_msg(Msg::VoiceStart { agent: "codex".into() });
@@ -925,7 +925,6 @@ mod tests {
         assert_eq!((v.agent.as_str(), v.state.as_str()), ("codex", "starting"));
         assert!(v.child.is_some());
         assert_eq!(st.cfg.voice_last_agent, "codex");
-        assert_eq!(*st.shared.sink.lock().unwrap(), "echo-cancel-sink");
         st.on_msg(Msg::VoiceStart { agent: "claude".into() }); // уже идёт — не второй процесс
         assert_eq!(st.voice.as_ref().unwrap().agent, "codex");
         st.on_msg(Msg::VoiceStop);
