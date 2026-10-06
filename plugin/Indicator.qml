@@ -6,8 +6,8 @@ import "@PLUGIN_DIR@" as Plugin
 import "@PLUGIN_DIR@/Model.js" as Model
 import "@PLUGIN_DIR@/I18n.js" as I18n
 
-// predmaxim.agent-speak among the bar's indicators: lit while speaking, paused
-// or in auto mode, otherwise only when the group is hovered. Left click
+// predmaxim.agent-speak among the bar's indicators: lit (in the theme's red)
+// while speaking, paused or in auto mode, otherwise only when the group is hovered. Left click
 // toggles the settings window (the hidden widget, Panel.qml);
 // right click pauses or resumes while there is something to pause, otherwise
 // acts like left click.
@@ -22,6 +22,8 @@ BarIndicator {
   // The speaker glyph is drawn small at the group's caption size, like the microphone.
   fontSize: Style.font.body
   active: look.lit
+  useActiveColor: true
+  activeColor: Color.urgent
   activeText: look.icon
   inactiveText: look.icon
   activeTooltipText: root.tr(look.tip, look.arg)
