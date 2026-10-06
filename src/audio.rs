@@ -38,8 +38,9 @@ impl Player {
     /// stdin в fread прямо в главном цикле и не отвечает PipeWire — пропали наушники,
     /// поток переводят на другой выход, и этот выход виснет вместе со всеми потоками.
     pub fn close(&mut self) {
-        if let Some(c) = self.child.as_mut() {
+        if let Some(mut c) = self.child.take() {
             drop(c.stdin.take());
+            std::thread::spawn(move || { let _ = c.wait(); }); // иначе вышедший pw-cat висит зомби до следующей фразы
         }
     }
 
