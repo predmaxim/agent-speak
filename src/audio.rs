@@ -17,7 +17,7 @@ impl Player {
 
     pub fn write(&mut self, pcm: &[u8]) -> bool {
         let sink = self.sink.lock().unwrap().clone();
-        if needs_respawn(self.child.is_some(), &self.spawned_sink, &sink) {
+        if needs_respawn(self.child.as_ref().is_some_and(|c| c.stdin.is_some()), &self.spawned_sink, &sink) {
             self.reset();
             let mut cmd = Command::new("pw-cat");
             cmd.args(["--playback", "--raw", "--format", "s16", "--rate", "48000", "--channels", "1"]);
@@ -32,6 +32,15 @@ impl Player {
             self.reset();
         }
         ok
+    }
+
+    /// Закрыть stdin: pw-cat доиграет буфер и выйдет сам. Простаивать ему нельзя: он ждёт
+    /// stdin в fread прямо в главном цикле и не отвечает PipeWire — пропали наушники,
+    /// поток переводят на другой выход, и этот выход виснет вместе со всеми потоками.
+    pub fn close(&mut self) {
+        if let Some(c) = self.child.as_mut() {
+            drop(c.stdin.take());
+        }
     }
 
     pub fn reset(&mut self) {

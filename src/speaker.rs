@@ -27,6 +27,7 @@ pub trait Synth {
 pub trait Sink {
     fn write(&mut self, pcm: &[u8]) -> bool;
     fn reset(&mut self);
+    fn close(&mut self);
 }
 impl Synth for Tts {
     fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Option<Vec<u8>> {
@@ -39,6 +40,9 @@ impl Sink for Player {
     }
     fn reset(&mut self) {
         Player::reset(self)
+    }
+    fn close(&mut self) {
+        Player::close(self)
     }
 }
 
@@ -138,6 +142,8 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                             if q.paused() && it.kind != Kind::Preview {
                                 q.push_front(it); // после паузы — с начала предложения
                             }
+                        } else {
+                            player.close(); // хвост доигран, новой фразы нет
                         }
                     }
                 }
@@ -155,6 +161,7 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
         let speaker = if item.speaker.is_empty() { default } else { item.speaker.clone() };
         let Some(pcm) = tts.synth(&item.text, &speaker, &rate) else {
             // синтез упал: очередь ждёт, а не теряет фразу
+            player.close();
             let mut q = shared.queue.lock().unwrap();
             requeue(&shared, &mut q, item, my_gen);
             shared.set_busy(None);
@@ -225,6 +232,9 @@ mod tests {
         }
         fn reset(&mut self) {
             self.0.lock().unwrap().push("reset");
+        }
+        fn close(&mut self) {
+            self.0.lock().unwrap().push("close");
         }
     }
 
@@ -299,8 +309,19 @@ mod tests {
         say(&shared);
         wait(|| *fails.lock().unwrap() == 0 && !shared.busy.load(Ordering::SeqCst) && !shared.queue.lock().unwrap().is_empty());
         assert_eq!(count(&ev, "write"), 0); // ждёт 10 с, не выбросила
+        assert_eq!(count(&ev, "close"), 1); // pw-cat не простаивает, пока синтез лежит
         shared.interrupt(); // будит ожидание
         wait(|| count(&ev, "write") == 2);
+    }
+
+    #[test]
+    fn silence_after_tail_closes_player() {
+        let (shared, ev) = start(0, 0);
+        say(&shared);
+        wait(|| count(&ev, "close") == 1);
+        assert_eq!(count(&ev, "reset"), 0); // не обрывает, а даёт доиграть
+        say(&shared); // следующая фраза снова пишет
+        wait(|| count(&ev, "write") == 4);
     }
 
     #[test]
