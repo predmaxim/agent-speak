@@ -26,21 +26,12 @@ def transcribe(model, pcm):
     return " ".join(s.text.strip() for s in segs).strip()
 
 
-def source():
-    """Источник эхоподавления, если модуль загружен; иначе — микрофон по умолчанию."""
-    names = subprocess.run(["pactl", "list", "short", "sources"], capture_output=True, text=True).stdout
-    return "echo-cancel-source" if "echo-cancel-source" in names else None
-
-
 async def listen(out, model):
     import torch
     from silero_vad import load_silero_vad
     vad = load_silero_vad()
-    src = source()
-    if not src:
-        await out.put(("warn", "нет эхоподавления: без наушников перебивание сработает на свой голос"))
+    # Default input: echo cancellation lives in the microphone chain (omarchy-mic-denoise).
     cmd = ["pw-record", "--rate", str(RATE), "--channels", "1", "--format", "s16"]
-    cmd += ["--target", src] if src else []
     proc = await asyncio.create_subprocess_exec(*cmd, "-", stdout=asyncio.subprocess.PIPE)
     phrases = asyncio.Queue()
 
