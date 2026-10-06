@@ -53,7 +53,7 @@ impl Terms {
             }
             let w = word.to_lowercase();
             match self.map.get(&w) {
-                Some(p) => out.push_str(p),
+                Some(p) => out.push_str(&spoken(p)),
                 None => {
                     out.push_str(&speak_unknown(word));
                     if !unknown.contains(&w) {
@@ -109,9 +109,20 @@ fn speak_unknown(word: &str) -> String {
     }
 }
 
-/// Названия букв → одна строка. Дефис Silero склеивает («пи-ар» → «пивар»).
+/// Названия букв → одна строка. Дефис Silero склеивает («пи-ар» → «пивар»), запятая рвёт на слова —
+/// лучше всего пробел (замер: /tmp/tts-spike/sep, латинские аббревиатуры 13/13 против 9/13 с дефисом).
 pub fn join_letters(names: &[&str]) -> String {
-    names.join("-")
+    names.join(" ")
+}
+
+/// Словарное «пи-ар» (все части ≤3 букв) — аббревиатура по буквам: дефис → пробел; «веб-ст+орм» не трогаем.
+fn spoken(pron: &str) -> String {
+    let parts: Vec<&str> = pron.split('-').collect();
+    if parts.len() >= 2 && parts.iter().all(|p| p.chars().filter(|&c| c != '+').count() <= 3) {
+        parts.join(" ")
+    } else {
+        pron.to_string()
+    }
 }
 
 fn letter(c: char) -> &'static str {
@@ -165,7 +176,7 @@ mod tests {
     #[test]
     fn known_replaced_case_insensitive() {
         let (s, unknown) = t().apply("Правка в Hyprland через NPM.");
-        assert_eq!(s, "Правка в хайпрлэнд через эн-пи-эм.");
+        assert_eq!(s, "Правка в хайпрлэнд через эн пи эм.");
         assert!(unknown.is_empty());
     }
 
@@ -179,8 +190,14 @@ mod tests {
     #[test]
     fn abbreviation_spelled() {
         let (s, unknown) = t().apply("Через SSH и gpg.");
-        assert_eq!(s, "Через эс-эс-эйч и джи-пи-джи.");
+        assert_eq!(s, "Через эс эс эйч и джи пи джи.");
         assert_eq!(unknown, vec!["ssh", "gpg"]);
+    }
+
+    #[test]
+    fn dictionary_hyphen_only_between_letter_names() {
+        let t = Terms::from_str("vrr\tви-+ар-+ар\nwebstorm\tвеб-ст+орм\njson\tджей-сон\n");
+        assert_eq!(t.apply("vrr webstorm json").0, "ви +ар +ар веб-ст+орм джей-сон");
     }
 
     #[test]

@@ -34,4 +34,11 @@ mod tests {
         assert_eq!(s, vec!["Готово.", "Поправил хайпрлэнд точка луа, три правки в хайпрлэнд."]);
         assert_eq!(u, vec!["lua"]);
     }
+
+    #[test]
+    fn prepare_abbreviations_and_letters() {
+        let t = Terms::from_str("pr\tп+и-+ар\n");
+        let (s, _) = prepare("По ТЗ, т. е. так: PR #42, версия v5, пункт б. Всё и т. д.", &t);
+        assert_eq!(s, vec!["По тэ зэ, то есть так: п+и +ар номер сорок два, версия ви пять, пункт бэ.", "Всё и так далее."]);
+    }
 }

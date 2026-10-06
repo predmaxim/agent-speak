@@ -150,15 +150,15 @@ mod tests {
     #[test]
     fn cyrillic_acronyms() {
         let s = cyrillic("По ТЗ это делает ИИ, а ПР закрыт.", &t());
-        assert!(s.contains("тэ зэ") || s.contains("тэ-зэ") || s.contains("тэ, зэ"), "{s}");
-        assert!(!s.contains("ТЗ") && !s.contains("ИИ") && !s.contains("ПР"), "{s}");
-        assert!(s.contains("эм") && s.contains("вэ") && s.contains("дэ") || !cyrillic("МВД", &t()).contains("МВД"));
+        assert_eq!(s, "По тэ зэ это делает и и, а пэ эр закрыт.");
+        assert_eq!(cyrillic("МВД и ЙЪ", &t()), "эм вэ дэ и и краткое твёрдый знак");
     }
 
     #[test]
     fn acronym_dictionary_first_and_boundaries() {
         assert_eq!(cyrillic("ГОСТ есть", &t()), "гост есть");
-        assert_eq!(cyrillic("Но НЕ ВСЕГДА, ДА", &t()).split_whitespace().count() >= 4, true);
+        assert_eq!(cyrillic("Но НЕ ВСЕГДА, ДА", &t()), "Но эн е ВСЕГДА, дэ а");
+        assert_eq!(cyrillic("ТЗ-шник", &t()), "ТЗ-шник");
         assert!(cyrillic("ВНИМАНИЕ тут", &t()).starts_with("ВНИМАНИЕ"));
         assert!(cyrillic("А Я тут", &t()).starts_with("А Я"));
     }
