@@ -129,7 +129,7 @@ pub fn parse_learned(out: &str, asked: &[String]) -> Vec<(String, String)> {
         .map(|(w, p)| (w.trim().to_lowercase(), plus_stress(p.trim())))
         .filter(|(w, p)| {
             asked.contains(w) && !p.is_empty() && p.chars().any(|c| ('а'..='я').contains(&c.to_lowercase().next().unwrap()))
-                && !p.chars().any(|c| c.is_ascii_alphabetic())
+                && !p.chars().any(|c| c.is_alphabetic() && !('\u{400}'..='\u{4FF}').contains(&c)) // латиница (и é) — движок давится
         })
         .collect()
 }
@@ -152,6 +152,13 @@ mod tests {
         let asked = vec!["tokio".to_string(), "serde".to_string()];
         let out = "tokio\tток+ио\nserde\tserde\nfoo\tфу\nмусор";
         assert_eq!(parse_learned(out, &asked), vec![("tokio".to_string(), "ток+ио".to_string())]);
+    }
+
+    #[test]
+    fn learned_with_any_latin_letter_rejected() {
+        let asked = vec!["demo".to_string(), "mode".to_string(), "ok".to_string()];
+        let out = "demo\tдé+мо\nmode\tмóуд\nok\tок-ей\n";
+        assert_eq!(parse_learned(out, &asked), vec![("ok".to_string(), "ок-ей".to_string())]);
     }
 
     #[test]
