@@ -209,6 +209,28 @@ fn final_message(p: &serde_json::Value, transcript: &Path) -> Option<String> {
     claude::last_turn(&std::fs::read_to_string(transcript).unwrap_or_default()).pop()
 }
 
+/// Известные уведомления Claude Code по-русски. Незнакомые — как есть (транслитом):
+/// так слышно, что текст новый и его пора добавить сюда.
+fn notification_text(msg: &str) -> String {
+    if let Some(tool) = msg.strip_prefix("Claude needs your permission to use ") {
+        // mcp__server__tool транслитом не прочесть — только имя без служебных частей
+        return format!("Клоду нужно разрешение на {}", tool.rsplit("__").next().unwrap_or(tool));
+    }
+    if let Some(what) = msg.strip_prefix("Claude needs your permission to reply to comments on ") {
+        return format!("Клоду нужно разрешение ответить на комментарии в {what}");
+    }
+    match msg {
+        "" => "Клод ждёт ответа",
+        "Claude is waiting for your input" => "Клод ждёт ответа",
+        "Claude needs your input" | "Claude Code needs your input" => "Клоду нужен ответ",
+        "Claude needs your permission" => "Клоду нужно разрешение",
+        "Claude Code needs your approval for the plan" => "Клоду нужно одобрение плана",
+        "Claude needs your approval for a review artifact" => "Клоду нужно одобрение артефакта",
+        _ => msg,
+    }
+    .into()
+}
+
 /// Одно соединение: команды построчно до закрытия (CLI и хуки — одна строка).
 /// subscribe — копия потока уходит в основной цикл подписчиком, чтение команд продолжается.
 // ponytail: поток на соединение без лимита — клиенты только свои (CLI, хуки, плагин)
@@ -647,14 +669,11 @@ impl State {
                 }
             }
             "notification" => {
-                let msg = p["message"].as_str().unwrap_or("Агент ждёт ответа");
-                let prefix = if self.focused().is_some_and(|f| f.id == session) {
-                    String::new()
-                } else {
-                    let cwd = p["cwd"].as_str().unwrap_or_default();
-                    format!("{}: ", Path::new(cwd).file_name().and_then(|n| n.to_str()).unwrap_or("Агент"))
-                };
-                self.enqueue(Agent::Claude, &session, &format!("{prefix}{msg}"), Kind::Urgent);
+                // проект называем всегда, даже для окна в фокусе: сразу ясно, где ждут
+                let msg = notification_text(p["message"].as_str().unwrap_or_default());
+                let cwd = p["cwd"].as_str().unwrap_or_default();
+                let project = Path::new(cwd).file_name().and_then(|n| n.to_str()).unwrap_or("Агент");
+                self.enqueue(Agent::Claude, &session, &format!("{project}: {msg}"), Kind::Urgent);
             }
             "message-display" => {
                 let Some(ev) = MdEvent::from_json(p) else {
@@ -1197,6 +1216,26 @@ mod tests {
         assert_eq!(st.shared.generation.load(Ordering::SeqCst), g0);
         st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "a"}));
         assert_eq!(st.shared.generation.load(Ordering::SeqCst), g0);
+    }
+
+    #[test]
+    fn notification_text_is_russian() {
+        let t = notification_text;
+        assert_eq!(t("Claude needs your permission to use Bash"), "Клоду нужно разрешение на Bash");
+        assert_eq!(t("Claude needs your permission to use mcp__srv__query"), "Клоду нужно разрешение на query");
+        assert_eq!(t("Claude is waiting for your input"), "Клод ждёт ответа");
+        assert_eq!(t("Claude Code needs your approval for the plan"), "Клоду нужно одобрение плана");
+        assert_eq!(t("Claude Code needs your input"), "Клоду нужен ответ");
+        assert_eq!(t(""), "Клод ждёт ответа");
+        assert_eq!(t("Something new"), "Something new"); // незнакомое — транслитом
+    }
+
+    #[test]
+    fn notification_names_project_even_in_focus() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("a"), 0);
+        st.on_hook("notification", &serde_json::json!({"session_id": "a", "cwd": "/p/проект", "message": "Claude is waiting for your input"}));
+        assert_eq!(texts(&st), vec!["проект: Клод ждёт ответа."]);
     }
 
     #[test]
