@@ -68,9 +68,27 @@ pub fn last_turn(content: &str) -> Vec<String> {
     if cur.is_empty() { prev } else { cur }
 }
 
+/// Последний вызов инструмента — то, чего агент ждёт, когда просит разрешения.
+pub fn last_tool(content: &str) -> Option<String> {
+    content.lines().rev().find_map(|line| {
+        let e = serde_json::from_str::<Value>(line).ok().filter(|e| e["type"] == "assistant")?;
+        let calls = e["message"]["content"].as_array()?.iter().filter(|c| c["type"] == "tool_use");
+        calls.last()?["name"].as_str().map(str::to_string)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_tool_is_latest_call() {
+        let t = |n: &str| format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"{n}"}}]}}}}"#);
+        let text = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}"#;
+        let log = [t("Bash"), t("AskUserQuestion"), text.into(), r#"{"type":"user"}"#.into()].join("\n");
+        assert_eq!(last_tool(&log).as_deref(), Some("AskUserQuestion"));
+        assert_eq!(last_tool("обрывок строки"), None);
+    }
     const FX: &str = include_str!("../../tests/fixtures/claude.jsonl");
 
     #[test]

@@ -209,12 +209,33 @@ fn final_message(p: &serde_json::Value, transcript: &Path) -> Option<String> {
     claude::last_turn(&std::fs::read_to_string(transcript).unwrap_or_default()).pop()
 }
 
+/// Хвост транскрипта: последний вызов инструмента всегда в конце, весь файл (мегабайты) читать незачем.
+fn tail_of(path: &str) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut buf = Vec::new();
+    if let Ok(mut f) = std::fs::File::open(path) {
+        let _ = f.seek(SeekFrom::End(-256 * 1024)).or_else(|_| f.seek(SeekFrom::Start(0)));
+        let _ = f.read_to_end(&mut buf);
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 /// Известные уведомления Claude Code по-русски. Незнакомые — как есть (транслитом):
 /// так слышно, что текст новый и его пора добавить сюда.
-fn notification_text(msg: &str) -> String {
-    if let Some(tool) = msg.strip_prefix("Claude needs your permission to use ") {
-        // mcp__server__tool транслитом не прочесть — только имя без служебных частей
-        return format!("Клоду нужно разрешение на {}", tool.rsplit("__").next().unwrap_or(tool));
+/// Общий «Claude needs your permission» шлётся на любой диалог, даже на вопрос, — что именно ждёт,
+/// видно по последнему инструменту в транскрипте (`last_tool`).
+fn notification_text(msg: &str, last_tool: impl FnOnce() -> Option<String>) -> String {
+    let tool = match msg {
+        "Claude needs your permission" => last_tool(),
+        _ => msg.strip_prefix("Claude needs your permission to use ").map(str::to_string),
+    };
+    if let Some(tool) = tool {
+        return match tool.as_str() {
+            "AskUserQuestion" => "Клод задал вопрос".into(),
+            "ExitPlanMode" => "Клоду нужно одобрение плана".into(),
+            // mcp__server__tool транслитом не прочесть — только имя без служебных частей
+            t => format!("Клоду нужно разрешение на {}", t.rsplit("__").next().unwrap_or(t)),
+        };
     }
     if let Some(what) = msg.strip_prefix("Claude needs your permission to reply to comments on ") {
         return format!("Клоду нужно разрешение ответить на комментарии в {what}");
@@ -670,7 +691,8 @@ impl State {
             }
             "notification" => {
                 // проект называем всегда, даже для окна в фокусе: сразу ясно, где ждут
-                let msg = notification_text(p["message"].as_str().unwrap_or_default());
+                let transcript = p["transcript_path"].as_str().unwrap_or_default();
+                let msg = notification_text(p["message"].as_str().unwrap_or_default(), || claude::last_tool(&tail_of(transcript)));
                 let cwd = p["cwd"].as_str().unwrap_or_default();
                 let project = Path::new(cwd).file_name().and_then(|n| n.to_str()).unwrap_or("Агент");
                 self.enqueue(Agent::Claude, &session, &format!("{project}: {msg}"), Kind::Urgent);
@@ -1220,7 +1242,13 @@ mod tests {
 
     #[test]
     fn notification_text_is_russian() {
-        let t = notification_text;
+        let t = |m: &str| notification_text(m, || None);
+        let with = |tool: &str| notification_text("Claude needs your permission", || Some(tool.into()));
+        assert_eq!(with("AskUserQuestion"), "Клод задал вопрос");
+        assert_eq!(with("ExitPlanMode"), "Клоду нужно одобрение плана");
+        assert_eq!(with("Edit"), "Клоду нужно разрешение на Edit");
+        assert_eq!(t("Claude needs your permission"), "Клоду нужно разрешение");
+        assert_eq!(t("Claude needs your permission to use AskUserQuestion"), "Клод задал вопрос");
         assert_eq!(t("Claude needs your permission to use Bash"), "Клоду нужно разрешение на Bash");
         assert_eq!(t("Claude needs your permission to use mcp__srv__query"), "Клоду нужно разрешение на query");
         assert_eq!(t("Claude is waiting for your input"), "Клод ждёт ответа");
