@@ -233,8 +233,21 @@ fn notification_text(msg: &str, last_tool: impl FnOnce() -> Option<String>) -> S
         return match tool.as_str() {
             "AskUserQuestion" => "Клод задал вопрос".into(),
             "ExitPlanMode" => "Клоду нужно одобрение плана".into(),
-            // mcp__server__tool транслитом не прочесть — только имя без служебных частей
-            t => format!("Клоду нужно разрешение на {}", t.rsplit("__").next().unwrap_or(t)),
+            t => format!("Клоду нужно разрешение на {}", match t {
+                "Bash" => "команду",
+                "Edit" | "MultiEdit" => "правку файла",
+                "Write" => "запись файла",
+                "Read" => "чтение файла",
+                "NotebookEdit" => "правку блокнота",
+                "Glob" | "Grep" => "поиск по файлам",
+                "WebFetch" => "загрузку страницы",
+                "WebSearch" => "поиск в интернете",
+                "Agent" | "Task" => "запуск агента",
+                "Skill" => "запуск навыка",
+                "Workflow" => "запуск сценария",
+                // незнакомое — транслитом; у mcp__server__tool только имя без служебных частей
+                t => t.rsplit("__").next().unwrap_or(t),
+            }),
         };
     }
     if let Some(what) = msg.strip_prefix("Claude needs your permission to reply to comments on ") {
@@ -1246,10 +1259,10 @@ mod tests {
         let with = |tool: &str| notification_text("Claude needs your permission", || Some(tool.into()));
         assert_eq!(with("AskUserQuestion"), "Клод задал вопрос");
         assert_eq!(with("ExitPlanMode"), "Клоду нужно одобрение плана");
-        assert_eq!(with("Edit"), "Клоду нужно разрешение на Edit");
+        assert_eq!(with("Edit"), "Клоду нужно разрешение на правку файла");
         assert_eq!(t("Claude needs your permission"), "Клоду нужно разрешение");
         assert_eq!(t("Claude needs your permission to use AskUserQuestion"), "Клод задал вопрос");
-        assert_eq!(t("Claude needs your permission to use Bash"), "Клоду нужно разрешение на Bash");
+        assert_eq!(t("Claude needs your permission to use Bash"), "Клоду нужно разрешение на команду");
         assert_eq!(t("Claude needs your permission to use mcp__srv__query"), "Клоду нужно разрешение на query");
         assert_eq!(t("Claude is waiting for your input"), "Клод ждёт ответа");
         assert_eq!(t("Claude Code needs your approval for the plan"), "Клоду нужно одобрение плана");
