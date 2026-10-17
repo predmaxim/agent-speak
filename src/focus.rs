@@ -54,7 +54,7 @@ fn under(mut pid: u32, ancestor: u32) -> bool {
 }
 
 /// Имя папки рабочего каталога процесса; нет процесса — пустая строка.
-fn project_of(pid: u32) -> String {
+pub fn project_of(pid: u32) -> String {
     std::fs::read_link(format!("/proc/{pid}/cwd"))
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -94,17 +94,30 @@ fn claude_under(win: u32) -> Option<SessionRef> {
     None
 }
 
+/// Открытый процессом rollout Codex: (id сессии, путь).
+pub fn codex_rollout(pid: u32) -> Option<(String, PathBuf)> {
+    for fd in std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?.flatten() {
+        let Ok(target) = std::fs::read_link(fd.path()) else { continue };
+        if let Some((Agent::Codex, id)) = session_of(&target) {
+            return Some((id, target));
+        }
+    }
+    None
+}
+
+/// Codex пользователя: не `exec` (разовые запуски) и не `app-server`. cmdline — аргументы через \0.
+pub fn is_user_codex(cmdline: &str) -> bool {
+    !cmdline.split('\0').skip(1).any(|a| a == "exec" || a == "app-server")
+}
+
 fn codex_under(win: u32) -> Option<SessionRef> {
     for p in std::fs::read_dir("/proc").ok()?.flatten() {
         let Some(pid) = p.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
         if !std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "codex") || !under(pid, win) {
             continue;
         }
-        for fd in std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?.flatten() {
-            let Ok(target) = std::fs::read_link(fd.path()) else { continue };
-            if let Some((Agent::Codex, id)) = session_of(&target) {
-                return Some(SessionRef { agent: Agent::Codex, id, transcript: target, project: project_of(pid) });
-            }
+        if let Some((id, transcript)) = codex_rollout(pid) {
+            return Some(SessionRef { agent: Agent::Codex, id, transcript, project: project_of(pid) });
         }
     }
     None
@@ -137,6 +150,12 @@ pub fn parse_learned(out: &str, asked: &[String]) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_codex_only() {
+        assert!(is_user_codex("codex\0") && is_user_codex("codex\0resume\0"));
+        assert!(!is_user_codex("codex\0exec\0слово") && !is_user_codex("codex\0app-server\0"));
+    }
 
     #[test]
     fn session_from_paths() {

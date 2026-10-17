@@ -77,6 +77,15 @@ pub fn last_tool(content: &str) -> Option<String> {
     })
 }
 
+/// Вопрос пользователю, если самый поздний вызов инструмента — AskUserQuestion.
+pub fn last_question(content: &str) -> Option<String> {
+    let call = content.lines().rev().find_map(|line| {
+        let e = serde_json::from_str::<Value>(line).ok().filter(|e| e["type"] == "assistant")?;
+        e["message"]["content"].as_array()?.iter().filter(|c| c["type"] == "tool_use").last().cloned()
+    })?;
+    (call["name"] == "AskUserQuestion").then(|| call["input"]["questions"][0]["question"].as_str().map(str::to_string))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +157,13 @@ mod tests {
         assert_eq!(turn(&[user("в"), said("раз"), user("ещё"), said("два")]), ["два"]);
         let meta = r#"{"type":"user","isMeta":true,"message":{"content":"обычный текст"}}"#.to_string();
         assert_eq!(turn(&[user("в"), said("раз"), meta, said("два")]), ["раз", "два"]);
+    }
+
+    #[test]
+    fn last_question_only_if_latest_call_is_ask() {
+        let ask = |q: &str| format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"AskUserQuestion","input":{{"questions":[{{"question":"{q}"}}]}}}}]}}}}"#);
+        let bash = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{}}]}}"#;
+        assert_eq!(last_question(&[ask("Старый?"), ask("Какой вариант окна?"), r#"{"type":"user"}"#.into()].join("\n")).as_deref(), Some("Какой вариант окна?"));
+        assert_eq!(last_question(&[ask("Старый?"), bash.into()].join("\n")), None);
     }
 }

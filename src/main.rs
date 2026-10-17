@@ -1,4 +1,5 @@
 mod assemble;
+mod agents;
 mod audio;
 mod config;
 mod daemon;
