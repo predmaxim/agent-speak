@@ -8,6 +8,8 @@ import os
 import signal
 import subprocess
 import sys
+import time
+import traceback
 
 from . import link
 from .context import foreign_capture, mic_outputs, on_ac
@@ -24,37 +26,65 @@ def cuda_env():
 
 
 def notify(text):
-    with contextlib.suppress(OSError, subprocess.SubprocessError):  # зависший dbus не держит цикл Омы
-        subprocess.run(["notify-send", "-t", "4000", "-a", "Озвучка", "Ома", text], timeout=5)
+    """Уведомление без ожидания: notify-send не держит цикл Омы (зависший dbus и т. п.)."""
+    with contextlib.suppress(OSError):
+        subprocess.Popen(["notify-send", "-t", "4000", "-a", "Озвучка", "Ома", text],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def kill_children():
+    """SIGTERM ещё живым детям (claude, pw-record): os._exit минует atexit-сборщик Agent SDK."""
+    pids = []
+    for f in glob.glob("/proc/self/task/*/children"):  # дети всех потоков процесса
+        with contextlib.suppress(OSError), open(f) as fh:
+            pids += fh.read().split()
+    for pid in pids:
+        with contextlib.suppress(OSError):
+            os.kill(int(pid), signal.SIGTERM)
 
 
 class Oma:
     """Связывает разговор, слух, мозг и демона: команды и события → действия Conversation → исполнение."""
 
-    def __init__(self, conv, ear, brain, whisper, send=link.send):
+    def __init__(self, conv, ear, brain, whisper, send=link.send, notify=notify, clock=time.monotonic):
         self.conv, self.ear, self.brain, self.whisper, self.send = conv, ear, brain, whisper, send
+        self.notify, self.clock = notify, clock
         self.history = []  # текущий чат, как его видит окно: история из open() + реплики этого процесса
-        self.n = 0         # номер ответа: пузырь oma-<n>
+        self.n = 0         # номер ответа: пузырь oma-<pid>-<n>
         self.tasks = set()
+        self.notified = (None, 0.0)  # последнее уведомление: текст, время
 
     def emit(self, line):
         self.send({"cmd": "emit", "line": line})
 
+    def bg(self, coro):
+        """Фоновая задача: ссылку держим (иначе её может собрать GC), сбой — в журнал."""
+        t = asyncio.create_task(coro)
+        self.tasks.add(t)
+        t.add_done_callback(self._bg_done)
+
+    def _bg_done(self, t):
+        self.tasks.discard(t)
+        if not t.cancelled() and t.exception():
+            print(f"agent_voice: фон: {t.exception()!r}", file=sys.stderr, flush=True)
+
     def warm(self):
         """whisper — в фоне (заодно отметка «используется»); загрузился — орб уходит из «loading»."""
-        t = asyncio.create_task(self._warm())
-        self.tasks.add(t)  # держим ссылку: иначе задачу может собрать GC
-        t.add_done_callback(self.tasks.discard)
+        self.bg(self._warm())
 
     async def _warm(self):
         was = self.whisper.ready
-        try:
-            await self.whisper.get()
-        except Exception as e:
-            print(f"agent_voice: whisper: {e!r}", file=sys.stderr, flush=True)
-            return
+        await self.whisper.get()
         if not was:
             await self.act([("state", self.conv.state)])
+
+    def _warn(self, text):
+        """В журнал — каждая ошибка; уведомление — новый текст или тот же, но не чаще раза в 5 мин."""
+        print(f"agent_voice: {text}", file=sys.stderr, flush=True)
+        now = self.clock()
+        if text != self.notified[0] or now - self.notified[1] >= 300:
+            self.notified = (text, now)
+            self.notify(text[:200])
 
     def _dialog(self, on):
         acts = self.conv.set_dialog(on)
@@ -118,8 +148,7 @@ class Oma:
         elif kind == "opened":
             self.emit({"chat": {"key": ev[1], "was": ev[2], "messages": self.history}})
         elif kind == "error":
-            print(f"agent_voice: {ev[1]}", file=sys.stderr, flush=True)
-            notify(ev[1][:200])
+            self._warn(ev[1])
             if not self.ear.open and (c.dialog or c.state in ("listening", "paused")):  # слух умер сам
                 await self.act(self._dialog(False) if c.dialog else c.cancel())
             elif c.turn and ev[1].startswith("Claude"):  # ход мозга оборвался — в покой
@@ -142,7 +171,7 @@ class Oma:
                     await self.brain.send(a[1])
                 except Exception as e:
                     failed = e
-                if self.brain.key != key:  # устаревший чат сменился новым: реплика — первая в нём
+                if key.startswith("chat:") and self.brain.key == "new":  # устаревший чат сменился новым: реплика — первая в нём
                     self.history = []
                 self.n += 1
                 self._chat("me", a[1])
@@ -153,7 +182,7 @@ class Oma:
             elif k == "say":
                 self.send({"cmd": "voice", "text": a[1]})
             elif k == "show":
-                self.emit({"bubble": {"id": f"oma-{self.n}", "who": "Ома", "text": a[1], "kind": "oma", "append": True}})
+                self.emit({"bubble": {"id": f"oma-{os.getpid()}-{self.n}", "who": "Ома", "text": a[1], "kind": "oma", "append": True}})
                 self._chat("oma", a[1])
             elif k == "draft":
                 self.emit({"bubble": {"id": "draft", "who": "Ты", "text": a[1], "kind": "draft", "append": False}})
@@ -166,92 +195,119 @@ class Oma:
             await self.event(("error", f"Claude: {failed}"))
 
 
-async def main():
-    from .brain import Brain
-    from .ear import Ear, Whisper
+async def serve(oma, events, reader):
+    """Команды из reader и события из очереди → Ома по одной. EOF обрывает диспетчер сразу, даже посреди await
+    (повисший connect не держит старую Ому с открытым pw-record). Упавший читатель или диспетчер — наружу."""
+    async def read():
+        async for line in reader:
+            try:
+                events.put_nowait(("cmd", json.loads(line)))
+            except ValueError:
+                print(f"agent_voice: не JSON: {line[:100]!r}", file=sys.stderr, flush=True)
 
-    loop = asyncio.get_running_loop()
-    events, agents = asyncio.Queue(), []
-    whisper = Whisper()
-    oma = Oma(Conversation(), Ear(events, whisper), Brain(events, lambda: agents), whisper)
-
-    def on_agents(lst):
-        agents[:] = lst  # снимок для инструментов мозга
-
-    last = {}
-
-    def on_status(d):  # только смены: повтор «не говорит» до начала звука не должен закончить ответ
-        for field, kind in (("speaking", "audio"), ("quiet", "quiet")):
-            v = bool(d.get(field))
-            if last.get(field) != v:
-                last[field] = v
-                events.put_nowait((kind, v))
-
-    async def stdin():
-        r = asyncio.StreamReader(limit=1 << 22)  # ask со вставленным логом бывает длинным
-        try:
-            await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(r), sys.stdin)
-            async for line in r:
-                try:
-                    events.put_nowait(("cmd", json.loads(line)))
-                except ValueError:
-                    print(f"agent_voice: не JSON: {line[:100]!r}", file=sys.stderr, flush=True)
-        finally:
-            events.put_nowait(("eof",))
-
-    async def daemon():
-        while True:  # демон закрыл подписку или ещё не слушает — переподключиться
-            with contextlib.suppress(OSError):
-                await link.watch(on_status, on_agents)
-            await asyncio.sleep(2)
-
-    async def power():
+    async def dispatch():
         while True:
-            ac = on_ac()
-            if ac or oma.ear.open:  # от сети — тёплый; слух открыт — модель «используется»
-                oma.warm()
-            if not oma.ear.open:  # «300 с без слуха» считаются от закрытия слуха
-                whisper.maybe_unload(ac)
-            await asyncio.sleep(30)
-
-    async def mic():
-        busy = False
-        while True:
-            pid = oma.ear.pid  # до await: слух мог переоткрыться, а снимок pactl — со старым pw-record
-            now = pid is not None and foreign_capture(await asyncio.to_thread(mic_outputs), {pid})
-            if now != busy:
-                busy = now
-                events.put_nowait(("mic", busy))
-            await asyncio.sleep(1)
-
-    loop.add_signal_handler(signal.SIGTERM, events.put_nowait, ("eof",))
-    tasks = [asyncio.create_task(c) for c in (stdin(), daemon(), power(), mic())]
-    try:
-        await oma.act([("state", oma.conv.state)])  # демон считает Ому «off», пока она не скажет о себе
-        while (ev := await events.get())[0] != "eof":
+            ev = await events.get()
             try:
                 await (oma.command(ev[1]) if ev[0] == "cmd" else oma.event(ev))
             except Exception as e:  # сбой одной команды не роняет Ому
                 await oma.event(("error", f"{ev[0]}: {e!r}"))
-    finally:  # pw-record и claude не должны остаться сиротами
-        for t in tasks + list(oma.tasks):
+
+    tasks = [asyncio.create_task(read()), asyncio.create_task(dispatch())]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
             t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(oma.ear.stop(), 3)
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(oma.brain.close(), 3)
-        if whisper.loading:  # поток загрузки не прервать, а asyncio.run ждал бы его; дети уже закрыты
-            sys.stdout.flush()
-            sys.stderr.flush()
-            os._exit(0)
+        await asyncio.wait(tasks, timeout=1)
+    for t in done:
+        t.result()
+
+
+async def main():
+    events, agents, loops, oma = asyncio.Queue(), [], [], None
+
+    async def keep(name, fn):
+        """Фоновый цикл под присмотром: упал — событие error; через 2 с снова (подписка — и после конца потока)."""
+        while True:
+            try:
+                await fn()
+            except Exception as e:
+                events.put_nowait(("error", f"{name}: {e!r}"))
+            await asyncio.sleep(2)
+
+    try:
+        from .brain import Brain
+        from .ear import Ear, Whisper
+
+        loop = asyncio.get_running_loop()
+        whisper = Whisper()
+        oma = Oma(Conversation(), Ear(events, whisper), Brain(events, lambda: agents), whisper)
+
+        def on_agents(lst):
+            agents[:] = lst  # снимок для инструментов мозга
+
+        last = {}
+
+        def on_status(d):  # только смены: повтор «не говорит» до начала звука не должен закончить ответ
+            for field, kind in (("speaking", "audio"), ("quiet", "quiet")):
+                v = bool(d.get(field))
+                if last.get(field) != v:
+                    last[field] = v
+                    events.put_nowait((kind, v))
+
+        async def daemon():
+            with contextlib.suppress(OSError):  # демона ещё нет или он закрыл сокет — keep переподключит
+                await link.watch(on_status, on_agents)
+
+        async def power():
+            while True:
+                ac = on_ac()
+                if ac:  # от сети слух готов сразу: VAD тоже тёплый
+                    oma.bg(oma.ear.warm())
+                if ac or oma.ear.open:  # от сети — тёплый; слух открыт — модель «используется»
+                    oma.warm()
+                if not oma.ear.open:  # «300 с без слуха» считаются от закрытия слуха
+                    whisper.maybe_unload(ac)
+                await asyncio.sleep(30)
+
+        async def mic():
+            busy = False
+            while True:
+                pid = oma.ear.pid  # до await: слух мог переоткрыться, а снимок pactl — со старым pw-record
+                now = pid is not None and foreign_capture(await asyncio.to_thread(mic_outputs), {pid})
+                if now != busy:
+                    busy = now
+                    events.put_nowait(("mic", busy))
+                await asyncio.sleep(1)
+
+        reader = asyncio.StreamReader(limit=1 << 22)  # ask со вставленным логом бывает длинным
+        await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
+        loop.add_signal_handler(signal.SIGTERM, reader.feed_eof)  # voice_stop: как EOF
+        loops = [asyncio.create_task(keep(n, f)) for n, f in (("daemon", daemon), ("power", power), ("mic", mic))]
+        await oma.act([("state", oma.conv.state)])  # демон считает Ому «off», пока она не скажет о себе
+        await serve(oma, events, reader)
+    finally:  # pw-record и claude не должны остаться сиротами
+        exc = sys.exc_info()[1]
+        for t in loops + list(oma.tasks if oma else ()):
+            t.cancel()
+        await asyncio.gather(*loops, return_exceptions=True)
+        if oma:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(oma.ear.stop(), 3)
+            with contextlib.suppress(Exception):  # SDK ждёт до 5 с, пока claude допишет сессию
+                await asyncio.wait_for(oma.brain.close(), 10)
+        kill_children()
+        failed = isinstance(exc, Exception)
+        if failed:
+            traceback.print_exception(exc)
+            notify(f"Ома упала: {exc!r}"[:200])
+        sys.stdout.flush()
+        sys.stderr.flush()
+        # сразу: asyncio.run ждал бы потоки (загрузка whisper/VAD, pactl), а дети уже закрыты
+        os._exit(1 if failed else 0)
 
 
 if __name__ == "__main__":
     cuda_env()
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        print(f"agent_voice: {e!r}", file=sys.stderr, flush=True)
-        notify(str(e)[:200])
-        sys.exit(1)
+    asyncio.run(main())

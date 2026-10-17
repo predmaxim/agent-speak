@@ -510,8 +510,11 @@ def test_oma_stale_chat_line_lands_in_new_chat_and_done_syncs():
     class FakeBrain:
         key = "new"
         async def open(self, k): self.key = k; return [{"role": "me", "text": "давно"}]
-        async def send(self, t):  # как Brain при устаревшем чате: "opened" в очередь, ключ уже "new"
-            self.pending, self.key = ("opened", "new", self.key), "new"
+        async def send(self, t):
+            if self.key.startswith("chat:"):  # как Brain при устаревшем чате: "opened" в очередь, ключ уже "new"
+                self.pending, self.key = ("opened", "new", self.key), "new"
+            else:  # новый чат получил id посреди ответа
+                self.key = "chat:sid"
         def chats(self): return [{"key": "chat:old"}]
 
     oma = Oma(Conversation(), None, FakeBrain(), SimpleNamespace(ready=True),
@@ -528,5 +531,64 @@ def test_oma_stale_chat_line_lands_in_new_chat_and_done_syncs():
         await oma.event(("done", None))
         assert lines[-2:] == [{"chat": {"key": "new", "messages": [me, {"role": "oma", "text": "Привет, чем помочь сегодня?"}]}},
                               {"chats": [{"key": "chat:old"}]}]
+        await oma.command({"do": "ask", "text": "и ещё", "key": "new"})
+        assert oma.brain.key == "chat:sid" and len(oma.history) == 3 and oma.history[-1] == {"role": "me", "text": "и ещё"}
 
     asyncio.run(run())
+
+
+def test_oma_error_notifies_new_text_or_after_5_min():
+    seen, t = [], [0.0]
+    oma = Oma(Conversation(), SimpleNamespace(open=False), None, SimpleNamespace(ready=True),
+              send=lambda c: None, notify=seen.append, clock=lambda: t[0])
+
+    async def run():
+        for _ in range(3):
+            await oma.event(("error", "recognize: boom"))
+        t[0] = 299
+        await oma.event(("error", "recognize: boom"))
+        await oma.event(("error", "Claude: сессия оборвалась"))
+        await oma.event(("error", "Claude: сессия оборвалась"))
+        t[0] = 600
+        await oma.event(("error", "Claude: сессия оборвалась"))
+
+    asyncio.run(run())
+    assert seen == ["recognize: boom", "Claude: сессия оборвалась", "Claude: сессия оборвалась"]
+
+
+def test_serve_eof_cuts_hung_dispatch():
+    from agent_voice.__main__ import serve
+    hung = []
+
+    class HangBrain:
+        key = "new"
+        async def send(self, t):
+            hung.append(t)
+            await asyncio.Event().wait()  # connect/query повис навсегда
+
+    async def run():
+        oma = Oma(Conversation(), None, HangBrain(), SimpleNamespace(ready=True), send=lambda c: None)
+        r = asyncio.StreamReader()
+        r.feed_data('{"do":"ask","text":"привет"}\n'.encode())
+        task = asyncio.create_task(serve(oma, asyncio.Queue(), r))
+        await asyncio.sleep(0.1)
+        assert hung == ["привет"] and not task.done()
+        r.feed_eof()
+        await asyncio.wait_for(task, 1)
+
+    asyncio.run(run())
+
+
+def test_ear_warm_loads_vad_once():
+    from agent_voice.ear import Ear
+    loads = []
+
+    async def run():
+        e = Ear(asyncio.Queue(), Whisper(load=lambda: "m"), cmd=["sleep", "60"], vad_load=lambda: loads.append(1) or "vad")
+        await e.warm()
+        await e.start()
+        await e.stop()
+        await e.warm()
+
+    asyncio.run(run())
+    assert loads == [1]

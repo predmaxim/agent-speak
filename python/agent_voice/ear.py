@@ -69,10 +69,15 @@ class Whisper:
             pass
 
 
+def load_vad():
+    from silero_vad import load_silero_vad  # импорт torch — здесь, в потоке, а не в цикле событий
+    return load_silero_vad()
+
+
 class Ear:
     """pw-record → VAD → Segmenter → whisper; микрофон включается по start()/stop()."""
 
-    def __init__(self, out, whisper, cmd=REC_CMD, vad_load=None):
+    def __init__(self, out, whisper, cmd=REC_CMD, vad_load=load_vad):
         self.out, self.whisper, self.cmd = out, whisper, list(cmd)
         self._vad_load, self._lock = vad_load, asyncio.Lock()  # lock: start/stop идут по очереди, побеждает последний вызов
         self.paused = False
@@ -86,15 +91,20 @@ class Ear:
     def pid(self):
         return self._proc.pid if self._proc else None
 
+    async def warm(self):
+        """VAD — заранее (от сети): первый start не ждёт torch и silero."""
+        async with self._lock:
+            await self._load_vad()
+
+    async def _load_vad(self):
+        if self._vad is None:
+            self._vad = await asyncio.to_thread(self._vad_load)
+
     async def start(self):
         async with self._lock:
             if self.open:
                 return
-            if self._vad is None:
-                load = self._vad_load
-                if load is None:
-                    from silero_vad import load_silero_vad as load
-                self._vad = await asyncio.to_thread(load)
+            await self._load_vad()
             proc = self._proc = await asyncio.create_subprocess_exec(*self.cmd, stdout=asyncio.subprocess.PIPE)
             phrases = asyncio.Queue()
             self._tasks = [asyncio.create_task(self._recognize(phrases)),
