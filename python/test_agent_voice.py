@@ -296,3 +296,23 @@ def test_selection_trims_and_survives_errors():
     def boom(*a, **k):
         raise FileNotFoundError
     assert selection(run=boom) == ""
+
+
+def test_transcript_tail_caps_long_message(tmp_path):
+    row = {"type": "assistant", "message": {"content": [{"type": "text", "text": "я" * 5000}]}}
+    p = tmp_path / "t.jsonl"
+    p.write_text(json.dumps(row, ensure_ascii=False))
+    last = transcript_tail(str(p)).splitlines()[-1]
+    assert last.startswith("агент: ") and len(last) == len("агент: ") + 1001 and last.endswith("…")
+
+
+def test_foreign_capture_skips_corked():
+    assert not foreign_capture([{"corked": True, "properties": {"application.process.id": "7"}}], set())
+
+
+def test_on_ac_usb_counts(tmp_path):
+    for n, typ, on in (("A", "Mains", "0"), ("U", "USB", "1")):
+        (tmp_path / n).mkdir()
+        (tmp_path / n / "type").write_text(typ)
+        (tmp_path / n / "online").write_text(on)
+    assert on_ac(str(tmp_path))
