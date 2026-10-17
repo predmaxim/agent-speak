@@ -35,11 +35,12 @@ pub struct Queue {
     active: String,                 // активная сессия; пусто — ещё не выбрана, играют все
     popped: Option<(String, Kind)>,     // последняя отданная фраза — «что сейчас звучит»
     started: HashSet<(String, String)>, // (сессия, сообщение) начаты и не дочитаны — не устаревают
+    hold: bool,                         // Ома думает или говорит: фразы агентов ждут
 }
 
 impl Queue {
     pub fn new(max_age: Duration) -> Queue {
-        Queue { items: VecDeque::new(), max_age, paused_at: None, paused_total: Duration::ZERO, active: String::new(), popped: None, started: HashSet::new() }
+        Queue { items: VecDeque::new(), max_age, paused_at: None, paused_total: Duration::ZERO, active: String::new(), popped: None, started: HashSet::new(), hold: false }
     }
 
     pub fn set_max_age(&mut self, d: Duration) {
@@ -59,6 +60,21 @@ impl Queue {
         } else {
             self.items.push_back(item);
         }
+    }
+
+    pub fn set_hold(&mut self, on: bool) {
+        self.hold = on;
+    }
+
+    #[cfg(test)]
+    pub fn held(&self) -> bool {
+        self.hold
+    }
+
+    /// Играет ли фраза сейчас: активная сессия, срочное, образец, чтение, Ома; на удержании — не агенты.
+    fn playable(&self, i: &Item) -> bool {
+        !(self.hold && matches!(i.kind, Kind::Status | Kind::Manual))
+            && (self.active.is_empty() || i.session == self.active || matches!(i.kind, Kind::Urgent | Kind::Preview | Kind::Read | Kind::Voice))
     }
 
     /// Прерванная фраза встаёт за образцом голоса: образец играет первым (на паузе — иначе он застрянет).
@@ -86,10 +102,7 @@ impl Queue {
             }
             !stale
         });
-        let active = &self.active;
-        let pos = self.items.iter().position(|i| {
-            active.is_empty() || i.session == *active || matches!(i.kind, Kind::Urgent | Kind::Preview | Kind::Read | Kind::Voice)
-        })?;
+        let pos = self.items.iter().position(|i| self.playable(i))?;
         let item = self.items.remove(pos)?;
         self.popped = Some((item.session.clone(), item.kind.clone()));
         let key = (item.session.clone(), item.msg.clone());
@@ -143,7 +156,7 @@ impl Queue {
 
     /// Есть ли что играть сейчас (без учёта паузы).
     pub fn ready(&self) -> bool {
-        self.items.iter().any(|i| self.active.is_empty() || i.session == self.active || matches!(i.kind, Kind::Urgent | Kind::Preview | Kind::Read | Kind::Voice))
+        self.items.iter().any(|i| self.playable(i))
     }
 
     /// Ручное чтение ждёт в очереди или отдано последним (звучит ли — знает speaker через busy).
@@ -211,6 +224,19 @@ mod tests {
 
     fn it(text: &str, kind: Kind, born: Instant) -> Item {
         Item { session: "s".into(), text: text.into(), kind, born, msg: "m".into(), speaker: String::new() }
+    }
+
+    #[test]
+    fn hold_skips_agent_speech_until_released() {
+        let t = Instant::now();
+        let mut q = Queue::new(Duration::from_secs(30));
+        q.push(it("статус", Kind::Status, t));
+        q.push(Item { session: "oma".into(), text: "ответ".into(), kind: Kind::Voice, born: t, msg: "o".into(), speaker: String::new() });
+        q.set_hold(true);
+        assert_eq!(q.pop(t).unwrap().text, "ответ");
+        assert!(q.pop(t).is_none());
+        q.set_hold(false);
+        assert_eq!(q.pop(t).unwrap().text, "статус");
     }
 
     #[test]

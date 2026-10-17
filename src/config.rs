@@ -6,14 +6,11 @@ use std::path::PathBuf;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(default)]
 pub struct Config {
-    pub mode: String,
     pub speaker: String,
     pub rate: String,
     pub max_age_secs: u64,
-    /// false — в авторежиме только финальный ответ хода, без промежуточных статусов
+    /// false — в диалоге только финальный ответ хода, без промежуточных статусов
     pub read_intermediate: bool,
-    /// агент последнего голосового разговора: первым в окне выбора
-    pub voice_last_agent: String,
     /// тихий режим по расписанию (окно quiet_from..quiet_to, ЧЧ:ММ)
     pub quiet_schedule: bool,
     pub quiet_from: String,
@@ -26,7 +23,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Config {
-        Config { mode: "manual".into(), speaker: "xenia".into(), rate: "medium".into(), max_age_secs: 30, read_intermediate: true, voice_last_agent: "claude".into(),
+        Config { speaker: "xenia".into(), rate: "medium".into(), max_age_secs: 30, read_intermediate: true,
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), orb_corner: "bottom-right".into() }
     }
 }
@@ -73,7 +70,6 @@ impl Config {
     pub fn set(&mut self, key: &str, value: &serde_json::Value) -> bool {
         let s = value.as_str().unwrap_or_default();
         match key {
-            "mode" if ["auto", "manual"].contains(&s) => self.mode = s.into(),
             "speaker" if SPEAKERS.contains(&s) => self.speaker = s.into(),
             "rate" if RATES.contains(&s) => self.rate = s.into(),
             "read_intermediate" if value.is_boolean() => self.read_intermediate = value.as_bool().unwrap(),
@@ -108,9 +104,9 @@ mod tests {
 
     #[test]
     fn defaults_and_partial_file() {
-        let c: Config = toml::from_str("speaker = \"baya\"").unwrap();
+        // старый файл: mode и voice_last_agent больше не поля — игнорируются
+        let c: Config = toml::from_str("speaker = \"baya\"\nmode = \"auto\"\nvoice_last_agent = \"codex\"").unwrap();
         assert_eq!(c.speaker, "baya");
-        assert_eq!(c.mode, "manual");
         assert_eq!(c.rate, "medium");
         assert_eq!(c.max_age_secs, 30);
         assert!(c.read_intermediate);
@@ -150,12 +146,11 @@ mod tests {
     fn set_validates_keys_and_values() {
         use serde_json::json;
         let mut c = Config::default();
-        assert!(c.set("mode", &json!("auto")));
+        assert!(!c.set("mode", &json!("auto"))); // режима больше нет
         assert!(c.set("speaker", &json!("eugene")));
         assert!(c.set("rate", &json!("x-fast")));
         assert!(c.set("read_intermediate", &json!(false)));
         assert!(!c.set("read_intermediate", &json!("true"))); // строка вместо булева
-        assert!(!c.set("mode", &json!("loud")));
         assert!(!c.set("speaker", &json!(1)));
         assert!(!c.set("rate", &json!("warp")));
         assert!(c.set("quiet_schedule", &json!(false)));
@@ -168,8 +163,8 @@ mod tests {
         assert!(!c.set("quiet_schedule", &json!("true")));
         assert!(!c.set("max_age_secs", &json!(5))); // не настраивается из интерфейса
         assert_eq!(
-            (c.mode.as_str(), c.speaker.as_str(), c.rate.as_str(), c.read_intermediate, c.max_age_secs),
-            ("auto", "eugene", "x-fast", false, 30)
+            (c.speaker.as_str(), c.rate.as_str(), c.read_intermediate, c.max_age_secs),
+            ("eugene", "x-fast", false, 30)
         );
     }
 }

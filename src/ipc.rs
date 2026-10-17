@@ -12,22 +12,20 @@ pub enum Msg {
     Read,
     Stop,
     Pause,
-    Mode,
     /// Соединение остаётся открытым: сервис пишет строку состояния сразу и при каждом изменении.
     Subscribe,
     /// Настройка из плагина: сервис проверяет, сохраняет config.toml и рассылает состояние.
     Set { key: String, value: serde_json::Value },
     /// Прочитать текст как ручное чтение (образец голоса).
     Say { text: String },
-    /// Фраза голосового разговора (от agent_voice).
+    /// Ответ Омы голосом.
     Voice { text: String },
-    /// Включить голосовой разговор с агентом (claude | codex).
-    VoiceStart { agent: String },
-    VoiceStop,
-    /// Хоткей: выключен — открыть окно выбора агента, включён — выключить.
-    VoiceToggle,
-    /// Фаза разговора от agent_voice: listening | thinking | speaking.
-    VoiceState { state: String },
+    /// Состояние Омы (idle | loading | listening | thinking | speaking | paused) и постоянный диалог.
+    VoiceState { state: String, #[serde(default)] dialog: bool },
+    /// Команда Оме от плагина и CLI: action уходит строкой в её stdin.
+    Oma { action: serde_json::Value },
+    /// Строка от Омы подписчикам как есть.
+    Emit { line: serde_json::Value },
 }
 
 pub fn socket_path() -> PathBuf {
@@ -55,10 +53,12 @@ mod tests {
         assert!(matches!(set, Msg::Set { ref key, ref value } if key == "read_intermediate" && *value == serde_json::json!(false)));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"say\",\"text\":\"т\"}").unwrap(), Msg::Say { .. }));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice\",\"text\":\"т\"}").unwrap(), Msg::Voice { .. }));
-        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice_start\",\"agent\":\"codex\"}").unwrap(), Msg::VoiceStart { ref agent } if agent == "codex"));
-        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice_stop\"}").unwrap(), Msg::VoiceStop));
-        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice_toggle\"}").unwrap(), Msg::VoiceToggle));
-        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice_state\",\"state\":\"thinking\"}").unwrap(), Msg::VoiceState { .. }));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice_state\",\"state\":\"thinking\"}").unwrap(), Msg::VoiceState { ref state, dialog: false } if state == "thinking"));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice_state\",\"state\":\"idle\",\"dialog\":true}").unwrap(), Msg::VoiceState { dialog: true, .. }));
+        let oma = serde_json::from_str::<Msg>("{\"cmd\":\"oma\",\"action\":{\"do\":\"ask\",\"text\":\"т\",\"key\":\"new\"}}").unwrap();
+        assert!(matches!(oma, Msg::Oma { ref action } if action["do"] == "ask" && action["key"] == "new"));
+        let emit = serde_json::from_str::<Msg>("{\"cmd\":\"emit\",\"line\":{\"chats\":[]}}").unwrap();
+        assert!(matches!(emit, Msg::Emit { ref line } if *line == serde_json::json!({"chats": []})));
     }
 
     #[test]

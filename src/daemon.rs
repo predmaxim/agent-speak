@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -38,27 +39,48 @@ const SWITCH_AFTER: Duration = Duration::from_secs(5);
 /// Как часто сверять реестр агентов с диском и /proc.
 const SCAN_EVERY: Duration = Duration::from_secs(2);
 
+/// Упавшую Ому поднимаем не сразу: падающая на старте не крутится в цикле.
+const OMA_RETRY: Duration = Duration::from_secs(10);
+
 /// Строка состояния для подписчиков (плагин панели). Порядок полей — протокол.
 #[derive(Serialize)]
 struct Status<'a> {
     running: bool,
     speaking: bool,
     paused: bool,
-    mode: &'a str,
     read_intermediate: bool,
     speaker: &'a str,
     rate: &'a str,
     project: &'a str,
-    voice: &'a str,
-    voice_agent: &'a str,
-    voice_last_agent: &'a str,
+    oma: &'a str,
+    dialog: bool,
+    quiet: bool,
+    quiet_schedule: bool,
+    quiet_from: &'a str,
+    quiet_to: &'a str,
+    orb_corner: &'a str,
+    waiting: usize,
 }
 
-/// Идущий голосовой разговор; child — процесс agent_voice (в тестах нет).
-struct VoiceSession {
-    agent: String,
+/// Процесс Омы (python -m agent_voice): команды — строками в stdin, события — через сокет.
+#[derive(Default)]
+struct Oma {
+    child: Option<Child>,
+    stdin: Option<ChildStdin>,
     state: String,
-    child: Option<std::process::Child>,
+    dialog: bool,              // постоянный диалог: статусы и финалы агентов звучат
+    retry_at: Option<Instant>, // упала — когда поднять
+}
+
+/// Что звучит: тихий режим глушит всё, кроме чтения по хоткею и образца голоса;
+/// статусы и финалы агентов — только в постоянном диалоге; срочное и ответы Омы — всегда.
+pub fn audible(kind: &Kind, dialog: bool, quiet: bool) -> bool {
+    match kind {
+        Kind::Read | Kind::Preview => true,
+        _ if quiet => false,
+        Kind::Status | Kind::Manual => dialog,
+        Kind::Urgent | Kind::Voice => true,
+    }
 }
 
 struct State {
@@ -78,9 +100,10 @@ struct State {
     voices: Vec<(String, String)>, // сессия → голос в порядке выдачи; первая держит голос по умолчанию
     seq: u64, // свежие ключи сообщений для фраз без своего id
     projects: HashMap<String, String>, // сессия → имя папки проекта (из хуков и окна в фокусе)
-    voice: Option<VoiceSession>,
-    last_cwd: String, // cwd последнего хука — рабочая папка голосового разговора
-    voice_cmd: Vec<String>, // запуск agent_voice; в тестах — заглушка
+    oma: Oma,
+    voice_cmd: Vec<String>, // запуск Омы; в тестах — заглушка
+    minutes: Box<dyn Fn() -> u32>, // местное время, минуты от полуночи; в тестах — 12:00
+    sched: Option<bool>,           // тихо ли по расписанию на прошлом tick; None — ещё не считали
     registry: Registry,
     scan: Box<dyn FnMut() -> Vec<Live>>, // живые сессии агентов; в тестах — подделка
     now_secs: Box<dyn Fn() -> u64>,      // эпоха в секундах — время событий реестра
@@ -189,13 +212,19 @@ pub fn run() {
         voices: Vec::new(),
         seq: 0,
         projects: HashMap::new(),
-        voice: None,
-        last_cwd: String::new(),
+        oma: Oma { state: "off".into(), ..Default::default() },
         voice_cmd: vec![
             data.join("voice-venv/bin/python").to_string_lossy().into(),
             "-m".into(),
             "agent_voice".into(),
         ],
+        minutes: Box::new(|| {
+            // SAFETY: localtime_r потокобезопасна, tm — локальный буфер
+            let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+            unsafe { libc::localtime_r(&libc::time(std::ptr::null_mut()), &mut tm) };
+            (tm.tm_hour * 60 + tm.tm_min) as u32
+        }),
+        sched: None,
         registry: Registry::new(),
         scan: Box::new(agents::scan_all),
         now_secs: Box::new(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())),
@@ -203,6 +232,7 @@ pub fn run() {
         unknown_scan_at: Instant::now(),
         agents_sent: String::new(),
     };
+    st.oma_spawn();
     for ev in rx {
         st.poll_focus();
         match ev {
@@ -373,13 +403,24 @@ impl State {
             || (self.shared.busy.load(Ordering::SeqCst) && *self.shared.current.lock().unwrap() == session && q.popped_final(session))
     }
 
+    /// Постоянный диалог: агенты звучат.
     fn auto(&self) -> bool {
-        self.cfg.mode == "auto"
+        self.oma.dialog
     }
 
-    /// Промежуточные статусы читаются по ходу работы (авто + read_intermediate).
+    /// Промежуточные статусы читаются по ходу работы (диалог + read_intermediate).
     fn live(&self) -> bool {
-        self.auto() && self.cfg.read_intermediate
+        self.oma.dialog && self.cfg.read_intermediate
+    }
+
+    fn quiet(&self) -> bool {
+        self.cfg.quiet((self.minutes)())
+    }
+
+    /// Удержание фраз агентов, пока Ома думает или говорит; снятие будит поток воспроизведения.
+    fn hold(&self, on: bool) {
+        self.shared.queue.lock().unwrap().set_hold(on);
+        self.shared.cv.notify_all();
     }
 
     /// config.toml изменён (интерфейсом или руками) — применить без перезапуска.
@@ -408,14 +449,18 @@ impl State {
             running: true,
             speaking,
             paused,
-            mode: &self.cfg.mode,
             read_intermediate: self.cfg.read_intermediate,
             speaker: &self.cfg.speaker,
             rate: &self.cfg.rate,
             project: &project,
-            voice: self.voice.as_ref().map_or("off", |v| v.state.as_str()),
-            voice_agent: self.voice.as_ref().map_or("", |v| v.agent.as_str()),
-            voice_last_agent: &self.cfg.voice_last_agent,
+            oma: &self.oma.state,
+            dialog: self.oma.dialog,
+            quiet: self.quiet(),
+            quiet_schedule: self.cfg.quiet_schedule,
+            quiet_from: &self.cfg.quiet_from,
+            quiet_to: &self.cfg.quiet_to,
+            orb_corner: &self.cfg.orb_corner,
+            waiting: self.registry.waiting(),
         };
         format!("{}\n", serde_json::to_string(&st).unwrap())
     }
@@ -493,11 +538,8 @@ impl State {
 
     /// only_new: пропустить уже поставленные фразы, поставленные — запомнить (dedup).
     fn enqueue_msg(&mut self, agent: Agent, session: &str, raw: &str, kind: Kind, msg: &str, only_new: bool) -> usize {
-        // голосовой разговор: терминальные агенты молчат; Voice без разговора — опоздавшая фраза
-        // Urgent (запрос разрешения) и Read (явная горячая клавиша) слышны и в разговоре
-        let passes = kind == Kind::Preview || (self.voice.is_some() && matches!(kind, Kind::Urgent | Kind::Read));
-        if self.voice.is_some() != (kind == Kind::Voice) && !passes {
-            eprintln!("agent-speak: пропущено (голосовой режим: {}): {}", self.voice.is_some(), raw.chars().take(40).collect::<String>());
+        if !audible(&kind, self.oma.dialog, self.quiet()) {
+            eprintln!("agent-speak: пропущено (диалог: {}, тихо: {}): {}", self.oma.dialog, self.quiet(), raw.chars().take(40).collect::<String>());
             return 0;
         }
         let (sentences, unknown) = prepare(raw, &self.terms.lock().unwrap());
@@ -585,66 +627,84 @@ impl State {
         self.shared.stop();
     }
 
-    /// Голосовой разговор: agent_voice — дочерний процесс; вывод — в узел эхоподавления.
-    fn voice_start(&mut self, agent: String) {
-        if self.voice.is_some() || !["claude", "codex"].contains(&agent.as_str()) {
-            eprintln!("agent-speak: voice_start пропущен: {agent}");
-            return;
-        }
-        let cwd = if self.last_cwd.is_empty() { home().to_string_lossy().into_owned() } else { self.last_cwd.clone() };
+    /// Запуск Омы: EOF её stdin (демон умер) — Ома выходит сама.
+    fn oma_spawn(&mut self) {
+        self.oma.retry_at = None;
         let data = home().join(".local/share/agent-speak");
         let _ = std::fs::create_dir_all(&data); // current_dir должен существовать
         let child = std::process::Command::new(&self.voice_cmd[0])
             .args(&self.voice_cmd[1..])
-            .args(["--agent", &agent, "--cwd", &cwd])
             .current_dir(&data)
-            .env("AGENT_SPEAK", "1")
-            .stdin(std::process::Stdio::piped()) // EOF — демон умер, agent_voice выходит
+            .env("AGENT_SPEAK", "1") // хуки сессий Омы до демона не доходят
+            .stdin(std::process::Stdio::piped())
             .spawn();
-        let child = match child {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("agent-speak: agent_voice не запустился: {e}");
-                notice("Голос: не запустился", &e.to_string());
-                return;
+        match child {
+            Ok(mut c) => {
+                eprintln!("agent-speak: Ома запущена (pid {})", c.id());
+                self.oma.stdin = c.stdin.take();
+                self.oma.child = Some(c);
             }
-        };
-        self.cfg.voice_last_agent = agent.clone();
-        self.cfg.save();
-        // Озвучка идёт в выход по умолчанию: эхо гасит тракт микрофона (omarchy-mic-denoise).
-        self.stop(); // терминальное чтение обрывается
-        self.voice = Some(VoiceSession { agent, state: "starting".into(), child: Some(child) });
-    }
-
-    fn voice_stop(&mut self) {
-        if let Some(mut v) = self.voice.take() {
-            if let Some(c) = v.child.as_mut() {
-                // SIGTERM: agent_voice закрывает агента сам; через 2 с — SIGKILL
-                unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
-                let end = Instant::now() + Duration::from_secs(2);
-                while matches!(c.try_wait(), Ok(None)) && Instant::now() < end {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                if matches!(c.try_wait(), Ok(None)) {
-                    let _ = c.kill();
-                    let _ = c.wait();
-                }
-            }
+            // не повторяем: скорее всего нет voice-venv, а журнал не засоряем раз в 10 с
+            Err(e) => eprintln!("agent-speak: Ома не запустилась: {e}"),
         }
-        *self.shared.sink.lock().unwrap() = String::new();
-        self.stop();
     }
 
-    /// Раз в секунду: agent_voice завершился сам (ошибка — он уже уведомил) — режим выключен.
+    /// Команда Оме — строкой JSON в stdin; не пишется — Ома считается упавшей.
+    fn oma_send(&mut self, action: &serde_json::Value) {
+        let Some(w) = self.oma.stdin.as_mut() else {
+            eprintln!("agent-speak: Ома не запущена, команда пропущена: {action}");
+            return;
+        };
+        if let Err(e) = w.write_all(format!("{action}\n").as_bytes()) {
+            eprintln!("agent-speak: Ома не принимает команды: {e}");
+            self.oma_down();
+        }
+    }
+
+    /// Ома упала: выключена, диалога и удержания нет; поднять через OMA_RETRY.
+    fn oma_down(&mut self) {
+        self.oma.stdin = None; // EOF — если ещё жива, выйдет сама
+        if let Some(mut c) = self.oma.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        self.oma.state = "off".into();
+        self.oma.dialog = false;
+        self.hold(false);
+        self.oma.retry_at = Some((self.clock)() + OMA_RETRY);
+        self.broadcast();
+    }
+
+    /// Раз в секунду: Ома упала — выключить, срок вышел — поднять; граница тихого расписания.
     /// Раз в SCAN_EVERY: состав агентов, «готово» → «простаивает», агент в фокусе.
     fn tick(&mut self) {
-        let dead = self.voice.as_mut().and_then(|v| v.child.as_mut()).is_some_and(|c| !matches!(c.try_wait(), Ok(None)));
+        let dead = self.oma.child.as_mut().is_some_and(|c| !matches!(c.try_wait(), Ok(None)));
         if dead {
-            eprintln!("agent-speak: agent_voice завершился");
-            self.voice_stop();
-            self.broadcast();
+            eprintln!("agent-speak: Ома завершилась, перезапуск через {} с", OMA_RETRY.as_secs());
+            self.oma_down();
         }
         let now = (self.clock)();
+        if self.oma.retry_at.is_some_and(|t| now >= t) {
+            self.oma_spawn();
+        }
+        let sched = self.cfg.scheduled_quiet((self.minutes)());
+        if let Some(prev) = self.sched.filter(|p| *p != sched) {
+            // граница расписания: ручное переключение снимается
+            let before = match self.cfg.quiet_override.as_str() {
+                "on" => true,
+                "off" => false,
+                _ => prev,
+            };
+            if !self.cfg.quiet_override.is_empty() {
+                eprintln!("agent-speak: граница расписания — ручной тихий режим ({}) снят", self.cfg.quiet_override);
+                self.cfg.quiet_override.clear();
+                self.cfg.save();
+            }
+            if self.quiet() != before {
+                self.broadcast();
+            }
+        }
+        self.sched = Some(sched);
         if now >= self.next_scan {
             self.next_scan = now + SCAN_EVERY;
             self.rescan();
@@ -656,31 +716,19 @@ impl State {
     }
 
     fn on_msg(&mut self, m: Msg) {
-        let changes = matches!(m, Msg::Stop | Msg::Pause | Msg::Mode | Msg::VoiceState { .. } | Msg::VoiceStart { .. } | Msg::VoiceStop | Msg::VoiceToggle);
+        let changes = matches!(m, Msg::Stop | Msg::Pause | Msg::VoiceState { .. });
         match m {
             Msg::Stop => self.stop(),
             Msg::Voice { text } => {
-                self.enqueue(Agent::Claude, "voice", &text, Kind::Voice);
+                self.enqueue(Agent::Claude, "voice", &text, Kind::Voice); // звучит ли — решает audible
             }
-            Msg::VoiceState { state } => {
-                if let Some(v) = self.voice.as_mut() {
-                    v.state = state;
-                }
+            Msg::VoiceState { state, dialog } => {
+                self.hold(matches!(state.as_str(), "thinking" | "speaking"));
+                self.oma.state = state;
+                self.oma.dialog = dialog;
             }
-            Msg::VoiceStart { agent } => self.voice_start(agent),
-            Msg::VoiceStop => self.voice_stop(),
-            Msg::VoiceToggle => {
-                if self.voice.is_some() {
-                    self.voice_stop();
-                } else {
-                    // окно плагина: первая строка — выбор агента
-                    let mut cmd = std::process::Command::new("omarchy-shell");
-                    cmd.args(["predmaxim.agent-speak.voice", "voice"]);
-                    std::thread::spawn(move || {
-                        let _ = cmd.status();
-                    });
-                }
-            }
+            Msg::Oma { action } => self.oma_send(&action),
+            Msg::Emit { line } => self.broadcast_line(&format!("{line}\n")),
             Msg::Pause => {
                 let paused = self.shared.queue.lock().unwrap().paused();
                 if paused {
@@ -688,11 +736,6 @@ impl State {
                 } else {
                     self.shared.pause();
                 }
-            }
-            Msg::Mode => {
-                self.cfg.mode = if self.auto() { "manual".into() } else { "auto".into() };
-                self.cfg.save();
-                eprintln!("agent-speak: режим: {}", self.cfg.mode);
             }
             Msg::Read => self.read(),
             Msg::Hook { kind, payload } => self.on_hook(&kind, &payload),
@@ -756,9 +799,6 @@ impl State {
         if let Some(cwd) = p["cwd"].as_str().filter(|_| !session.is_empty()) {
             let name = Path::new(cwd).file_name().and_then(|n| n.to_str()).unwrap_or_default();
             self.projects.insert(session.clone(), name.to_string());
-        }
-        if let Some(cwd) = p["cwd"].as_str().filter(|c| !c.is_empty()) {
-            self.last_cwd = cwd.to_string();
         }
         // новая сессия ещё не в реестре — пересканировать до обработки, не чаще SCAN_EVERY:
         // `claude -p` и SDK с хуками пользователя в реестр не попадают никогда, а MessageDisplay идёт на каждый кусок
@@ -909,21 +949,22 @@ mod tests {
             voices: Vec::new(),
             seq: 0,
         projects: HashMap::new(),
-            voice: None,
-            last_cwd: String::new(),
+            oma: Oma { state: "off".into(), ..Default::default() },
             voice_cmd: vec!["sh".into(), "-c".into(), "sleep 30".into(), "x".into()],
+            minutes: Box::new(|| 720), // 12:00 — вне тихого расписания
             registry: Registry::new(),
             scan: Box::new(Vec::new),
             now_secs: Box::new(|| 1000),
             next_scan: Instant::now(),
             unknown_scan_at: Instant::now(),
             agents_sent: String::new(),
+            sched: None,
         }
     }
 
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Тесты, доходящие до cfg.save()/voice_start: под замком, HOME — временная папка, по выходу восстановлен.
+    /// Тесты, доходящие до cfg.save()/oma_spawn: под замком, HOME — временная папка, по выходу восстановлен.
     struct TempHome {
         _lock: std::sync::MutexGuard<'static, ()>,
         old: Option<std::ffi::OsString>,
@@ -989,18 +1030,13 @@ mod tests {
         let st = test_state();
         assert_eq!(
             st.status_line(),
-            "{\"running\":true,\"speaking\":false,\"paused\":false,\"mode\":\"manual\",\"read_intermediate\":true,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"voice\":\"off\",\"voice_agent\":\"\",\"voice_last_agent\":\"claude\"}\n"
+            "{\"running\":true,\"speaking\":false,\"paused\":false,\"read_intermediate\":true,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"dialog\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_corner\":\"bottom-right\",\"waiting\":0}\n"
         );
-    }
-
-    fn voice_on(st: &mut State) {
-        st.voice = Some(VoiceSession { agent: "claude".into(), state: "listening".into(), child: None });
     }
 
     #[test]
     fn voice_text_queued_with_default_voice() {
         let mut st = test_state();
-        voice_on(&mut st);
         st.on_msg(Msg::Voice { text: "Привет, слушаю.".into() });
         let it = st.shared.queue.lock().unwrap().pop(Instant::now()).unwrap();
         assert_eq!(it.kind, Kind::Voice);
@@ -1008,49 +1044,95 @@ mod tests {
     }
 
     #[test]
-    fn voice_text_ignored_when_mode_off() {
+    fn voice_text_plays_without_dialog() {
         let mut st = test_state();
-        st.on_msg(Msg::Voice { text: "Опоздавшая фраза.".into() });
-        assert!(st.shared.queue.lock().unwrap().is_empty());
+        assert!(!st.oma.dialog);
+        st.on_msg(Msg::Voice { text: "Ответ Омы здесь.".into() });
+        assert!(!st.shared.queue.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn terminal_agents_muted_in_voice_mode() {
-        let mut st = test_state();
-        voice_on(&mut st);
-        st.enqueue(Agent::Claude, "a", "Финал.", Kind::Manual);
-        st.enqueue(Agent::Claude, "a", "Статус.", Kind::Status);
-        assert!(st.shared.queue.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn urgent_and_read_pass_in_voice_mode_manual_muted() {
-        let mut st = test_state();
-        voice_on(&mut st);
-        st.enqueue(Agent::Claude, "a", "Нужно разрешение.", Kind::Urgent);
-        st.enqueue(Agent::Claude, "a", "Читаю по клавише.", Kind::Read);
-        st.enqueue(Agent::Claude, "a", "Финал.", Kind::Manual);
-        let mut q = st.shared.queue.lock().unwrap();
-        let kinds: Vec<Kind> = std::iter::from_fn(|| q.pop(Instant::now())).map(|i| i.kind).collect();
-        assert_eq!(kinds.len(), 2);
-        assert!(!kinds.contains(&Kind::Manual));
-    }
-
-    #[test]
-    fn voice_state_broadcast_and_hook_cwd_remembered() {
+    fn voice_state_broadcast() {
         let mut st = test_state();
         let (ours, theirs) = UnixStream::pair().unwrap();
         let mut r = reader(ours);
         st.subscribe(theirs);
-        assert_eq!(next(&mut r)["voice"], "off");
+        assert_eq!(next(&mut r)["oma"], "off");
         next(&mut r); // строка агентов
-        voice_on(&mut st);
-        st.on_msg(Msg::VoiceState { state: "thinking".into() });
+        st.on_msg(Msg::VoiceState { state: "thinking".into(), dialog: true });
         let s = next(&mut r);
-        assert_eq!(s["voice"], "thinking");
-        assert_eq!(s["voice_agent"], "claude");
-        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s", "cwd": "/home/u/p"}));
-        assert_eq!(st.last_cwd, "/home/u/p");
+        assert_eq!((s["oma"].as_str(), s["dialog"].as_bool()), (Some("thinking"), Some(true)));
+    }
+
+    #[test]
+    fn audible_table() {
+        use Kind::*;
+        for k in [Read, Preview] { assert!(audible(&k, false, true)); }
+        for k in [Voice, Urgent] { assert!(audible(&k, false, false) && !audible(&k, true, true)); }
+        for k in [Status, Manual] { assert!(!audible(&k, false, false) && audible(&k, true, false) && !audible(&k, true, true)); }
+    }
+
+    #[test]
+    fn quiet_mutes_all_but_read_and_preview() {
+        let mut st = test_state();
+        st.cfg.quiet_override = "on".into();
+        st.on_msg(Msg::Voice { text: "Ответ Омы здесь.".into() });
+        st.on_hook("notification", &serde_json::json!({"session_id": "s", "message": "Claude needs your permission", "cwd": "/p/x"}));
+        assert!(st.shared.queue.lock().unwrap().is_empty());
+        st.on_msg(Msg::Say { text: "Так звучит этот голос.".into() });
+        assert!(!st.shared.queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn override_cleared_at_schedule_boundary() {
+        let _h = TempHome::new("quiet");
+        let mut st = test_state();
+        let m = Arc::new(std::sync::atomic::AtomicU32::new(crate::config::hhmm("12:00").unwrap()));
+        let mm = m.clone();
+        st.minutes = Box::new(move || mm.load(Ordering::SeqCst));
+        st.cfg.quiet_override = "on".into();
+        st.tick();
+        m.store(crate::config::hhmm("12:01").unwrap(), Ordering::SeqCst);
+        st.tick();
+        assert_eq!(st.cfg.quiet_override, "on");
+        m.store(crate::config::hhmm("23:00").unwrap(), Ordering::SeqCst);
+        st.tick();
+        assert_eq!(st.cfg.quiet_override, "");
+        assert!(st.quiet());
+    }
+
+    #[test]
+    fn oma_actions_go_to_child_stdin() {
+        let h = TempHome::new("oma-stdin");
+        std::fs::create_dir_all(&h.dir).unwrap();
+        let out = h.dir.join("in.txt");
+        let mut st = test_state();
+        st.voice_cmd = vec!["sh".into(), "-c".into(), format!("cat > {}", out.display())];
+        st.oma_spawn();
+        st.on_msg(Msg::Oma { action: serde_json::json!({"do": "talk"}) });
+        drop(st); // stdin закрыт → cat допишет и выйдет
+        let end = Instant::now() + Duration::from_secs(2);
+        while std::fs::read_to_string(&out).unwrap_or_default().is_empty() && Instant::now() < end { std::thread::sleep(Duration::from_millis(20)); }
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "{\"do\":\"talk\"}\n");
+    }
+
+    #[test]
+    fn voice_state_sets_dialog_and_hold() {
+        let mut st = test_state();
+        st.on_msg(Msg::VoiceState { state: "thinking".into(), dialog: true });
+        assert!(st.oma.dialog && st.shared.queue.lock().unwrap().held());
+        st.on_msg(Msg::VoiceState { state: "listening".into(), dialog: true });
+        assert!(!st.shared.queue.lock().unwrap().held());
+    }
+
+    #[test]
+    fn emit_broadcast_verbatim() {
+        let mut st = test_state();
+        let mut r = sub(&mut st);
+        next(&mut r);
+        next(&mut r);
+        st.on_msg(Msg::Emit { line: serde_json::json!({"chat": {"key": "new", "messages": []}}) });
+        assert_eq!(next(&mut r)["chat"]["key"], "new");
     }
 
     #[test]
@@ -1089,40 +1171,6 @@ mod tests {
         let p = serde_json::json!({"last_assistant_message": "Готово"});
         assert_eq!(final_message(&p, Path::new("/nonexistent")), Some("Готово".into()));
         assert_eq!(final_message(&serde_json::json!({"last_assistant_message": " "}), Path::new("/nonexistent")), None);
-    }
-
-    #[test]
-    fn voice_start_spawns_child_and_remembers_agent() {
-        let _home = TempHome::new("voice");
-        let mut st = test_state();
-        st.on_msg(Msg::VoiceStart { agent: "codex".into() });
-        let v = st.voice.as_ref().unwrap();
-        assert_eq!((v.agent.as_str(), v.state.as_str()), ("codex", "starting"));
-        assert!(v.child.is_some());
-        assert_eq!(st.cfg.voice_last_agent, "codex");
-        st.on_msg(Msg::VoiceStart { agent: "claude".into() }); // уже идёт — не второй процесс
-        assert_eq!(st.voice.as_ref().unwrap().agent, "codex");
-        st.on_msg(Msg::VoiceStop);
-        assert!(st.voice.is_none());
-        assert_eq!(*st.shared.sink.lock().unwrap(), "");
-    }
-
-    #[test]
-    fn voice_start_rejects_unknown_agent() {
-        let mut st = test_state();
-        st.on_msg(Msg::VoiceStart { agent: "rm -rf".into() });
-        assert!(st.voice.is_none());
-    }
-
-    #[test]
-    fn dead_child_turns_voice_off() {
-        let _home = TempHome::new("dead"); // voice_start пишет конфиг в HOME
-        let mut st = test_state();
-        st.voice_cmd = vec!["true".into()];
-        st.on_msg(Msg::VoiceStart { agent: "claude".into() });
-        std::thread::sleep(Duration::from_millis(200));
-        st.tick();
-        assert!(st.voice.is_none());
     }
 
     #[test]
@@ -1202,7 +1250,7 @@ mod tests {
         let path = dir.join("sess1.jsonl");
         std::fs::write(&path, "").unwrap();
         let mut st = test_state();
-        st.cfg.mode = "auto".into();
+        st.oma.dialog = true;
         st.set_active(SessionRef { agent: Agent::Claude, id: "sess1".into(), transcript: path.clone(), project: "p".into() });
         st.on_file(&path); // регистрирует смещение
         let line = r#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"Привет, это текст."}]}}"#;
@@ -1223,7 +1271,7 @@ mod tests {
 
     fn env_state() -> (State, Env) {
         let mut st = test_state();
-        st.cfg.mode = "auto".into();
+        st.oma.dialog = true;
         let focus: Arc<Mutex<Option<SessionRef>>> = Default::default();
         let now = Arc::new(Mutex::new(Instant::now()));
         let (f, n) = (focus.clone(), now.clone());
@@ -1250,6 +1298,34 @@ mod tests {
 
     fn md(st: &mut State, session: &str, text: &str) {
         st.on_hook("message-display", &serde_json::json!({"session_id": session, "message_id": "m", "delta": text, "final": true}));
+    }
+
+    #[test]
+    fn statuses_spoken_only_in_dialog() {
+        let (mut st, env) = env_state();
+        st.oma.dialog = false;
+        at(&mut st, &env, Some("s1"), 0);
+        md(&mut st, "s1", "Запускаю тесты сейчас. ");
+        assert!(texts(&st).is_empty());
+        st.oma.dialog = true;
+        md(&mut st, "s1", "Тесты прошли успешно. ");
+        assert_eq!(texts(&st), ["Тесты прошли успешно."]);
+    }
+
+    #[test]
+    fn dead_oma_respawned_after_backoff() {
+        let (mut st, env) = env_state();
+        st.voice_cmd = vec!["true".into()];
+        st.oma_spawn();
+        std::thread::sleep(Duration::from_millis(200));
+        st.tick();
+        assert!(st.oma.child.is_none() && st.oma.state == "off");
+        *env.1.lock().unwrap() += Duration::from_secs(9);
+        st.tick();
+        assert!(st.oma.child.is_none());
+        *env.1.lock().unwrap() += Duration::from_secs(2);
+        st.tick();
+        assert!(st.oma.child.is_some());
     }
 
     #[test]
@@ -1576,6 +1652,7 @@ mod tests {
     #[test]
     fn each_session_gets_own_stable_voice() {
         let mut st = test_state(); // голос по умолчанию xenia
+        st.oma.dialog = true; // финалы звучат только в диалоге
         st.enqueue(Agent::Claude, "a", "Раз.", Kind::Manual);
         st.enqueue(Agent::Claude, "b", "Два.", Kind::Manual);
         st.enqueue(Agent::Claude, "a", "Три.", Kind::Urgent);
@@ -1585,6 +1662,7 @@ mod tests {
     #[test]
     fn voices_wrap_around_least_recently_assigned() {
         let mut st = test_state();
+        st.oma.dialog = true; // финалы звучат только в диалоге
         for s in ["a", "b", "c", "d", "e", "f", "g"] {
             st.enqueue(Agent::Claude, s, "Раз.", Kind::Manual);
         }
@@ -1595,6 +1673,7 @@ mod tests {
     #[test]
     fn default_change_moves_first_session_and_frees_old_default() {
         let mut st = test_state();
+        st.oma.dialog = true; // финалы звучат только в диалоге
         st.enqueue(Agent::Claude, "a", "Раз.", Kind::Manual);
         st.enqueue(Agent::Claude, "b", "Два.", Kind::Manual); // baya
         voices(&st);
