@@ -14,7 +14,7 @@ import "I18n.js" as I18n
 // it, and clicks pass through everything but the circle and the bubbles. The
 // window is only as big as its content, so the circle's animations repaint a
 // few pixels, not the screen; while the circle is dragged the window spans
-// the screen, and the drop picks the nearest corner.
+// the free area of the screen, and the drop picks the nearest corner.
 PanelWindow {
   id: win
 
@@ -33,6 +33,7 @@ PanelWindow {
   readonly property int line: Math.max(1, Style.space(3))
   readonly property int gap: Style.space(16)
   readonly property int spacing: Style.space(8)
+  readonly property int textLines: 4   // a bubble's text beyond this is elided
 
   // The corner from the daemon; a drop shows its corner before the daemon confirms it.
   readonly property string saved: link.speech.orb_corner || "bottom-right"
@@ -42,18 +43,19 @@ PanelWindow {
   readonly property bool atTop: corner.indexOf("top") === 0
   readonly property bool atLeft: corner.indexOf("left") > 0
 
-  // The window's top-left on the screen. Margins are `gap` on every side, so
-  // this holds both for the corner window and for the screen-wide one of a drag.
-  readonly property real originX: atLeft ? gap : (screen ? screen.width : 0) - gap - width
-  readonly property real originY: atTop ? gap : (screen ? screen.height : 0) - gap - height
-
+  // A drag measures the pointer from the window's anchored corner: the corner
+  // window and the area-wide window of a drag share that corner, so the
+  // numbers hold across the resize, wherever the bar's zone puts the area.
   property bool dragging: false
-  property real dragX: 0   // the circle's slot on the screen while dragged
-  property real dragY: 0
+  property real dragDX: 0   // the pointer's way from the press
+  property real dragDY: 0
   property bool tipShown: false
 
+  // A focus switch moves the window to another screen and the drag with it is lost.
+  onScreenChanged: dragging = false
+
   function drop() {
-    win.dropped = Model.corner(win.dragX + win.slotSize / 2, win.dragY + win.slotSize / 2, win.screen.width, win.screen.height)
+    win.dropped = Model.corner(orbSlot.x + win.slotSize / 2, orbSlot.y + win.slotSize / 2, win.width, win.height)
     win.link.send(Model.set("orb_corner", win.dropped))
     win.dragging = false
   }
@@ -65,7 +67,9 @@ PanelWindow {
     return null
   }
   color: "transparent"
-  exclusionMode: ExclusionMode.Ignore
+  // Below the bar's zone, reserving none of its own (rules.md §9).
+  exclusionMode: ExclusionMode.Normal
+  exclusiveZone: 0
   WlrLayershell.namespace: "predmaxim-oma-orb"
   WlrLayershell.layer: WlrLayer.Top
   anchors {
@@ -89,12 +93,12 @@ PanelWindow {
     id: orbSlot
     width: win.slotSize
     height: win.slotSize
-    x: win.dragging ? win.dragX - win.originX : (win.atLeft ? 0 : parent.width - width)
-    y: win.dragging ? win.dragY - win.originY : (win.atTop ? 0 : parent.height - height)
+    x: Math.max(0, Math.min(parent.width - width, (win.atLeft ? 0 : parent.width - width) + (win.dragging ? win.dragDX : 0)))
+    y: Math.max(0, Math.min(parent.height - height, (win.atTop ? 0 : parent.height - height) + (win.dragging ? win.dragDY : 0)))
 
-    // off, idle, paused: an outline; listening, speaking, waiting: filled.
+    // off, idle, listening, paused: a ring; speaking, waiting: filled.
     Rectangle {
-      readonly property bool filled: ["listening", "speaking", "waiting"].indexOf(win.mode) >= 0
+      readonly property bool filled: ["speaking", "waiting"].indexOf(win.mode) >= 0
       property real breath: 1
       anchors.centerIn: parent
       width: win.size
@@ -167,12 +171,12 @@ PanelWindow {
       hoverEnabled: true
       acceptedButtons: Qt.LeftButton | Qt.RightButton
       cursorShape: Qt.PointingHandCursor
-      property point grab     // the press inside the slot
-      property point start    // the press on the screen
+      property point start    // the press, from the anchored corner
+      property bool moved     // this press became a drag, even one cut short by a screen switch
 
-      function onScreen(mouse) {
+      function fromCorner(mouse) {
         var p = orbArea.mapToItem(null, mouse.x, mouse.y)
-        return Qt.point(win.originX + p.x, win.originY + p.y)
+        return Qt.point(win.atLeft ? p.x : p.x - win.width, win.atTop ? p.y : p.y - win.height)
       }
 
       onContainsMouseChanged: {
@@ -183,19 +187,21 @@ PanelWindow {
       onPressed: function(mouse) {
         win.tipShown = false
         tipDelay.stop()
-        grab = Qt.point(mouse.x, mouse.y)
-        start = onScreen(mouse)
+        start = fromCorner(mouse)
+        moved = false
       }
       onPositionChanged: function(mouse) {
         if (!(pressedButtons & Qt.LeftButton)) return
-        var p = onScreen(mouse)
+        var p = fromCorner(mouse)
         if (!win.dragging && Math.hypot(p.x - start.x, p.y - start.y) <= Style.space(8)) return
-        win.dragX = Math.max(win.gap, Math.min(win.screen.width - win.gap - win.slotSize, p.x - grab.x))
-        win.dragY = Math.max(win.gap, Math.min(win.screen.height - win.gap - win.slotSize, p.y - grab.y))
+        win.dragDX = p.x - start.x
+        win.dragDY = p.y - start.y
         win.dragging = true
+        moved = true
       }
       onReleased: function(mouse) {
         if (win.dragging) win.drop()
+        else if (moved) return
         else if (mouse.button === Qt.LeftButton) win.link.send(Model.omaCmd({ do: "talk" }))
         else if (mouse.button === Qt.RightButton) win.windowToggled()
       }
@@ -315,6 +321,8 @@ PanelWindow {
               font.family: Style.font.family
               font.pixelSize: Style.font.title
               wrapMode: Text.Wrap
+              maximumLineCount: win.textLines
+              elide: Text.ElideRight
             }
 
             Button {

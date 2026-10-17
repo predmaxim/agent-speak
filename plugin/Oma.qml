@@ -20,7 +20,10 @@ Item {
     interval: 1000
     repeat: true
     running: root.bubbles.length > 0
-    onTriggered: root.bubbles = Model.expire(root.bubbles, Date.now(), link.speech.quiet)
+    onTriggered: {
+      var kept = Model.expire(root.bubbles, Date.now(), link.speech.quiet)
+      if (kept !== root.bubbles) root.bubbles = kept
+    }
   }
 
   // omarchy-shell predmaxim.oma toggle | talk | dialog
