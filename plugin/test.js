@@ -14,6 +14,8 @@ assert.strictEqual(M.parseLine('{"chat":{"key":"k"}}').type, "chat")
 assert.strictEqual(M.parseLine('{"chat_delta":{"key":"k"}}').type, "chat_delta")
 assert.strictEqual(M.parseLine('{"chats":[]}').type, "chats")
 assert.strictEqual(M.parseLine('{"nope":1}'), null)
+assert.deepStrictEqual(M.parseLine('{"agents":null}').value, [])
+assert.deepStrictEqual(M.parseLine('{"chats":{}}').value, [])
 assert.strictEqual(M.parseLine("{broken"), null)
 assert.strictEqual(M.parseLine("null"), null)
 assert.strictEqual(M.orbMode(M.OFFLINE), "off")
@@ -31,6 +33,10 @@ s = M.pushBubble(s, { id: "draft", text: "раз", kind: "draft" }, 2000)
 s = M.pushBubble(s, { id: "draft", text: "раз два", kind: "draft", append: false }, 2100)
 assert.strictEqual(s[s.length - 1].text, "раз два")
 assert.deepStrictEqual(M.pushBubble(s, { id: "draft", drop: true }, 2200).map(b => b.id), ["d", "b"])
+const kept = M.pushBubble(s, { id: "b", drop: false }, 2150)
+assert.strictEqual(kept[kept.length - 1].text, "b ещё")
+assert.strictEqual(M.pushBubble(kept, { id: "b", append: true }, 2150).pop().text, "b ещё")
+s = M.pushBubble(s, { id: "draft", text: "раз два", kind: "draft", append: false }, 2100)
 assert.strictEqual(M.expire(s, 2100 + 9999, false).length, 3)
 assert.strictEqual(M.expire(s, 2100 + 10000, false).length, 0)
 assert.strictEqual(M.expire(s, 2100 + 999999, true).length, 3)
@@ -63,10 +69,6 @@ for (const a of ["working", "waiting", "done", "idle", "?"]) keys.add(M.stateLab
 for (const k of keys) assert.ok(Object.prototype.hasOwnProperty.call(I.TABLES.ru, k), "no ru for " + k)
 assert.strictEqual(ru(...M.orbTip(Object.assign({}, st, { waiting: 2 }))), "Ждут ответа: 2")
 // No dead Russian lines: each is a tr() literal or a key above
-const used = new Set(keys)
-for (const f of ["Link.qml", "Model.js"])
-  for (const m of fs.readFileSync(__dirname + "/" + f, "utf8").matchAll(/\btr\("((?:[^"\\]|\\.)*)"/g)) used.add(JSON.parse(`"${m[1]}"`))
-
 // Command lines
 assert.strictEqual(M.cmd("pause"), '{"cmd":"pause"}\n')
 assert.strictEqual(M.cmd("subscribe"), '{"cmd":"subscribe"}\n')
@@ -87,19 +89,22 @@ assert.deepStrictEqual(secs[2].options.map(o => o.value), ["x-slow", "slow", "me
 assert.deepStrictEqual(secs[2].options.map(o => o.label), ["Очень медленно", "Медленно", "Обычно", "Быстро", "Очень быстро"])
 for (const s of secs) for (const o of s.options) assert.strictEqual(typeof o.value, typeof sample[s.key], s.key)
 
-// Every tr("…") has a Russian line
-for (const f of ["Link.qml", "Model.js"]) {
-  if (!fs.existsSync(__dirname + "/" + f)) continue
-  for (const m of fs.readFileSync(__dirname + "/" + f, "utf8").matchAll(/\btr\("((?:[^"\\]|\\.)*)"/g))
-    assert.ok(Object.prototype.hasOwnProperty.call(I.TABLES.ru, JSON.parse(`"${m[1]}"`)), f + ": no ru for " + m[1])
-}
-
+// Every tr("…") in the QML files and Model.js has a Russian line, and no ru line is dead
+const files = fs.readdirSync(__dirname).filter(f => f.endsWith(".qml"))
+// Panel.qml and Indicator.qml are deleted in Task 11 — remove this exclusion with them
+const scanned = files.filter(f => !["Panel.qml", "Indicator.qml"].includes(f))
+const used = new Set(keys)
+for (const f of scanned.concat("Model.js"))
+  for (const m of fs.readFileSync(__dirname + "/" + f, "utf8").matchAll(/\btr\("((?:[^"\\]|\\.)*)"/g)) {
+    const k = JSON.parse(`"${m[1]}"`)
+    assert.ok(Object.prototype.hasOwnProperty.call(I.TABLES.ru, k), f + ": no ru for " + k)
+    used.add(k)
+  }
 for (const k of Object.keys(I.TABLES.ru)) assert.ok(used.has(k), "unused ru line: " + k)
 
 // QML: no own property or id may reuse a built-in name (rules.md §9, test of predmaxim.vpn)
 const builtins = ["state", "status", "data", "children", "visible", "enabled", "opacity", "parent", "left", "right", "top", "bottom", "x", "y", "width", "height", "states", "focus", "settings", "opened", "bar"]
-for (const f of ["Link.qml"]) {
-  if (!fs.existsSync(__dirname + "/" + f)) continue
+for (const f of files) {
   const src = fs.readFileSync(__dirname + "/" + f, "utf8")
   for (const m of src.matchAll(/^\s*(?:readonly\s+|required\s+)?property\s+\S+\s+(\w+)/gm))
     assert.ok(!builtins.includes(m[1]), f + ": property '" + m[1] + "' shadows a built-in")

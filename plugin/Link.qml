@@ -58,7 +58,7 @@ Item {
           else if (m.type === "bubble") link.bubble(m.value)
           else if (m.type === "chat") link.chat(m.value)
           else if (m.type === "chat_delta") link.chatDelta(m.value)
-          else link.chats(m.value)
+          else if (m.type === "chats") link.chats(m.value)
         }
       }
     }

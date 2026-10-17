@@ -17,7 +17,11 @@ function parseLine(line) {
   if (typeof s.running === "boolean") return { type: "state", value: s }
   var types = ["agents", "bubble", "chat", "chat_delta", "chats"]
   for (var i = 0; i < types.length; i++)
-    if (s[types[i]] !== undefined) return { type: types[i], value: s[types[i]] }
+    if (s[types[i]] !== undefined) {
+      var v = s[types[i]]
+      if ((types[i] === "agents" || types[i] === "chats") && !Array.isArray(v)) v = []
+      return { type: types[i], value: v }
+    }
   return null
 }
 
@@ -45,7 +49,8 @@ function pushBubble(stack, b, now) {
   var rest = stack.filter(function(x) { return x.id !== b.id })
   if (b.drop) return rest
   var old = stack.filter(function(x) { return x.id === b.id })[0]
-  var text = old && b.append ? old.text + " " + b.text : b.text
+  var text = old ? old.text : ""
+  if (b.text !== undefined) text = old && b.append ? old.text + " " + b.text : b.text
   var nb = Object.assign({}, old || {}, b, { text: text, at: now })
   return rest.concat([nb]).slice(-BUBBLES_MAX)
 }
