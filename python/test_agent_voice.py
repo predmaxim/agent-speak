@@ -377,3 +377,41 @@ def test_whisper_loads_once_and_unloads_on_battery_only():
         await w.get(); assert loads == [1, 1]
 
     asyncio.run(run())
+
+
+def _ear(cmd):
+    from agent_voice.ear import Ear
+    out = asyncio.Queue()
+    # VAD подменён заглушкой, кадры не подаются; микрофон и модель не трогаем
+    return out, Ear(out, Whisper(load=lambda: "m"), cmd=cmd, vad_load=lambda: None)
+
+
+def test_ear_start_stop_single_process_and_interleave():
+    async def run():
+        out, e = _ear(["sleep", "60"])
+        await asyncio.gather(e.start(), e.start())
+        assert e.open and e.pid
+        proc = e._proc
+        await e.stop()
+        assert not e.open and proc.returncode is not None
+        procs = []
+        for _ in range(3):
+            await asyncio.gather(e.start(), e.stop(), e.start(), e.stop())
+            procs.append(e._proc)
+        assert not e.open and e.pid is None
+        await e.start(); last = e._proc; await e.stop()
+        assert last.returncode is not None
+
+    asyncio.run(run())
+
+
+def test_ear_reports_when_recorder_exits():
+    async def run():
+        out, e = _ear(["true"])
+        await e.start()
+        ev = await asyncio.wait_for(out.get(), 5)
+        assert ev[0] == "error"
+        assert not e.open
+        await e.start(); await asyncio.wait_for(out.get(), 5)  # повторный start работает
+
+    asyncio.run(run())

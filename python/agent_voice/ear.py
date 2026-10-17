@@ -9,7 +9,7 @@ import numpy as np
 from .segment import Segmenter
 
 RATE, FRAME = 16000, 512  # 512 отсчётов = 32 мс
-# Default input: echo cancellation lives in the microphone chain (omarchy-mic-denoise).
+# Вход по умолчанию: эхоподавление живёт в цепочке микрофона (omarchy-mic-denoise).
 REC_CMD = ["pw-record", "--rate", str(RATE), "--channels", "1", "--format", "s16", "-"]
 
 
@@ -72,8 +72,9 @@ class Whisper:
 class Ear:
     """pw-record → VAD → Segmenter → whisper; микрофон включается по start()/stop()."""
 
-    def __init__(self, out, whisper, cmd=REC_CMD):
+    def __init__(self, out, whisper, cmd=REC_CMD, vad_load=None):
         self.out, self.whisper, self.cmd = out, whisper, list(cmd)
+        self._vad_load, self._lock = vad_load, asyncio.Lock()  # lock: start/stop идут по очереди, побеждает последний вызов
         self.paused = False
         self._proc = self._vad = self._tasks = None
 
@@ -86,17 +87,24 @@ class Ear:
         return self._proc.pid if self._proc else None
 
     async def start(self):
-        if self.open:
-            return
-        if self._vad is None:
-            from silero_vad import load_silero_vad
-            self._vad = await asyncio.to_thread(load_silero_vad)
-        self._proc = await asyncio.create_subprocess_exec(*self.cmd, stdout=asyncio.subprocess.PIPE)
-        phrases = asyncio.Queue()
-        self._tasks = [asyncio.create_task(self._recognize(phrases)),
-                       asyncio.create_task(self._read(self._proc, phrases))]
+        async with self._lock:
+            if self.open:
+                return
+            if self._vad is None:
+                load = self._vad_load
+                if load is None:
+                    from silero_vad import load_silero_vad as load
+                self._vad = await asyncio.to_thread(load)
+            proc = self._proc = await asyncio.create_subprocess_exec(*self.cmd, stdout=asyncio.subprocess.PIPE)
+            phrases = asyncio.Queue()
+            self._tasks = [asyncio.create_task(self._recognize(phrases)),
+                           asyncio.create_task(self._read(proc, phrases))]
 
     async def stop(self):
+        async with self._lock:
+            await self._close()
+
+    async def _close(self):
         proc, tasks, self._proc, self._tasks = self._proc, self._tasks, None, None
         if proc is None:
             return
@@ -113,8 +121,7 @@ class Ear:
                 model = await self.whisper.get()
                 await self.out.put(("phrase", await asyncio.to_thread(transcribe, model, pcm)))
             except Exception as e:
-                await self.out.put(("error", f"recognize: {e!r}"))
-                return
+                await self.out.put(("error", f"recognize: {e!r}"))  # слух продолжает работать
 
     async def _read(self, proc, phrases):
         import torch
@@ -132,4 +139,14 @@ class Ear:
                     else:
                         phrases.put_nowait(ev[1])
         except asyncio.IncompleteReadError:
-            pass  # pw-record завершился сам
+            reason = "pw-record завершился"
+        except Exception as e:
+            reason = f"слух: {e!r}"
+        # читатель кончил сам (не stop): сообщить и привести Ear в закрытое состояние
+        await self.out.put(("error", reason))
+        if self._proc is proc:
+            self._tasks[0].cancel()
+            self._proc = self._tasks = None
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
