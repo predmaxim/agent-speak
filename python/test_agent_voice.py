@@ -45,52 +45,78 @@ def test_chunker_newline_ends_sentence():
     assert c.feed("Первая строка достаточно длинная\nвторая") == ["Первая строка достаточно длинная"]
 
 
-def test_conversation_turn():
+def test_talk_draft_send():
     cv = Conversation()
-    assert cv.phrase(" а ") == []  # короче 2 символов после strip — ничего
-    assert cv.phrase("Что в этом проекте?") == [("send", "Что в этом проекте?"), ("state", "thinking")]
-    assert cv.delta("Это демон озвучки агентов, написан на Rust. И") == [
-        ("say", "Это демон озвучки агентов, написан на Rust."), ("state", "speaking")]
+    assert cv.talk() == [("ear", True), ("state", "listening")]
+    assert cv.phrase("какая погода") == [("draft", "какая погода")]
+    assert cv.phrase("в Москве") == [("draft", "какая погода в Москве")]
+    assert cv.talk() == [("drop_draft",), ("ear", False), ("send", "какая погода в Москве"), ("state", "thinking")]
+
+
+def test_talk_without_draft_cancels():
+    cv = Conversation()
+    cv.talk()
+    assert cv.talk() == [("drop_draft",), ("ear", False), ("state", "idle")]
+
+
+def test_answer_shown_and_said_then_idle():
+    cv = Conversation()
+    cv.talk(); cv.phrase("вопрос тут"); cv.send()
+    acts = cv.delta("Солнечно, плюс двадцать градусов. ")
+    assert ("show", "Солнечно, плюс двадцать градусов.") in acts and ("say", "Солнечно, плюс двадцать градусов.") in acts
+    assert acts[-1] == ("state", "speaking")
     cv.audio(True)
-    assert cv.done() == [("say", "И")]
-    assert cv.audio(False) == [("state", "listening")]
+    assert cv.done() == []
+    assert cv.audio(False) == [("state", "idle")]
 
 
-def test_barge_in_while_speaking_stops_and_interrupts():
+def test_quiet_shows_without_saying():
     cv = Conversation()
-    cv.phrase("Расскажи подробно")
-    cv.delta("Длинный ответ про устройство демона. Дальше")
+    cv.set_quiet(True)
+    cv.ask("который час")
+    acts = cv.delta("Сейчас ровно три часа дня. ")
+    assert ("show", "Сейчас ровно три часа дня.") in acts and not any(a[0] == "say" for a in acts)
+    assert cv.done() == [("state", "idle")]
+
+
+def test_dialog_sends_each_phrase_and_barges_in():
+    cv = Conversation()
+    assert cv.set_dialog(True) == [("ear", True), ("state", "listening")]
+    assert cv.talk() == []
+    assert cv.phrase("как дела у почты") == [("send", "как дела у почты"), ("state", "thinking")]
+    cv.delta("Почта ждёт твоего ответа сейчас. ")
     cv.audio(True)
     assert cv.speech_start() == [("stop",), ("interrupt",), ("state", "listening")]
-    assert cv.delta(" хвост старого хода.") == []  # прерванный ход не озвучивается
-    assert cv.done() == []
+    assert cv.set_dialog(False) == [("ear", False), ("state", "idle")]
 
 
-def test_barge_in_while_thinking_only_interrupts():
+def test_click_while_speaking_interrupts_and_listens():
     cv = Conversation()
-    cv.phrase("Подумай")
-    assert cv.speech_start() == [("interrupt",), ("state", "listening")]
+    cv.ask("расскажи")
+    cv.delta("Длинный ответ про всё сразу. ")
+    cv.audio(True)
+    assert cv.talk() == [("stop",), ("interrupt",), ("ear", True), ("state", "listening")]
 
 
-def test_speech_while_listening_does_nothing():
-    assert Conversation().speech_start() == []
-
-
-def test_barge_in_after_turn_done_only_stops_audio():
+def test_statuses_audio_does_not_end_draft():
     cv = Conversation()
-    cv.phrase("Скажи")
-    cv.delta("Готово, всё проверил полностью. ")
-    cv.audio(True)  # ответ ещё звучит, когда ход закончился
-    assert cv.done() == []
-    assert cv.speech_start() == [("stop",), ("state", "listening")]
+    cv.talk(); cv.phrase("подожди")
+    assert cv.audio(True) == [] and cv.audio(False) == []
+    assert (cv.state, cv.draft) == ("listening", "подожди")
 
 
-def test_short_answer_under_min_len():
+def test_mic_busy_pauses_listening():
     cv = Conversation()
-    cv.phrase("Ты тут?")
-    cv.delta("Да.")
-    assert cv.done() == [("say", "Да."), ("state", "speaking")]
+    cv.set_dialog(True)
+    assert cv.mic_busy(True) == [("state", "paused")]
+    assert cv.phrase("это для voxtype") == []
+    assert cv.mic_busy(False) == [("state", "listening")]
 
+
+def test_short_phrases_dropped():
+    cv = Conversation()
+    cv.talk()
+    assert cv.phrase(" а ") == [] and cv.ask("ж") == []
 
 import json
 from types import SimpleNamespace
