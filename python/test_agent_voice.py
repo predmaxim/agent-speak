@@ -244,3 +244,55 @@ def test_link_reconnects_after_server_closes(tmp_path):
     assert all(ok)
     c2, _ = srv.accept()
     assert b'{"a": 4}' in c2.recv(100)
+
+
+# --- контекст Омы ---
+from agent_voice.context import transcript_tail, foreign_capture, on_ac, selection
+
+
+def test_transcript_tail_keeps_dialogue_and_trims(tmp_path):
+    rows = [
+        {"type": "user", "message": {"content": "почини сборку"}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Смотрю ошибку."}, {"type": "tool_use", "name": "Bash", "input": {}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "content": "error: E0425 " + "x" * 900}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Не хватает импорта."}]}},
+    ]
+    p = tmp_path / "t.jsonl"
+    p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\nобрывок")
+    t = transcript_tail(str(p))
+    assert t.splitlines()[0] == "ты: почини сборку"
+    assert "агент: Смотрю ошибку." in t and "результат: error: E0425" in t
+    assert t.endswith("агент: Не хватает импорта.")
+    assert max(len(l) for l in t.splitlines()) <= 520
+    assert len(transcript_tail(str(p), limit=40)) <= 40
+    assert transcript_tail(str(tmp_path / "нет.jsonl")) == ""
+
+
+def test_foreign_capture_ignores_virtual_and_own():
+    out = lambda pid: {"properties": {"application.process.id": str(pid)}}
+    assert not foreign_capture([{"properties": {"node.virtual": "true"}}], {42})
+    assert not foreign_capture([out(42)], {42})
+    assert foreign_capture([out(7)], {42})
+    assert not foreign_capture([], set())
+
+
+def test_on_ac(tmp_path):
+    def supply(name, typ, online=None):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "type").write_text(typ + "\n")
+        if online is not None:
+            (d / "online").write_text(online + "\n")
+    assert on_ac(str(tmp_path))
+    supply("BAT0", "Battery")
+    supply("ADP0", "Mains", "0")
+    assert not on_ac(str(tmp_path))
+    (tmp_path / "ADP0" / "online").write_text("1\n")
+    assert on_ac(str(tmp_path))
+
+
+def test_selection_trims_and_survives_errors():
+    assert len(selection(run=lambda *a, **k: SimpleNamespace(returncode=0, stdout="я" * 3000))) == 2000
+    def boom(*a, **k):
+        raise FileNotFoundError
+    assert selection(run=boom) == ""

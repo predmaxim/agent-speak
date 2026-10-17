@@ -1,0 +1,86 @@
+"""Контекст для Омы: хвост транскрипта агента, выделение, захват микрофона, питание."""
+import json
+import os
+import subprocess
+
+
+def _blocks(content):
+    return [{"type": "text", "text": content}] if isinstance(content, str) else (content or [])
+
+
+def transcript_tail(path: str, limit: int = 4000) -> str:
+    """Диалог из jsonl-транскрипта Claude: строки «ты/агент/результат», последние limit символов."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 256 * 1024))
+            raw = f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    lines = []
+    for row in raw.splitlines():
+        try:
+            d = json.loads(row)
+            kind = d["type"]
+            blocks = _blocks(d["message"]["content"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        for b in blocks:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "text" and kind in ("user", "assistant"):
+                lines.append(("ты: " if kind == "user" else "агент: ") + str(b.get("text", "")))
+            elif b.get("type") == "tool_result":
+                parts = [x.get("text", "") for x in _blocks(b.get("content")) if isinstance(x, dict)]
+                lines.append(("результат: " + " ".join(parts))[:500])
+    out = []
+    size = 0
+    for l in reversed(lines):  # целые строки с конца, пока влезают
+        if size + len(l) + 1 > limit:
+            break
+        out.append(l)
+        size += len(l) + 1
+    return "\n".join(reversed(out))
+
+
+def selection(run=subprocess.run) -> str:
+    """Текущее выделение мыши (primary), до 2000 символов."""
+    try:
+        r = run(["wl-paste", "--primary", "--no-newline"], capture_output=True, text=True, timeout=1)
+        return r.stdout[:2000] if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def mic_outputs() -> list:
+    try:
+        r = subprocess.run(["pactl", "-f", "json", "list", "source-outputs"],
+                           capture_output=True, text=True, timeout=2)
+        return json.loads(r.stdout)
+    except Exception:
+        return []
+
+
+def foreign_capture(outputs: list, own: set) -> bool:
+    """Микрофон слушает не виртуальный поток чужого процесса."""
+    for o in outputs:
+        p = o.get("properties", {})
+        if p.get("node.virtual") != "true" and p.get("application.process.id") not in {str(x) for x in own}:
+            return True
+    return False
+
+
+def on_ac(root: str = "/sys/class/power_supply") -> bool:
+    """От сети ли питание; без блоков Mains (настольный) — True."""
+    mains = []
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return True
+    for n in names:
+        try:
+            if open(f"{root}/{n}/type").read().strip() == "Mains":
+                mains.append(open(f"{root}/{n}/online").read().strip() == "1")
+        except OSError:
+            pass
+    return any(mains) if mains else True
