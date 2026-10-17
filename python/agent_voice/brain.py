@@ -66,6 +66,8 @@ def messages_of(msgs) -> list:
         for b in _blocks((m.message or {}).get("content")):
             if not (isinstance(b, dict) and b.get("type") == "text" and b.get("text")):
                 continue
+            if role == "me" and b["text"].startswith("[Request interrupted"):  # след перебивания голосом
+                continue
             if role == "oma" and out and out[-1]["role"] == "oma":  # как в окне: ответ одним сообщением
                 out[-1]["text"] += " " + b["text"]
             else:
@@ -123,7 +125,7 @@ def oma_tools(snapshot) -> list:
 
     @tool("selection", "Текст, выделенный пользователем мышью.", {})
     async def sel(args):
-        return _text(selection() or "Ничего не выделено")
+        return _text(await asyncio.to_thread(selection) or "Ничего не выделено")
 
     return [agents, agent_feed, agent_tail, sel]
 
@@ -151,17 +153,17 @@ class Brain:
             aid = key[6:]
             self.sid = find_agent_chat(list_sessions(OMA_DIR), aid)
             prompt = agent_prompt(find_entry(self.snapshot(), aid) or {"id": aid, "title": aid, "cwd": "?"})
-        self.client = ClaudeSDKClient(ClaudeAgentOptions(
+        client = ClaudeSDKClient(ClaudeAgentOptions(
             cwd=OMA_DIR, model=MODEL, system_prompt=prompt, tools=TOOLS, allowed_tools=TOOLS + OMA_TOOLS,
-            mcp_servers={"oma": create_sdk_mcp_server("oma", tools=self.tools)}, resume=self.sid,
-            include_partial_messages=True, setting_sources=[], env={"AGENT_SPEAK": "1"}))
-        await self.client.connect()
-        self.reader = asyncio.create_task(self._read())
+            mcp_servers={"oma": create_sdk_mcp_server("oma", tools=self.tools)}, strict_mcp_config=True,
+            resume=self.sid, include_partial_messages=True, setting_sources=[], env={"AGENT_SPEAK": "1"}))
+        await client.connect()  # упал — клиента нет, следующий send попробует снова
+        self.client, self.reader = client, asyncio.create_task(self._read(client))
         return messages_of(get_session_messages(self.sid, directory=OMA_DIR)) if self.sid else []
 
-    async def _read(self):
+    async def _read(self, client):
         try:
-            async for m in self.client.receive_messages():
+            async for m in client.receive_messages():
                 if type(m).__name__ == "ResultMessage" and self.sid is None and m.session_id:
                     self.sid, was = m.session_id, self.key
                     if was.startswith("agent:"):
@@ -178,16 +180,15 @@ class Brain:
 
     async def send(self, text: str):
         if self.key.startswith("chat:") and time.time() - self.used > STALE_HOURS * 3600:
-            was = self.key
+            await self.events.put(("opened", "new", self.key))  # до open: ключ станет "new", даже если connect упадёт
             await self.open("new")
-            await self.events.put(("opened", "new", was))
-        elif not self.client or self.reader.done():
+        elif not self.reader or self.reader.done():
             await self.open(self.key)
         self.used = time.time()
         await self.client.query(text)
 
     async def interrupt(self):
-        if self.client:
+        if self.reader and not self.reader.done():
             # ponytail: interrupt сразу после ResultMessage съест следующий ход; счётчик ходов, если это всплывёт
             self.st["skip"] = True
             await self.client.interrupt()

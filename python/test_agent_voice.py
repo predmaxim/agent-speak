@@ -346,7 +346,8 @@ def test_general_chats_newest_first_without_agent_chats():
 def test_messages_of_keeps_text_only():
     m = lambda t, c: SimpleNamespace(type=t, message={"content": c})
     msgs = [m("user", "как дела"), m("assistant", [{"type": "tool_use", "name": "mcp__oma__agents"}]),
-            m("user", [{"type": "tool_result", "content": "…"}]), m("assistant", [{"type": "text", "text": "Почта ждёт ответа."}])]
+            m("user", [{"type": "tool_result", "content": "…"}]), m("assistant", [{"type": "text", "text": "Почта ждёт ответа."}]),
+            m("user", [{"type": "text", "text": "[Request interrupted by user]"}])]
     assert messages_of(msgs) == [{"role": "me", "text": "как дела"}, {"role": "oma", "text": "Почта ждёт ответа."}]
 
 
@@ -364,25 +365,29 @@ def test_agent_prompt_names_agent():
     assert p.startswith(OMA_PROMPT) and "«Почтовый клиент»" in p and 'agent_feed("s1")' in p
 
 
-def test_brain_chat_keys_tag_and_stale(monkeypatch, tmp_path):
-    # SDK подменён: ни сети, ни процесса claude
+def _fake_sdk(monkeypatch, tmp_path, fail=0):
+    # SDK подменён: ни сети, ни процесса claude; первые fail подключений падают
     from agent_voice import brain
-    made, tags = [], []
+    made, tags, fails = [], [], [fail]
     Result = type("ResultMessage", (), {})
 
     class Client:
         def __init__(self, opts):
-            self.opts, self.q = opts, asyncio.Queue()
+            self.opts, self.q, self.sent, self.interrupts = opts, asyncio.Queue(), [], 0
             made.append(self)
-        async def connect(self): pass
+        async def connect(self):
+            if fails[0]:
+                fails[0] -= 1
+                raise RuntimeError("нет входа")
         async def query(self, text):
+            self.sent.append(text)
             r = Result()
             r.session_id = f"sid-{len(made)}"
             await self.q.put(r)
         async def receive_messages(self):
-            while True:
-                yield await self.q.get()
-        async def interrupt(self): pass
+            while (m := await self.q.get()) is not None:  # None — CLI умер, поток кончился
+                yield m
+        async def interrupt(self): self.interrupts += 1
         async def disconnect(self): pass
 
     monkeypatch.setattr(brain, "OMA_DIR", str(tmp_path))
@@ -390,6 +395,11 @@ def test_brain_chat_keys_tag_and_stale(monkeypatch, tmp_path):
     monkeypatch.setattr(brain, "list_sessions", lambda d: [])
     monkeypatch.setattr(brain, "tag_session", lambda sid, tag, directory: tags.append((sid, tag, directory)))
     monkeypatch.setattr(brain, "get_session_messages", lambda sid, directory: [SimpleNamespace(type="user", message={"content": "привет"})])
+    return brain, made, tags
+
+
+def test_brain_chat_keys_tag_and_stale(monkeypatch, tmp_path):
+    brain, made, tags = _fake_sdk(monkeypatch, tmp_path)
 
     async def run():
         ev = asyncio.Queue()
@@ -399,6 +409,7 @@ def test_brain_chat_keys_tag_and_stale(monkeypatch, tmp_path):
         o = made[0].opts
         assert o.cwd == str(tmp_path) and o.resume is None and o.system_prompt == OMA_PROMPT
         assert o.tools == brain.TOOLS and o.allowed_tools == brain.TOOLS + brain.OMA_TOOLS and o.env == {"AGENT_SPEAK": "1"}
+        assert o.strict_mcp_config and list(o.mcp_servers) == ["oma"]
         assert await b.open("agent:s1") == [] and "«Почтовый клиент»" in made[1].opts.system_prompt
         await b.send("что там")
         assert [await ev.get(), await ev.get()] == [("opened", "agent:s1", "agent:s1"), ("done", None)]
@@ -408,6 +419,29 @@ def test_brain_chat_keys_tag_and_stale(monkeypatch, tmp_path):
         await b.send("снова")
         assert [await ev.get(), await ev.get()] == [("opened", "new", "chat:sid-1"), ("opened", "chat:sid-4", "new")]
         assert made[3].opts.resume is None and b.key == "chat:sid-4"
+        await b.close()
+
+    asyncio.run(run())
+
+
+def test_brain_reconnects_after_failed_connect_and_dead_stream(monkeypatch, tmp_path):
+    import pytest
+    brain, made, _ = _fake_sdk(monkeypatch, tmp_path, fail=1)
+
+    async def run():
+        ev = asyncio.Queue()
+        b = brain.Brain(ev, lambda: E)
+        with pytest.raises(RuntimeError):
+            await b.send("раз")
+        await b.interrupt()  # клиента нет — ничего
+        await b.send("два")
+        assert made[1].sent == ["два"] and [await ev.get(), await ev.get()] == [("opened", "chat:sid-2", "new"), ("done", None)]
+        await made[1].q.put(None)
+        assert await ev.get() == ("error", "Claude: сессия оборвалась")
+        await b.interrupt()
+        assert made[1].interrupts == 0 and not b.st["skip"]
+        await b.send("три")
+        assert made[2].sent == ["три"] and made[2].opts.resume == "sid-2"
         await b.close()
 
     asyncio.run(run())
