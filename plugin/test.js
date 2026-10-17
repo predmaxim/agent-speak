@@ -3,40 +3,69 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, ICONS, SAMPLE, parse, view, busy, cmd, set, say, sections")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
+const st = { running: true, oma: "idle", waiting: 0, quiet: false }
+assert.strictEqual(M.parseLine('{"running":true,"oma":"idle"}').type, "state")
+assert.strictEqual(M.parseLine('{"agents":[]}').type, "agents")
+assert.strictEqual(M.parseLine('{"bubble":{"id":"x"}}').value.id, "x")
+assert.strictEqual(M.parseLine('{"chat":{"key":"k"}}').type, "chat")
+assert.strictEqual(M.parseLine('{"chat_delta":{"key":"k"}}').type, "chat_delta")
+assert.strictEqual(M.parseLine('{"chats":[]}').type, "chats")
+assert.strictEqual(M.parseLine('{"nope":1}'), null)
+assert.strictEqual(M.parseLine("{broken"), null)
+assert.strictEqual(M.parseLine("null"), null)
+assert.strictEqual(M.orbMode(M.OFFLINE), "off")
+assert.strictEqual(M.orbMode(null), "off")
+assert.strictEqual(M.orbMode(st), "idle")
+assert.strictEqual(M.orbMode(Object.assign({}, st, { waiting: 2, quiet: true })), "waiting")
+assert.strictEqual(M.orbMode(Object.assign({}, st, { quiet: true })), "quiet")
+assert.strictEqual(M.orbMode(Object.assign({}, st, { oma: "listening", waiting: 1 })), "listening")
+let s = []
+for (const id of ["a", "b", "c", "d"]) s = M.pushBubble(s, { id, who: "T", text: id, kind: "status" }, 1000)
+assert.deepStrictEqual(s.map(b => b.id), ["b", "c", "d"])
+s = M.pushBubble(s, { id: "b", text: "ещё", append: true }, 2000)
+assert.deepStrictEqual(s.map(b => [b.id, b.text]), [["c", "c"], ["d", "d"], ["b", "b ещё"]])
+s = M.pushBubble(s, { id: "draft", text: "раз", kind: "draft" }, 2000)
+s = M.pushBubble(s, { id: "draft", text: "раз два", kind: "draft", append: false }, 2100)
+assert.strictEqual(s[s.length - 1].text, "раз два")
+assert.deepStrictEqual(M.pushBubble(s, { id: "draft", drop: true }, 2200).map(b => b.id), ["d", "b"])
+assert.strictEqual(M.expire(s, 2100 + 9999, false).length, 3)
+assert.strictEqual(M.expire(s, 2100 + 10000, false).length, 0)
+assert.strictEqual(M.expire(s, 2100 + 999999, true).length, 3)
+assert.deepStrictEqual(M.dismiss(s, "d").map(b => b.id), ["b", "draft"])
+assert.deepStrictEqual(M.ago(1000, 1030), ["just now", 0])
+assert.deepStrictEqual(M.ago(1000, 1000 + 180), ["%1 min", 3])
+assert.deepStrictEqual(M.ago(1000, 1000 + 7300), ["%1 h", 2])
+assert.deepStrictEqual(M.ago(1000, 1000 + 3 * 86400), ["%1 d", 3])
+let msgs = M.chatApply([], { role: "me", text: "как дела" })
+msgs = M.chatApply(msgs, { role: "oma", text: "Почта ждёт." })
+msgs = M.chatApply(msgs, { role: "oma", text: "Остальные работают." })
+assert.deepStrictEqual(msgs, [{ role: "me", text: "как дела" }, { role: "oma", text: "Почта ждёт. Остальные работают." }])
+assert.strictEqual(M.corner(10, 10, 1000, 800), "top-left")
+assert.strictEqual(M.corner(990, 10, 1000, 800), "top-right")
+assert.strictEqual(M.corner(10, 790, 1000, 800), "bottom-left")
+assert.strictEqual(M.corner(990, 790, 1000, 800), "bottom-right")
+assert.strictEqual(M.omaCmd({ do: "talk" }), '{"cmd":"oma","action":{"do":"talk"}}\n')
+assert.strictEqual(M.HOURS.length, 24)
+assert.strictEqual(M.HOURS[0], "00:00")
+assert.strictEqual(M.HOURS[23], "23:00")
 
-// The daemon's state line
-const st = M.parse('{"running":true,"speaking":true,"paused":false,"mode":"auto","read_intermediate":true,"speaker":"xenia","rate":"medium","project":"agent-speak"}')
-assert.strictEqual(st.speaker, "xenia")
-// Anything else from the socket never replaces the state
-assert.strictEqual(M.parse("{broken"), null)
-assert.strictEqual(M.parse('{"speaking":true}'), null)
-assert.strictEqual(M.parse(""), null)
-assert.strictEqual(M.parse("null"), null)
-
-// Icon, lit, tooltip per state (spec table)
-const at = patch => Object.assign({}, st, patch)
-const v = s => { const x = M.view(s); return [x.icon, x.lit, ru(x.tip, x.arg)] }
-assert.deepStrictEqual(v(st), [M.ICONS.speaking, true, "Читаю: agent-speak"])
-assert.deepStrictEqual(v(at({ project: "" })), [M.ICONS.speaking, true, "Читаю…"])
-assert.deepStrictEqual(v(at({ speaking: false, paused: true })), [M.ICONS.paused, true, "Пауза — правый клик продолжит"])
-assert.deepStrictEqual(v(at({ speaking: false })), [M.ICONS.idle, true, "Авто: агент в фокусе читается сам"])
-assert.deepStrictEqual(v(at({ speaking: false, mode: "manual" })), [M.ICONS.idle, false, "Вручную: Super+Shift+Alt+S"])
-assert.deepStrictEqual(v(M.OFFLINE), [M.ICONS.off, false, "Сервис озвучки не запущен"])
-assert.deepStrictEqual(v(null), [M.ICONS.off, false, "Сервис озвучки не запущен"])
-assert.strictEqual(new Set(Object.values(M.ICONS)).size, 5)
-assert.strictEqual(M.view(st).tip, "Reading: %1") // English without a table
-assert.strictEqual(I.translator("en")(M.view(st).tip, "x"), "Reading: x")
-
-// Right click and Pause/Stop: only while speaking or paused
-assert.strictEqual(M.busy(st), true)
-assert.strictEqual(M.busy(at({ speaking: false, paused: true })), true)
-assert.strictEqual(M.busy(at({ speaking: false })), false)
-assert.strictEqual(M.busy(at({ running: false })), false)
-assert.strictEqual(M.busy(M.OFFLINE), false)
-assert.strictEqual(M.busy(null), false)
+// Every key from orbTip, ago and stateLabel has a Russian line
+const keys = new Set()
+for (const oma of ["off", "idle", "loading", "listening", "thinking", "speaking", "paused"])
+  for (const waiting of [0, 2]) for (const quiet of [false, true])
+    keys.add(M.orbTip(Object.assign({}, st, { oma, waiting, quiet }))[0])
+keys.add(M.orbTip(M.OFFLINE)[0])
+for (const n of [0, 100, 600, 7300, 3 * 86400]) keys.add(M.ago(0, n)[0])
+for (const a of ["working", "waiting", "done", "idle", "?"]) keys.add(M.stateLabel(a))
+for (const k of keys) assert.ok(Object.prototype.hasOwnProperty.call(I.TABLES.ru, k), "no ru for " + k)
+assert.strictEqual(ru(...M.orbTip(Object.assign({}, st, { waiting: 2 }))), "Ждут ответа: 2")
+// No dead Russian lines: each is a tr() literal or a key above
+const used = new Set(keys)
+for (const f of ["Link.qml", "Model.js"])
+  for (const m of fs.readFileSync(__dirname + "/" + f, "utf8").matchAll(/\btr\("((?:[^"\\]|\\.)*)"/g)) used.add(JSON.parse(`"${m[1]}"`))
 
 // Command lines
 assert.strictEqual(M.cmd("pause"), '{"cmd":"pause"}\n')
@@ -47,6 +76,7 @@ assert.strictEqual(M.say(M.SAMPLE), '{"cmd":"say","text":"Так звучит э
 
 // Window sections: keys, values the daemon accepts, value types as in the state line
 const secs = M.sections(ru)
+const sample = { read_intermediate: true, speaker: "xenia", rate: "medium" }
 assert.deepStrictEqual(secs.map(s => s.key), ["read_intermediate", "speaker", "rate"])
 assert.deepStrictEqual(secs.map(s => s.sample), [false, true, true])
 assert.deepStrictEqual(secs.map(s => s.caption), ["ПРОМЕЖУТОЧНЫЕ СТАТУСЫ", "ГОЛОС", "СКОРОСТЬ"])
@@ -55,31 +85,20 @@ assert.deepStrictEqual(secs[1].options.map(o => o.value), ["xenia", "baya", "kse
 assert.deepStrictEqual(secs[1].options.map(o => o.label), ["Xenia", "Baya", "Kseniya", "Aidar", "Eugene"])
 assert.deepStrictEqual(secs[2].options.map(o => o.value), ["x-slow", "slow", "medium", "fast", "x-fast"])
 assert.deepStrictEqual(secs[2].options.map(o => o.label), ["Очень медленно", "Медленно", "Обычно", "Быстро", "Очень быстро"])
-for (const s of secs) for (const o of s.options) assert.strictEqual(typeof o.value, typeof st[s.key], s.key)
-
-// Voice conversation
-const M2 = load("Model.js", "OFFLINE, ICONS, view, voiceSection")
-const vs = M2.voiceSection(at({ voice: "off", voice_last_agent: "codex" }), ru)
-assert.deepStrictEqual(vs.options.map(o => o.value), ["codex", "claude"]) // the last one first
-assert.strictEqual(vs.options[0].cmd, JSON.stringify({ cmd: "voice_start", agent: "codex" }) + "\n")
-const on = M2.voiceSection(at({ voice: "listening", voice_agent: "claude", voice_last_agent: "claude" }), ru)
-assert.deepStrictEqual(on.options.map(o => o.value), ["stop"])
-assert.strictEqual(on.options[0].cmd, JSON.stringify({ cmd: "voice_stop" }) + "\n")
-assert.strictEqual(on.options[0].label, "Закончить разговор с Claude")
-assert.deepStrictEqual(v(at({ voice: "thinking", voice_agent: "codex" })), [M2.ICONS.voice, true, "Разговор с Codex: думает"])
-assert.deepStrictEqual(v(at({ voice: "listening", voice_agent: "claude" })), [M2.ICONS.voice, true, "Разговор с Claude: слушаю"])
-assert.strictEqual(M2.OFFLINE.voice, "off")
+for (const s of secs) for (const o of s.options) assert.strictEqual(typeof o.value, typeof sample[s.key], s.key)
 
 // Every tr("…") has a Russian line
-for (const f of ["Panel.qml", "Indicator.qml", "Link.qml", "Model.js"]) {
+for (const f of ["Link.qml", "Model.js"]) {
   if (!fs.existsSync(__dirname + "/" + f)) continue
   for (const m of fs.readFileSync(__dirname + "/" + f, "utf8").matchAll(/\btr\("((?:[^"\\]|\\.)*)"/g))
     assert.ok(Object.prototype.hasOwnProperty.call(I.TABLES.ru, JSON.parse(`"${m[1]}"`)), f + ": no ru for " + m[1])
 }
 
+for (const k of Object.keys(I.TABLES.ru)) assert.ok(used.has(k), "unused ru line: " + k)
+
 // QML: no own property or id may reuse a built-in name (rules.md §9, test of predmaxim.vpn)
 const builtins = ["state", "status", "data", "children", "visible", "enabled", "opacity", "parent", "left", "right", "top", "bottom", "x", "y", "width", "height", "states", "focus", "settings", "opened", "bar"]
-for (const f of ["Panel.qml", "Indicator.qml", "Link.qml"]) {
+for (const f of ["Link.qml"]) {
   if (!fs.existsSync(__dirname + "/" + f)) continue
   const src = fs.readFileSync(__dirname + "/" + f, "utf8")
   for (const m of src.matchAll(/^\s*(?:readonly\s+|required\s+)?property\s+\S+\s+(\w+)/gm))

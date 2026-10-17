@@ -5,18 +5,12 @@
 // plugins get no .qm catalogues, so Qt's qsTr isn't used.
 var TABLES = {
   ru: {
-    "Speech": "Озвучка",
-    "Reading: %1": "Читаю: %1", "Reading…": "Читаю…",
-    "Paused — right click resumes": "Пауза — правый клик продолжит",
-    "Auto: the focused agent is read aloud": "Авто: агент в фокусе читается сам",
-    "Manual: Super+Shift+Alt+S": "Вручную: Super+Shift+Alt+S",
-    "Speech service is not running": "Сервис озвучки не запущен",
-    "Pause": "Пауза", "Resume": "Продолжить", "Stop": "Стоп",
-    "MODE": "РЕЖИМ", "Auto": "Авто", "Manual": "Вручную",
+    "Oma is not running": "Ома не запущена", "Oma is loading": "Ома загружается", "Oma is listening": "Ома слушает",
+    "Oma is thinking": "Ома думает", "Oma is speaking": "Ома говорит", "Paused": "Пауза", "Quiet mode": "Тихий режим",
+    "Oma": "Ома", "%1 waiting": "Ждут ответа: %1",
+    "just now": "только что", "%1 min": "%1 мин", "%1 h": "%1 ч", "%1 d": "%1 д",
+    "Working": "Работает", "Waiting": "Ждёт", "Done": "Готово", "Idle": "Свободен",
     "INTERMEDIATE STATUSES": "ПРОМЕЖУТОЧНЫЕ СТАТУСЫ", "Read": "Читать", "Final answer only": "Только итог",
-    "VOICE CHAT": "РАЗГОВОР", "Finish talking to %1": "Закончить разговор с %1",
-    "Talking to %1: starting": "Разговор с %1: запуск", "Talking to %1: listening": "Разговор с %1: слушаю",
-    "Talking to %1: thinking": "Разговор с %1: думает", "Talking to %1: speaking": "Разговор с %1: говорит",
     "VOICE": "ГОЛОС", "SPEED": "СКОРОСТЬ",
     "Very slow": "Очень медленно", "Slow": "Медленно", "Normal": "Обычно", "Fast": "Быстро", "Very fast": "Очень быстро"
   }

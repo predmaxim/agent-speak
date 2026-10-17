@@ -5,52 +5,93 @@
 
 var SAMPLE = "Так звучит этот голос."
 
-// Nerd Font glyphs: volume-high, pause, volume-low, volume-off, microphone.
-var ICONS = {
-  speaking: String.fromCodePoint(0xF057E),
-  paused: String.fromCodePoint(0xF03E4),
-  idle: String.fromCodePoint(0xF057F),
-  off: String.fromCodePoint(0xF0581),
-  voice: String.fromCodePoint(0xF036C)
-}
+// No connection to the daemon: the status-line fields, empty.
+var OFFLINE = { running: false, speaking: false, paused: false, read_intermediate: false, speaker: "", rate: "", project: "",
+  oma: "off", dialog: false, quiet: false, quiet_schedule: false, quiet_from: "", quiet_to: "", orb_corner: "", waiting: 0 }
 
-// No connection to the daemon.
-var OFFLINE = { running: false, speaking: false, paused: false, mode: "", read_intermediate: false, speaker: "", rate: "", project: "", voice: "off", voice_agent: "", voice_last_agent: "" }
-
-// A state line, or null for anything else (a broken line must not blank the icon).
-function parse(line) {
+// One socket line -> {type, value}, or null for anything else (a broken line must not blank the state).
+function parseLine(line) {
   var s = null
   try { s = JSON.parse(line) } catch (e) { return null }
-  return s && typeof s.running === "boolean" ? s : null
+  if (!s || typeof s !== "object") return null
+  if (typeof s.running === "boolean") return { type: "state", value: s }
+  var types = ["agents", "bubble", "chat", "chat_delta", "chats"]
+  for (var i = 0; i < types.length; i++)
+    if (s[types[i]] !== undefined) return { type: types[i], value: s[types[i]] }
+  return null
 }
 
-var AGENTS = { claude: "Claude", codex: "Codex" }
-
-// The voice row: off - agents to start (the last one first); on - finish.
-function voiceSection(st, tr) {
-  if (st.voice && st.voice !== "off")
-    return { caption: tr("VOICE CHAT"), options: [{ value: "stop", label: tr("Finish talking to %1", AGENTS[st.voice_agent] || st.voice_agent),
-      cmd: cmd("voice_stop") }] }
-  var order = st.voice_last_agent === "codex" ? ["codex", "claude"] : ["claude", "codex"]
-  return { caption: tr("VOICE CHAT"), options: order.map(function(a) {
-    return { value: a, label: AGENTS[a], cmd: JSON.stringify({ cmd: "voice_start", agent: a }) + "\n" } }) }
+// What the orb shows, by priority.
+function orbMode(st) {
+  if (!st || !st.running) return "off"
+  if (["loading", "listening", "thinking", "speaking", "paused"].indexOf(st.oma) >= 0) return st.oma
+  if (st.waiting > 0) return "waiting"
+  return st.quiet ? "quiet" : "idle"
 }
 
-// Icon, whether it is lit in the indicator group, and the tooltip key for tr(tip, arg).
-function view(st) {
-  if (!st || !st.running) return { icon: ICONS.off, lit: false, tip: "Speech service is not running", arg: "" }
-  if (st.voice && st.voice !== "off") return { icon: ICONS.voice, lit: true, tip: "Talking to %1: " + st.voice, arg: AGENTS[st.voice_agent] || st.voice_agent }
-  if (st.paused) return { icon: ICONS.paused, lit: true, tip: "Paused — right click resumes", arg: "" }
-  if (st.speaking) return st.project
-    ? { icon: ICONS.speaking, lit: true, tip: "Reading: %1", arg: st.project }
-    : { icon: ICONS.speaking, lit: true, tip: "Reading…", arg: "" }
-  if (st.mode === "auto") return { icon: ICONS.idle, lit: true, tip: "Auto: the focused agent is read aloud", arg: "" }
-  return { icon: ICONS.idle, lit: false, tip: "Manual: Super+Shift+Alt+S", arg: "" }
+// Tooltip: a key for tr(key, arg).
+function orbTip(st) {
+  var mode = orbMode(st)
+  var tips = { off: "Oma is not running", loading: "Oma is loading", listening: "Oma is listening", thinking: "Oma is thinking",
+    speaking: "Oma is speaking", paused: "Paused", quiet: "Quiet mode", idle: "Oma" }
+  return mode === "waiting" ? ["%1 waiting", st.waiting] : [tips[mode], ""]
 }
 
-// Something to pause, resume or stop.
-function busy(st) {
-  return !!st && st.running && (st.speaking || st.paused)
+var BUBBLES_MAX = 3
+var BUBBLE_TTL = 10000
+
+// Add, update (append or replace) or drop a bubble; the touched one goes last.
+function pushBubble(stack, b, now) {
+  var rest = stack.filter(function(x) { return x.id !== b.id })
+  if (b.drop) return rest
+  var old = stack.filter(function(x) { return x.id === b.id })[0]
+  var text = old && b.append ? old.text + " " + b.text : b.text
+  var nb = Object.assign({}, old || {}, b, { text: text, at: now })
+  return rest.concat([nb]).slice(-BUBBLES_MAX)
+}
+
+// Everything goes once the newest bubble is old enough; quiet mode keeps them.
+function expire(stack, now, quiet) {
+  if (quiet || !stack.length) return stack
+  var last = Math.max.apply(null, stack.map(function(b) { return b.at }))
+  return now - last >= BUBBLE_TTL ? [] : stack
+}
+
+function dismiss(stack, id) {
+  return stack.filter(function(b) { return b.id !== id })
+}
+
+// Time since `since` (seconds): a key for tr(key, n).
+function ago(since, now) {
+  var d = Math.max(0, now - since)
+  if (d < 60) return ["just now", 0]
+  if (d < 3600) return ["%1 min", Math.floor(d / 60)]
+  if (d < 86400) return ["%1 h", Math.floor(d / 3600)]
+  return ["%1 d", Math.floor(d / 86400)]
+}
+
+function stateLabel(state) {
+  return { working: "Working", waiting: "Waiting", done: "Done" }[state] || "Idle"
+}
+
+// A streamed message: Oma's consecutive parts join into one, mine start a new one.
+function chatApply(messages, delta) {
+  var last = messages[messages.length - 1]
+  if (delta.role === "oma" && last && last.role === "oma")
+    return messages.slice(0, -1).concat([{ role: "oma", text: last.text + " " + delta.text }])
+  return messages.concat([{ role: delta.role, text: delta.text }])
+}
+
+// The screen corner nearest to the orb's centre (x, y) on a w x h screen.
+function corner(x, y, w, h) {
+  return (y < h / 2 ? "top" : "bottom") + "-" + (x < w / 2 ? "left" : "right")
+}
+
+var HOURS = []
+for (var i = 0; i < 24; i++) HOURS.push((i < 10 ? "0" : "") + i + ":00")
+
+function omaCmd(action) {
+  return JSON.stringify({ cmd: "oma", action: action }) + "\n"
 }
 
 function cmd(name) {
