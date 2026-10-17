@@ -360,3 +360,20 @@ def test_click_stops_status_audio_and_keeps_draft():
     cv.talk(); cv.phrase("подожди меня"); cv.audio(True)
     acts = cv.talk()
     assert acts[0] == ("stop",) and ("send", "подожди меня") in acts
+
+
+from agent_voice.ear import Whisper
+
+
+def test_whisper_loads_once_and_unloads_on_battery_only():
+    loads, t = [], [0.0]
+    w = Whisper(load=lambda: loads.append(1) or "model", clock=lambda: t[0], idle=300)
+
+    async def run():
+        assert await asyncio.gather(w.get(), w.get()) == ["model", "model"] and loads == [1]
+        t[0] = 299; w.maybe_unload(on_ac=False); assert w.ready
+        t[0] = 301; w.maybe_unload(on_ac=True); assert w.ready
+        w.maybe_unload(on_ac=False); assert not w.ready
+        await w.get(); assert loads == [1, 1]
+
+    asyncio.run(run())
