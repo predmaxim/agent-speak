@@ -99,6 +99,8 @@ assert.deepStrictEqual(M.chatFor("chat:1", { key: "chat:1", messages: m1 }), { k
 assert.strictEqual(M.chatFor("agent:a", { key: "chat:1", was: "new", messages: m1 }), null)
 assert.strictEqual(M.chatFor("chat:2", { key: "chat:1", messages: m1 }), null)
 assert.deepStrictEqual(M.chatFor("new", { key: "new" }).messages, [])
+assert.deepStrictEqual(M.chatFor("new", { key: "chat:x", was: "*", messages: m1 }), { key: "chat:x", messages: m1 })
+assert.deepStrictEqual(M.chatFor("chat:2", { key: "agent:a", was: "*", messages: m1 }), { key: "agent:a", messages: m1 })
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { read_intermediate: true, speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }

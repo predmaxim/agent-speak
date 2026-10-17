@@ -100,10 +100,11 @@ function chatApply(messages, delta) {
 }
 
 // A `chat` line against the window's chat `cur`: the chat to show (the key
-// switches when the chat it showed got its id, `was`), or null when the line
+// switches when the chat it showed got its id, `was`, and to Oma's current
+// chat on her answer to a keyless `open`, `was` "*"), or null when the line
 // is about another chat.
 function chatFor(cur, c) {
-  var key = c.was !== undefined && c.was === cur ? c.key : cur
+  var key = c.was === "*" || c.was === cur ? c.key : cur
   return c.key === key ? { key: key, messages: Array.isArray(c.messages) ? c.messages : [] } : null
 }
 

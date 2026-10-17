@@ -113,6 +113,8 @@ class Oma:
             await self.act(self._dialog(not c.dialog))
         elif do == "chats":
             self.emit({"chats": await asyncio.to_thread(self.brain.chats)})
+        elif do == "open" and not cmd.get("key"):  # окно спрашивает текущий чат: без переключения, was "*" — принять его ключ
+            self.emit({"chat": {"key": self.brain.key, "was": "*", "messages": self.history}})
         elif do in ("ask", "open", "new"):
             key = "new" if do == "new" else cmd.get("key") or self.brain.key
             if key != self.brain.key:

@@ -111,12 +111,16 @@ Item {
     root.headCol = 0
     root.hoursCol = 0
     pointerGate.reset()
-    Qt.callLater(function() { (root.page === "main" ? field : keyCatcher).forceActiveFocus() })
+    Qt.callLater(root.refocus)
   }
 
-  // Esc step by step: a page → the agent's chat → close.
+  // The keys: the field on the main page, the catcher on the others.
+  function refocus() { (root.page === "main" ? field : keyCatcher).forceActiveFocus() }
+
+  // Esc step by step: a page → clear the field → the agent's chat → close.
   function back() {
     if (root.page !== "main") root.showPage("main")
+    else if (field.text !== "") field.text = ""
     else if (root.agentChat) root.openChat(root.generalKey)
     else root.shown = false
   }
@@ -175,10 +179,21 @@ Item {
 
   function scrollDown() { Qt.callLater(function() { chatView.positionViewAtEnd() }) }
 
-  onShownChanged: if (shown) {
-    root.now = Date.now() / 1000
-    root.showPage("main")
-    root.scrollDown()
+  // Shown: ask Oma for her current chat (a keyless `open` switches nothing;
+  // her answer, `was` "*", is adopted), so after a shell restart the window
+  // follows her chat again. Hidden: no dropdown stays open into the next time.
+  onShownChanged: {
+    if (shown) {
+      root.now = Date.now() / 1000
+      root.showPage("main")
+      root.send({ do: "open" })
+      root.scrollDown()
+    } else {
+      speakerBox.close()
+      rateBox.close()
+      fromBox.close()
+      toBox.close()
+    }
   }
   onMessagesChanged: root.scrollDown()
   onRowCountChanged: if (root.cursor >= root.rowCount) root.cursor = root.rowCount - 1
@@ -555,8 +570,7 @@ Item {
               foreground: root.fg
             }
 
-            // Borderless, like the launcher's field (rules.md §9), with the
-            // caret on: questions get fixed in place.
+            // Borderless and caretless, like the launcher's field (rules.md §9).
             TextField {
               id: field
               anchors.left: parent.left
@@ -570,6 +584,7 @@ Item {
               foreground: root.fg
               font.family: root.font
               font.pixelSize: Style.font.heading
+              cursorDelegate: Item {}
               onTextEdited: { root.cursor = -1; root.onHead = false }
               Keys.onUpPressed: root.move(0, -1)
               Keys.onDownPressed: root.move(0, 1)
@@ -577,6 +592,7 @@ Item {
               Keys.onRightPressed: function(event) { event.accepted = root.onHead && root.move(1, 0) }
               Keys.onReturnPressed: root.enter()
               Keys.onEnterPressed: root.enter()
+              Keys.onTabPressed: {}   // Tab does nothing in a centred modal
             }
           }
 
@@ -691,7 +707,7 @@ Item {
                 fontFamily: root.font
                 // A pick sets the dropdown's own value; the binding comes back for the daemon's answer.
                 onChanged: function(v) { root.choose("speaker", v, true); value = Qt.binding(function() { return root.speech.speaker }) }
-                onPopupOpenChanged: if (!popupOpen) keyCatcher.forceActiveFocus()
+                onPopupOpenChanged: if (!popupOpen) root.refocus()
               }
             }
 
@@ -706,7 +722,7 @@ Item {
                 foreground: root.fg
                 fontFamily: root.font
                 onChanged: function(v) { root.choose("rate", v, true); value = Qt.binding(function() { return root.speech.rate }) }
-                onPopupOpenChanged: if (!popupOpen) keyCatcher.forceActiveFocus()
+                onPopupOpenChanged: if (!popupOpen) root.refocus()
               }
             }
 
@@ -753,7 +769,7 @@ Item {
                 foreground: root.fg
                 fontFamily: root.font
                 onChanged: function(v) { root.choose("quiet_from", v, false); value = Qt.binding(function() { return root.speech.quiet_from }) }
-                onPopupOpenChanged: if (!popupOpen) keyCatcher.forceActiveFocus()
+                onPopupOpenChanged: if (!popupOpen) root.refocus()
               }
               Dropdown {
                 id: toBox
@@ -764,7 +780,7 @@ Item {
                 foreground: root.fg
                 fontFamily: root.font
                 onChanged: function(v) { root.choose("quiet_to", v, false); value = Qt.binding(function() { return root.speech.quiet_to }) }
-                onPopupOpenChanged: if (!popupOpen) keyCatcher.forceActiveFocus()
+                onPopupOpenChanged: if (!popupOpen) root.refocus()
               }
             }
           }

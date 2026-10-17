@@ -537,6 +537,21 @@ def test_oma_stale_chat_line_lands_in_new_chat_and_done_syncs():
     asyncio.run(run())
 
 
+def test_oma_open_without_key_reports_current_chat():
+    lines, opened = [], []
+
+    class FakeBrain:
+        key = "chat:x"
+        async def open(self, k): opened.append(k); return []
+
+    oma = Oma(Conversation(), None, FakeBrain(), SimpleNamespace(ready=True),
+              send=lambda c: c["cmd"] == "emit" and lines.append(c["line"]))
+    oma.history = [{"role": "me", "text": "голосом"}]
+    asyncio.run(oma.command({"do": "open"}))
+    assert lines == [{"chat": {"key": "chat:x", "was": "*", "messages": [{"role": "me", "text": "голосом"}]}}]
+    assert opened == [] and oma.brain.key == "chat:x"
+
+
 def test_oma_error_notifies_new_text_or_after_5_min():
     seen, t = [], [0.0]
     oma = Oma(Conversation(), SimpleNamespace(open=False), None, SimpleNamespace(ready=True),
