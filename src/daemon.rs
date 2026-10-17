@@ -85,6 +85,7 @@ struct State {
     scan: Box<dyn FnMut() -> Vec<Live>>, // живые сессии агентов; в тестах — подделка
     now_secs: Box<dyn Fn() -> u64>,      // эпоха в секундах — время событий реестра
     next_scan: Instant,
+    unknown_scan_at: Instant, // раньше — сессия не из реестра пересканирования не вызывает
     agents_sent: String, // последняя разосланная строка агентов
 }
 
@@ -199,6 +200,7 @@ pub fn run() {
         scan: Box::new(agents::scan_all),
         now_secs: Box::new(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())),
         next_scan: Instant::now(),
+        unknown_scan_at: Instant::now(),
         agents_sent: String::new(),
     };
     for ev in rx {
@@ -758,10 +760,13 @@ impl State {
         if let Some(cwd) = p["cwd"].as_str().filter(|c| !c.is_empty()) {
             self.last_cwd = cwd.to_string();
         }
-        // новая сессия ещё не в реестре — пересканировать до обработки
-        // ponytail: без ограничения частоты — хуки только свои
+        // новая сессия ещё не в реестре — пересканировать до обработки, не чаще SCAN_EVERY:
+        // `claude -p` и SDK с хуками пользователя в реестр не попадают никогда, а MessageDisplay идёт на каждый кусок
+        // ponytail: общий срок на все незнакомые сессии — новая сессия в первые 2 с после чужой ждёт tick
         let id = p["session_id"].as_str().or(p["thread-id"].as_str()).unwrap_or_default();
-        if !id.is_empty() && self.registry.get(id).is_none() {
+        let at = (self.clock)();
+        if !id.is_empty() && self.registry.get(id).is_none() && at >= self.unknown_scan_at {
+            self.unknown_scan_at = at + SCAN_EVERY;
             self.rescan();
         }
         let now = (self.now_secs)();
@@ -911,6 +916,7 @@ mod tests {
             scan: Box::new(Vec::new),
             now_secs: Box::new(|| 1000),
             next_scan: Instant::now(),
+            unknown_scan_at: Instant::now(),
             agents_sent: String::new(),
         }
     }
@@ -1692,5 +1698,21 @@ mod tests {
         st.scan = Box::new(move || { c.fetch_add(1, Ordering::SeqCst); vec![] });
         st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "zz", "prompt": "x"}));
         assert_eq!(n.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn unknown_session_rescan_at_most_every_2s() {
+        let (mut st, env) = env_state();
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = n.clone();
+        st.scan = Box::new(move || { c.fetch_add(1, Ordering::SeqCst); vec![] });
+        let hook = |st: &mut State| st.on_hook("message-display", &serde_json::json!({"session_id": "zz", "message_id": "m", "delta": "кусок"}));
+        hook(&mut st);
+        *env.1.lock().unwrap() += Duration::from_secs(1);
+        hook(&mut st);
+        assert_eq!(n.load(Ordering::SeqCst), 1);
+        *env.1.lock().unwrap() += Duration::from_secs(1);
+        hook(&mut st);
+        assert_eq!(n.load(Ordering::SeqCst), 2);
     }
 }
