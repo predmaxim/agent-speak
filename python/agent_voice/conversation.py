@@ -62,7 +62,8 @@ class Conversation:
         if self.dialog or self.state not in ("listening", "paused"):
             return []
         text, self.draft = self.draft.strip(), ""
-        acts = [("drop_draft",), ("ear", False)]
+        # статусы агентов, что звучат сейчас, обрываем
+        acts = ([("stop",)] if self.audio_busy else []) + [("drop_draft",), ("ear", False)]
         return acts + (self._send(text) if text else self._to("idle"))
 
     def cancel(self):
@@ -94,7 +95,10 @@ class Conversation:
         t = text.strip()
         if len(t) < 2:
             return []
-        return self._stop_turn() + self._send(t)
+        acts = self._stop_turn()
+        if not self.dialog and self.state in ("listening", "paused"):
+            acts.append(("ear", False))  # слух по клику выключаем, черновик остаётся
+        return acts + self._send(t)
 
     def speech_start(self):
         if not self.dialog or self.state in ("idle", "paused"):

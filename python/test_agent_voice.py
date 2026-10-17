@@ -342,3 +342,21 @@ def test_on_ac_usb_counts(tmp_path):
         (tmp_path / n / "type").write_text(typ)
         (tmp_path / n / "online").write_text(on)
     assert on_ac(str(tmp_path))
+
+
+def test_ask_from_talk_listening_closes_ear():
+    cv = Conversation()
+    cv.talk(); cv.phrase("черновик тут")
+    acts = cv.ask("который час")
+    assert ("ear", False) in acts
+    cv.delta("Сейчас ровно три часа дня. ")
+    cv.audio(True); cv.done()
+    cv.audio(False)
+    assert cv.state == "idle"
+
+
+def test_click_stops_status_audio_and_keeps_draft():
+    cv = Conversation()
+    cv.talk(); cv.phrase("подожди меня"); cv.audio(True)
+    acts = cv.talk()
+    assert acts[0] == ("stop",) and ("send", "подожди меня") in acts
