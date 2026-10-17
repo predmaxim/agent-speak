@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_ROWS, settingStep")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -91,6 +91,30 @@ assert.deepStrictEqual(secs[1].options.map(o => o.label), ["Xenia", "Baya", "Kse
 assert.deepStrictEqual(secs[2].options.map(o => o.value), ["x-slow", "slow", "medium", "fast", "x-fast"])
 assert.deepStrictEqual(secs[2].options.map(o => o.label), ["Очень медленно", "Медленно", "Обычно", "Быстро", "Очень быстро"])
 for (const s of secs) for (const o of s.options) assert.strictEqual(typeof o.value, typeof sample[s.key], s.key)
+
+// The window's chat: a chat that got its id replaces the one shown, other chats are skipped
+const m1 = [{ role: "me", text: "привет" }]
+assert.deepStrictEqual(M.chatFor("new", { key: "chat:1", was: "new", messages: m1 }), { key: "chat:1", messages: m1 })
+assert.deepStrictEqual(M.chatFor("chat:1", { key: "chat:1", messages: m1 }), { key: "chat:1", messages: m1 })
+assert.strictEqual(M.chatFor("agent:a", { key: "chat:1", was: "new", messages: m1 }), null)
+assert.strictEqual(M.chatFor("chat:2", { key: "chat:1", messages: m1 }), null)
+assert.deepStrictEqual(M.chatFor("new", { key: "new" }).messages, [])
+
+// Settings rows: choices go round, switches flip, quiet now overrides the schedule
+const cfg = { read_intermediate: true, speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
+assert.strictEqual(M.SETTINGS_ROWS.length, 6)
+assert.deepStrictEqual(M.settingStep("read_intermediate", cfg, 1), { key: "read_intermediate", value: false, sample: false })
+assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "eugene", sample: true })
+assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
+assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
+assert.deepStrictEqual(M.settingStep("quiet_now", cfg, -1), { key: "quiet_override", value: "on", sample: false })
+assert.strictEqual(M.settingStep("quiet_now", Object.assign({}, cfg, { quiet: true }), 1).value, "off")
+assert.deepStrictEqual(M.settingStep("quiet_schedule", cfg, 1), { key: "quiet_schedule", value: false, sample: false })
+assert.strictEqual(M.settingStep("quiet_hours", cfg, 1), null)
+
+// Russian plural forms
+assert.deepStrictEqual([1, 2, 5, 11, 12, 21, 22, 25, 111, 0].map(n => ru("%1 agents", n)),
+  ["1 агент", "2 агента", "5 агентов", "11 агентов", "12 агентов", "21 агент", "22 агента", "25 агентов", "111 агентов", "0 агентов"])
 
 // Every tr("…") in the QML files and Model.js has a Russian line, and no ru line is dead
 const files = fs.readdirSync(__dirname).filter(f => f.endsWith(".qml"))

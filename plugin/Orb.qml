@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Effects
-import QtQuick.Shapes
 import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Wayland
@@ -96,71 +95,12 @@ PanelWindow {
     x: Math.max(0, Math.min(parent.width - width, (win.atLeft ? 0 : parent.width - width) + (win.dragging ? win.dragDX : 0)))
     y: Math.max(0, Math.min(parent.height - height, (win.atTop ? 0 : parent.height - height) + (win.dragging ? win.dragDY : 0)))
 
-    // off, idle, listening, paused: a ring; speaking, waiting: filled.
-    Rectangle {
-      readonly property bool filled: ["speaking", "waiting"].indexOf(win.mode) >= 0
-      property real breath: 1
-      anchors.centerIn: parent
-      width: win.size
-      height: win.size
-      radius: width / 2
-      visible: ["off", "idle", "listening", "speaking", "paused", "waiting"].indexOf(win.mode) >= 0
-      color: !filled ? "transparent" : win.mode === "waiting" ? Color.urgent : Color.accent
-      border.width: filled ? 0 : win.line
-      border.color: win.mode === "off" || win.mode === "idle" ? Color.muted : Color.accent
-      opacity: win.mode === "off" ? 0.4 : win.mode === "paused" ? 0.5 : 1
-      scale: win.mode === "listening" ? breath : 1
-
-      SequentialAnimation on breath {
-        running: win.mode === "listening"
-        loops: Animation.Infinite
-        NumberAnimation { from: 1; to: win.breathMax; duration: 1200; easing.type: Easing.InOutSine }
-        NumberAnimation { from: win.breathMax; to: 1; duration: 1200; easing.type: Easing.InOutSine }
-      }
-    }
-
-    // loading: a dashed outline; thinking: an arc. Both turn.
-    Shape {
-      anchors.centerIn: parent
-      width: win.size
-      height: win.size
-      visible: win.mode === "loading" || win.mode === "thinking"
-      preferredRendererType: Shape.CurveRenderer
-
-      ShapePath {
-        strokeColor: Color.accent
-        strokeWidth: win.line
-        strokeStyle: win.mode === "loading" ? ShapePath.DashLine : ShapePath.SolidLine
-        dashPattern: [2, 2]
-        capStyle: win.mode === "loading" ? ShapePath.FlatCap : ShapePath.RoundCap
-        fillColor: "transparent"
-        PathAngleArc {
-          centerX: win.size / 2
-          centerY: win.size / 2
-          radiusX: (win.size - win.line) / 2
-          radiusY: radiusX
-          startAngle: 0
-          sweepAngle: win.mode === "loading" ? 360 : 90
-        }
-      }
-
-      RotationAnimation on rotation {
-        from: 0
-        to: 360
-        duration: 1000
-        loops: Animation.Infinite
-        running: win.mode === "loading" || win.mode === "thinking"
-      }
-    }
-
-    Text {
-      anchors.centerIn: parent
-      visible: win.mode === "quiet"
-      textFormat: Text.PlainText
-      text: "\u{F0F65}"   // 󰽥
-      color: Color.foreground
-      font.family: Style.font.family
-      font.pixelSize: Math.round(win.size * 0.75)
+    OrbFace {
+      anchors.fill: parent
+      mode: win.mode
+      size: win.size
+      line: win.line
+      breathMax: win.breathMax
     }
 
     // Left click talks, right click toggles the window; a left drag past

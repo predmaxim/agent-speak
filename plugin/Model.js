@@ -1,6 +1,6 @@
 .pragma library
 
-// agent-speakd's state line -> what the bar icon and the window show, and the
+// agent-speakd's lines -> what the orb and the window show, and the
 // command lines the plugin writes to the daemon's socket.
 
 var SAMPLE = "Так звучит этот голос."
@@ -99,6 +99,14 @@ function chatApply(messages, delta) {
   return messages.concat([{ role: delta.role, text: delta.text }])
 }
 
+// A `chat` line against the window's chat `cur`: the chat to show (the key
+// switches when the chat it showed got its id, `was`), or null when the line
+// is about another chat.
+function chatFor(cur, c) {
+  var key = c.was !== undefined && c.was === cur ? c.key : cur
+  return c.key === key ? { key: key, messages: Array.isArray(c.messages) ? c.messages : [] } : null
+}
+
 // The screen corner nearest to the orb's centre (x, y) on a w x h screen.
 function corner(x, y, w, h) {
   return (y < h / 2 ? "top" : "bottom") + "-" + (x < w / 2 ? "left" : "right")
@@ -139,4 +147,20 @@ function sections(tr) {
         { value: "x-fast", label: tr("Very fast") }
       ] }
   ]
+}
+
+// The settings page's rows, top to bottom: the three sections, then quiet mode.
+var SETTINGS_ROWS = ["read_intermediate", "speaker", "rate", "quiet_now", "quiet_schedule", "quiet_hours"]
+
+// ←/→ (dx) or Enter (dx 1) on a settings row: the `set` to send ({key,
+// value, sample}) or null. Choices go round, switches flip; the hours row
+// has two dropdowns, the window walks them itself.
+function settingStep(row, st, dx) {
+  if (row === "quiet_now") return { key: "quiet_override", value: st.quiet ? "off" : "on", sample: false }
+  if (row === "quiet_schedule") return { key: "quiet_schedule", value: !st.quiet_schedule, sample: false }
+  var sec = sections(function(t) { return t }).filter(function(x) { return x.key === row })[0]
+  if (!sec) return null
+  var values = sec.options.map(function(o) { return o.value })
+  var n = values.length, i = values.indexOf(st[row])
+  return { key: row, value: values[i < 0 ? 0 : ((i + dx) % n + n) % n], sample: sec.sample }
 }
