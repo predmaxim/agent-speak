@@ -1,5 +1,6 @@
 //! Цикл событий сервиса: команды и хуки из сокета, изменения транскриптов (inotify).
 
+use crate::agents::{self, Live, Registry};
 use crate::assemble::{Assembler, MdEvent};
 use crate::config::Config;
 use crate::dedup::Dedup;
@@ -33,6 +34,9 @@ enum Event {
 
 /// Сколько фокус должен простоять на другом агенте, чтобы озвучка переключилась на него.
 const SWITCH_AFTER: Duration = Duration::from_secs(5);
+
+/// Как часто сверять реестр агентов с диском и /proc.
+const SCAN_EVERY: Duration = Duration::from_secs(2);
 
 /// Строка состояния для подписчиков (плагин панели). Порядок полей — протокол.
 #[derive(Serialize)]
@@ -77,6 +81,11 @@ struct State {
     voice: Option<VoiceSession>,
     last_cwd: String, // cwd последнего хука — рабочая папка голосового разговора
     voice_cmd: Vec<String>, // запуск agent_voice; в тестах — заглушка
+    registry: Registry,
+    scan: Box<dyn FnMut() -> Vec<Live>>, // живые сессии агентов; в тестах — подделка
+    now_secs: Box<dyn Fn() -> u64>,      // эпоха в секундах — время событий реестра
+    next_scan: Instant,
+    agents_sent: String, // последняя разосланная строка агентов
 }
 
 fn home() -> PathBuf {
@@ -186,6 +195,11 @@ pub fn run() {
             "-m".into(),
             "agent_voice".into(),
         ],
+        registry: Registry::new(),
+        scan: Box::new(agents::scan_all),
+        now_secs: Box::new(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())),
+        next_scan: Instant::now(),
+        agents_sent: String::new(),
     };
     for ev in rx {
         st.poll_focus();
@@ -404,17 +418,61 @@ impl State {
         format!("{}\n", serde_json::to_string(&st).unwrap())
     }
 
+    /// Новому подписчику — строка состояния, затем строка агентов.
     fn subscribe(&mut self, mut s: UnixStream) {
         let _ = s.set_write_timeout(Some(Duration::from_millis(100))); // зависший подписчик не держит цикл
-        if s.write_all(self.status_line().as_bytes()).is_ok() {
+        if s.write_all((self.status_line() + &self.registry.line()).as_bytes()).is_ok() {
             self.subs.push(s);
         }
     }
 
-    /// Состояние всем подписчикам; отвалившиеся удаляются молча.
+    /// Состояние всем подписчикам.
     fn broadcast(&mut self) {
         let line = self.status_line();
+        self.broadcast_line(&line);
+    }
+
+    /// Строку (с \n) всем подписчикам; отвалившиеся удаляются молча.
+    fn broadcast_line(&mut self, line: &str) {
         self.subs.retain_mut(|s| s.write_all(line.as_bytes()).is_ok());
+    }
+
+    /// Строка агентов — подписчикам, если отличается от последней разосланной.
+    fn push_agents(&mut self) {
+        let line = self.registry.line();
+        if line != self.agents_sent {
+            self.broadcast_line(&line);
+            self.agents_sent = line;
+        }
+    }
+
+    /// Состав живых агентов — с диска и из /proc.
+    fn rescan(&mut self) {
+        let live = (self.scan)();
+        self.registry.sync(live, (self.now_secs)());
+        self.push_agents();
+    }
+
+    fn bubble(&mut self, id: &str, who: &str, text: &str, kind: &str, append: bool) {
+        let b = serde_json::json!({"bubble": {"id": id, "who": who, "text": text, "kind": kind, "append": append, "drop": false}});
+        self.broadcast_line(&format!("{b}\n"));
+    }
+
+    /// Имя агента для пузыря; сессии не из реестра (не пользователя) пузырей не дают.
+    fn who(&self, session: &str) -> Option<String> {
+        self.registry.get(session).map(|e| e.title.clone())
+    }
+
+    /// Конец хода в реестре; фоновой сессии — пузырь «готово», активной — недосказанный хвост.
+    fn turn_done(&mut self, session: &str, rest: &[String], last: &str) {
+        self.registry.finished(session, last, (self.now_secs)());
+        let Some(who) = self.who(session) else { return };
+        if !self.is_active(session) {
+            self.bubble(&format!("f-{session}"), &who, "готово", "final", false);
+        } else if !rest.is_empty() {
+            self.seq += 1;
+            self.bubble(&format!("r-{}", self.seq), &who, &rest.join(" "), "status", false);
+        }
     }
 
     /// Подготовить и поставить в очередь; незнакомые слова — в фон.
@@ -576,12 +634,22 @@ impl State {
     }
 
     /// Раз в секунду: agent_voice завершился сам (ошибка — он уже уведомил) — режим выключен.
+    /// Раз в SCAN_EVERY: состав агентов, «готово» → «простаивает», агент в фокусе.
     fn tick(&mut self) {
         let dead = self.voice.as_mut().and_then(|v| v.child.as_mut()).is_some_and(|c| !matches!(c.try_wait(), Ok(None)));
         if dead {
             eprintln!("agent-speak: agent_voice завершился");
             self.voice_stop();
             self.broadcast();
+        }
+        let now = (self.clock)();
+        if now >= self.next_scan {
+            self.next_scan = now + SCAN_EVERY;
+            self.rescan();
+            self.registry.tick((self.now_secs)());
+            let focused = self.focused().map(|f| f.id);
+            self.registry.set_focused(focused.as_deref());
+            self.push_agents();
         }
     }
 
@@ -690,8 +758,16 @@ impl State {
         if let Some(cwd) = p["cwd"].as_str().filter(|c| !c.is_empty()) {
             self.last_cwd = cwd.to_string();
         }
+        // новая сессия ещё не в реестре — пересканировать до обработки
+        // ponytail: без ограничения частоты — хуки только свои
+        let id = p["session_id"].as_str().or(p["thread-id"].as_str()).unwrap_or_default();
+        if !id.is_empty() && self.registry.get(id).is_none() {
+            self.rescan();
+        }
+        let now = (self.now_secs)();
         match kind {
             "user-prompt-submit" => {
+                self.registry.prompt(&session, p["prompt"].as_str().unwrap_or_default(), now);
                 // новый ход ничего не обрывает: финалы, чтение и начатые сообщения дочитываются
                 let (dropped, kept) = self.shared.queue.lock().unwrap().new_turn(&session);
                 for t in dropped {
@@ -705,52 +781,73 @@ impl State {
             "notification" => {
                 // проект называем всегда, даже для окна в фокусе: сразу ясно, где ждут
                 let transcript = p["transcript_path"].as_str().unwrap_or_default();
-                let msg = notification_text(p["message"].as_str().unwrap_or_default(), || claude::last_tool(&tail_of(transcript)));
+                let raw = p["message"].as_str().unwrap_or_default();
+                let tail = tail_of(transcript);
+                let msg = notification_text(raw, || claude::last_tool(&tail));
                 let cwd = p["cwd"].as_str().unwrap_or_default();
                 let project = Path::new(cwd).file_name().and_then(|n| n.to_str()).unwrap_or("Агент");
                 self.enqueue(Agent::Claude, &session, &format!("{project}: {msg}"), Kind::Urgent);
+                // «ждёт ввода» — простой, а не вопрос: реестр и пузыри не трогаем
+                if !matches!(raw, "" | "Claude is waiting for your input") {
+                    let text = claude::last_question(&tail).map_or(msg, |q| format!("вопрос: {q}"));
+                    self.registry.question(&session, &text, now);
+                    if let Some(who) = self.who(&session) {
+                        self.bubble(&format!("q-{session}"), &who, &text, "question", false);
+                    }
+                }
             }
             "message-display" => {
                 let Some(ev) = MdEvent::from_json(p) else {
                     eprintln!("agent-speak: непонятный MessageDisplay: {p}");
                     return;
                 };
-                if !self.live() || !self.is_active(&ev.session) {
-                    self.asm.push(&ev); // держим буфер; неактивной сессии финал придёт в Stop
-                    return;
-                }
+                // предложения — всегда в ленту, у активной ещё и в пузырь;
+                // голосом — только активная вживую, неактивной финал придёт в Stop
+                let active = self.is_active(&ev.session);
+                let speak = active && self.live();
+                let who = self.who(&ev.session).filter(|_| active);
                 for s in self.asm.push(&ev) {
-                    self.enqueue_msg(Agent::Claude, &ev.session, &s, Kind::Status, &ev.message_id, true);
+                    self.registry.status(&ev.session, &s, now);
+                    if let Some(who) = &who {
+                        self.bubble(&ev.message_id, who, &s, "status", true);
+                    }
+                    if speak {
+                        self.enqueue_msg(Agent::Claude, &ev.session, &s, Kind::Status, &ev.message_id, true);
+                    }
                 }
             }
             "stop" => {
                 let rest = self.asm.flush_session(&session);
-                if !self.auto() {
-                    return;
-                }
-                if self.cfg.read_intermediate {
-                    for s in rest {
-                        self.enqueue_new(Agent::Claude, &session, &s, Kind::Status); // хвост вживую
-                    }
-                }
                 let transcript = PathBuf::from(p["transcript_path"].as_str().unwrap_or_default());
-                if let Some(last) = final_message(p, &transcript) {
-                    self.final_answer(Agent::Claude, &session, &last);
+                let last = final_message(p, &transcript);
+                self.turn_done(&session, &rest, last.as_deref().unwrap_or_default());
+                if self.auto() {
+                    if self.cfg.read_intermediate {
+                        for s in rest {
+                            self.enqueue_new(Agent::Claude, &session, &s, Kind::Status); // хвост вживую
+                        }
+                    }
+                    if let Some(last) = last {
+                        self.final_answer(Agent::Claude, &session, &last);
+                    }
                 }
             }
             "codex-notify" => {
                 let thread = p["thread-id"].as_str().unwrap_or_default().to_string();
-                if let Some(last) = p["last-assistant-message"].as_str().filter(|_| self.auto()) {
+                let last = p["last-assistant-message"].as_str();
+                self.turn_done(&thread, &[], last.unwrap_or_default());
+                if let Some(last) = last.filter(|_| self.auto()) {
                     self.final_answer(Agent::Codex, &thread, last);
                 }
             }
             other => eprintln!("agent-speak: неизвестный хук {other}"),
         }
+        self.push_agents();
     }
 
     fn on_file(&mut self, path: &Path) {
         let lines = self.tail.read_new(path);
-        if lines.is_empty() || !self.live() {
+        if lines.is_empty() {
             return;
         }
         let Some((agent, id)) = focus::session_of(path) else { return };
@@ -758,18 +855,28 @@ impl State {
         if agent == Agent::Claude {
             return;
         }
-        if !self.is_active(&id) {
-            return;
-        }
+        // сообщения — в ленту; у активной ещё в пузырь и, вживую, голосом
+        let active = self.is_active(&id);
+        let speak = active && self.live();
+        let who = self.who(&id).filter(|_| active);
+        let now = (self.now_secs)();
         for line in lines {
             let blocks = match agent {
                 Agent::Claude => claude::parse_line(&line),
                 Agent::Codex => codex::parse_line(&line),
             };
             for b in blocks {
-                self.enqueue_new(agent.clone(), &id, &b.text, Kind::Status);
+                self.registry.status(&id, &b.text, now);
+                if let Some(who) = &who {
+                    self.seq += 1;
+                    self.bubble(&format!("r-{}", self.seq), who, &b.text, "status", false);
+                }
+                if speak {
+                    self.enqueue_new(agent.clone(), &id, &b.text, Kind::Status);
+                }
             }
         }
+        self.push_agents();
     }
 }
 
@@ -800,6 +907,11 @@ mod tests {
             voice: None,
             last_cwd: String::new(),
             voice_cmd: vec!["sh".into(), "-c".into(), "sleep 30".into(), "x".into()],
+            registry: Registry::new(),
+            scan: Box::new(Vec::new),
+            now_secs: Box::new(|| 1000),
+            next_scan: Instant::now(),
+            agents_sent: String::new(),
         }
     }
 
@@ -925,6 +1037,7 @@ mod tests {
         let mut r = reader(ours);
         st.subscribe(theirs);
         assert_eq!(next(&mut r)["voice"], "off");
+        next(&mut r); // строка агентов
         voice_on(&mut st);
         st.on_msg(Msg::VoiceState { state: "thinking".into() });
         let s = next(&mut r);
@@ -941,6 +1054,7 @@ mod tests {
         let mut r = reader(ours);
         st.subscribe(theirs);
         assert_eq!(next(&mut r)["paused"], false);
+        next(&mut r); // строка агентов
         st.on_msg(Msg::Pause);
         assert_eq!(next(&mut r)["paused"], true);
         st.shared.set_busy(Some("s"));
@@ -960,6 +1074,7 @@ mod tests {
         st.on_msg(Msg::Stop);
         assert_eq!(st.subs.len(), 1);
         next(&mut r); // при подписке
+        next(&mut r); // строка агентов
         next(&mut r); // после стопа
     }
 
@@ -1012,6 +1127,7 @@ mod tests {
         let mut r = reader(ours);
         st.subscribe(theirs);
         next(&mut r);
+        next(&mut r); // строка агентов
         st.on_msg(Msg::Set { key: "speaker".into(), value: serde_json::json!("baya") });
         assert_eq!(next(&mut r)["speaker"], "baya");
         assert_eq!(st.shared.voice.lock().unwrap().0, "baya");
@@ -1490,5 +1606,91 @@ mod tests {
         say(&mut st);
         let it = st.shared.queue.lock().unwrap().pop(Instant::now()).unwrap();
         assert_eq!((it.kind, it.speaker.as_str()), (Kind::Preview, ""));
+    }
+
+    // --- реестр агентов и пузыри ---
+
+    fn with_agents(st: &mut State, ids: &[&str]) {
+        let live: Vec<Live> = ids.iter().map(|id| Live { id: id.to_string(), agent: "claude", pid: 1, title: format!("T-{id}"),
+            cwd: format!("/p/{id}"), transcript: PathBuf::new(), busy: true }).collect();
+        st.scan = Box::new(move || live.clone());
+        st.rescan();
+    }
+
+    fn sub(st: &mut State) -> BufReader<UnixStream> {
+        let (a, b) = UnixStream::pair().unwrap();
+        st.subscribe(a);
+        reader(b)
+    }
+
+    /// Все строки до таймаута чтения.
+    fn drain(r: &mut BufReader<UnixStream>) -> Vec<serde_json::Value> {
+        let mut out = vec![];
+        let mut l = String::new();
+        while r.read_line(&mut l).is_ok_and(|n| n > 0) { out.push(serde_json::from_str(&l).unwrap()); l.clear(); }
+        out
+    }
+
+    fn bubbles(r: &mut BufReader<UnixStream>) -> Vec<serde_json::Value> {
+        drain(r).into_iter().filter_map(|v| v.get("bubble").cloned()).collect()
+    }
+
+    #[test]
+    fn subscribe_sends_state_then_agents() {
+        let mut st = test_state();
+        with_agents(&mut st, &["s1"]);
+        let mut r = sub(&mut st);
+        assert_eq!(next(&mut r)["running"], true);
+        assert_eq!(next(&mut r)["agents"][0]["title"], "T-s1");
+    }
+
+    #[test]
+    fn active_status_bubbles_others_only_feed() {
+        let (mut st, env) = env_state();
+        with_agents(&mut st, &["s1", "s2"]);
+        at(&mut st, &env, Some("s1"), 0);
+        let mut r = sub(&mut st);
+        md(&mut st, "s1", "Запускаю тесты. ");
+        md(&mut st, "s2", "Читаю план. ");
+        let b = bubbles(&mut r);
+        assert_eq!(b.len(), 1);
+        assert_eq!((b[0]["who"].as_str(), b[0]["kind"].as_str(), b[0]["append"].as_bool()), (Some("T-s1"), Some("status"), Some(true)));
+        assert!(st.registry.get("s2").unwrap().feed.iter().any(|l| l.text.contains("Читаю план")));
+    }
+
+    #[test]
+    fn question_bubbles_idle_notice_does_not() {
+        let mut st = test_state();
+        with_agents(&mut st, &["s2"]);
+        let mut r = sub(&mut st);
+        st.on_hook("notification", &serde_json::json!({"session_id": "s2", "message": "Claude needs your permission to use Bash", "cwd": "/p/s2"}));
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s2", "prompt": "да"}));
+        st.on_hook("notification", &serde_json::json!({"session_id": "s2", "message": "Claude is waiting for your input", "cwd": "/p/s2"}));
+        let b = bubbles(&mut r);
+        assert_eq!(b.len(), 1);
+        assert_eq!((b[0]["kind"].as_str(), b[0]["text"].as_str()), (Some("question"), Some("Клоду нужно разрешение на команду")));
+        assert_eq!(st.registry.waiting(), 0);
+    }
+
+    #[test]
+    fn background_stop_bubbles_done() {
+        let (mut st, env) = env_state();
+        with_agents(&mut st, &["s1", "s2"]);
+        at(&mut st, &env, Some("s1"), 0);
+        let mut r = sub(&mut st);
+        st.on_hook("stop", &serde_json::json!({"session_id": "s2", "last_assistant_message": "Готово. PR создан.", "transcript_path": ""}));
+        let b = bubbles(&mut r);
+        assert_eq!((b[0]["who"].as_str(), b[0]["kind"].as_str(), b[0]["text"].as_str()), (Some("T-s2"), Some("final"), Some("готово")));
+        assert_eq!(st.registry.get("s2").unwrap().state, crate::agents::State::Done);
+    }
+
+    #[test]
+    fn unknown_session_rescans() {
+        let mut st = test_state();
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = n.clone();
+        st.scan = Box::new(move || { c.fetch_add(1, Ordering::SeqCst); vec![] });
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "zz", "prompt": "x"}));
+        assert_eq!(n.load(Ordering::SeqCst), 1);
     }
 }
