@@ -119,31 +119,9 @@ def test_short_phrases_dropped():
     assert cv.phrase(" а ") == [] and cv.ask("ж") == []
 
 import json
+import asyncio
 from types import SimpleNamespace
-from agent_voice.agents import CodexProtocol, claude_events
-
-
-def test_codex_requests_and_turn_filter():
-    p = CodexProtocol()
-    rid, line = p.request("turn/start", {"threadId": "t1", "input": [{"type": "text", "text": "привет"}]})
-    assert json.loads(line) == {"id": rid, "method": "turn/start", "params": {"threadId": "t1", "input": [{"type": "text", "text": "привет"}]}}
-    assert line.endswith("\n")
-    assert p.handle(json.dumps({"id": rid, "result": {"turn": {"id": "u1", "items": [], "status": "inProgress"}}})) == [("response", rid, {"turn": {"id": "u1", "items": [], "status": "inProgress"}})]
-    p.turn_id = "u1"
-    d = lambda turn, text: json.dumps({"method": "item/agentMessage/delta", "params": {"delta": text, "itemId": "i", "threadId": "t1", "turnId": turn}})
-    assert p.handle(d("u1", "Привет")) == [("delta", "Привет")]
-    assert p.handle(d("u0", "старое")) == []  # дельта прерванного хода
-    done = lambda turn: json.dumps({"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": turn, "items": [], "status": "completed"}}})
-    assert p.handle(done("u0")) == []
-    assert p.handle(done("u1")) == [("done", None)]
-    assert p.turn_id is None
-    assert p.handle("не json") == []
-
-
-def test_codex_error_response():
-    p = CodexProtocol()
-    rid, _ = p.request("thread/start", {})
-    assert p.handle(json.dumps({"id": rid, "error": {"code": -1, "message": "not logged in"}})) == [("response_error", rid, "not logged in")]
+from agent_voice.brain import claude_events
 
 
 def test_claude_events_text_and_skip():
@@ -157,77 +135,6 @@ def test_claude_events_text_and_skip():
     assert claude_events(delta("хвост"), st) == []
     assert claude_events(ResultMessage(), st) == []
     assert st["skip"] is False
-
-
-def test_codex_failed_turn_is_error():
-    p = CodexProtocol()
-    p.turn_id = "u1"
-    err = {"method": "error", "params": {"error": {"message": "model not supported"}, "threadId": "t1", "turnId": "u1", "willRetry": False}}
-    assert p.handle(json.dumps(err)) == []
-    failed = {"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": "u1", "items": [], "status": "failed"}}}
-    assert p.handle(json.dumps(failed)) == [("error", "Codex: model not supported")]
-    assert p.turn_id is None
-    p.turn_id = "u2"
-    failed["params"]["turn"]["id"] = "u2"
-    assert p.handle(json.dumps(failed)) == [("error", "Codex: ход не удался")]
-
-
-import asyncio
-from agent_voice.agents import CodexAgent
-
-
-def _fake_agent():
-    a = CodexAgent(asyncio.Queue())
-    out = []
-    a.proc = SimpleNamespace(
-        stdin=SimpleNamespace(write=out.append, drain=lambda: asyncio.sleep(0)),
-        stdout=asyncio.StreamReader())
-    a.reader = asyncio.create_task(a._read())
-    return a, out
-
-
-def test_codex_plumbing_error_response_and_eof():
-    async def run():
-        a, out = _fake_agent()
-        call = asyncio.create_task(a._call("thread/start", {}))
-        await asyncio.sleep(0)
-        rid = json.loads(out[0])["id"]
-        a.proc.stdout.feed_data(json.dumps({"id": rid, "error": {"message": "no auth"}}).encode() + b"\n")
-        try:
-            await call
-            assert False, "must raise"
-        except RuntimeError as e:
-            assert "no auth" in str(e)
-        pending = asyncio.create_task(a._call("turn/start", {}))
-        await asyncio.sleep(0)
-        a.proc.stdout.feed_eof()
-        try:
-            await asyncio.wait_for(pending, 1)
-            assert False, "must raise"
-        except RuntimeError:
-            pass
-        assert (await a.events.get())[0] == "error"
-    asyncio.run(run())
-
-
-def test_codex_interrupt_during_send():
-    async def run():
-        a, out = _fake_agent()
-        a.p.thread_id = "t1"
-        send = asyncio.create_task(a.send("привет"))
-        await asyncio.sleep(0)
-        intr = asyncio.create_task(a.interrupt())
-        await asyncio.sleep(0)
-        rid = json.loads(out[0])["id"]
-        a.proc.stdout.feed_data(json.dumps({"id": rid, "result": {"turn": {"id": "u1"}}}).encode() + b"\n")
-        await asyncio.sleep(0.01)
-        req = json.loads(out[1])
-        assert req["method"] == "turn/interrupt" and req["params"]["turnId"] == "u1"
-        a.proc.stdout.feed_data(json.dumps({"id": req["id"], "result": {}}).encode() + b"\n")
-        await asyncio.wait_for(asyncio.gather(send, intr), 1)
-        assert a.p.turn_id is None
-        a.proc.stdout.feed_eof()
-    asyncio.run(run())
 
 
 def test_real_vad_one_phrase_from_synthetic_speech():
@@ -413,5 +320,94 @@ def test_ear_reports_when_recorder_exits():
         assert ev[0] == "error"
         assert not e.open
         await e.start(); await asyncio.wait_for(out.get(), 5)  # повторный start работает
+
+    asyncio.run(run())
+
+
+# --- мозг Омы ---
+from agent_voice.brain import general_chats, find_agent_chat, messages_of, format_agents, find_entry, agent_prompt, OMA_PROMPT
+
+E = [{"id": "s1", "title": "Почтовый клиент", "project": "omarchy-mail", "state": "waiting", "status": "Клод задал вопрос: какой вариант?",
+      "since": 940, "focused": False, "feed": [{"at": 900, "kind": "status", "text": "Читаю план"}], "transcript": "/t/s1.jsonl", "cwd": "/p/mail"},
+     {"id": "s2", "title": "agent-speak", "project": "agent-speak", "state": "working", "status": "Запускаю тесты",
+      "since": 990, "focused": True, "feed": [], "transcript": "", "cwd": "/p/as"}]
+
+
+def info(sid, tag=None, mod=0, first=None):
+    return SimpleNamespace(session_id=sid, tag=tag, last_modified=mod, custom_title=None, summary=None, first_prompt=first)
+
+
+def test_general_chats_newest_first_without_agent_chats():
+    infos = [info("a", mod=1000, first="как дела по проектам"), info("b", tag="agent:s1", mod=3000), info("c", mod=2000, first="x" * 100)]
+    assert general_chats(infos) == [{"key": "chat:c", "title": "x" * 60, "updated": 2}, {"key": "chat:a", "title": "как дела по проектам", "updated": 1}]
+    assert find_agent_chat(infos, "s1") == "b" and find_agent_chat(infos, "s9") is None
+
+
+def test_messages_of_keeps_text_only():
+    m = lambda t, c: SimpleNamespace(type=t, message={"content": c})
+    msgs = [m("user", "как дела"), m("assistant", [{"type": "tool_use", "name": "mcp__oma__agents"}]),
+            m("user", [{"type": "tool_result", "content": "…"}]), m("assistant", [{"type": "text", "text": "Почта ждёт ответа."}])]
+    assert messages_of(msgs) == [{"role": "me", "text": "как дела"}, {"role": "oma", "text": "Почта ждёт ответа."}]
+
+
+def test_format_agents_and_find():
+    t = format_agents(E, now=1000)
+    assert t.splitlines()[0] == "Почтовый клиент (omarchy-mail) — ждёт ответа, 1 мин: Клод задал вопрос: какой вариант?"
+    assert "agent-speak (agent-speak) — работает, только что: Запускаю тесты" in t
+    assert find_entry(E, "почтов")["id"] == "s1" and find_entry(E, "s2")["id"] == "s2"
+    assert find_entry(E, "") is None and find_entry(E, "нет такого") is None
+    assert format_agents([], 0) == "Агентов нет."
+
+
+def test_agent_prompt_names_agent():
+    p = agent_prompt(E[0])
+    assert p.startswith(OMA_PROMPT) and "«Почтовый клиент»" in p and 'agent_feed("s1")' in p
+
+
+def test_brain_chat_keys_tag_and_stale(monkeypatch, tmp_path):
+    # SDK подменён: ни сети, ни процесса claude
+    from agent_voice import brain
+    made, tags = [], []
+    Result = type("ResultMessage", (), {})
+
+    class Client:
+        def __init__(self, opts):
+            self.opts, self.q = opts, asyncio.Queue()
+            made.append(self)
+        async def connect(self): pass
+        async def query(self, text):
+            r = Result()
+            r.session_id = f"sid-{len(made)}"
+            await self.q.put(r)
+        async def receive_messages(self):
+            while True:
+                yield await self.q.get()
+        async def interrupt(self): pass
+        async def disconnect(self): pass
+
+    monkeypatch.setattr(brain, "OMA_DIR", str(tmp_path))
+    monkeypatch.setattr(brain, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(brain, "list_sessions", lambda d: [])
+    monkeypatch.setattr(brain, "tag_session", lambda sid, tag, directory: tags.append((sid, tag, directory)))
+    monkeypatch.setattr(brain, "get_session_messages", lambda sid, directory: [SimpleNamespace(type="user", message={"content": "привет"})])
+
+    async def run():
+        ev = asyncio.Queue()
+        b = brain.Brain(ev, lambda: E)
+        await b.send("как дела")
+        assert [await ev.get(), await ev.get()] == [("opened", "chat:sid-1", "new"), ("done", None)]
+        o = made[0].opts
+        assert o.cwd == str(tmp_path) and o.resume is None and o.system_prompt == OMA_PROMPT
+        assert o.tools == brain.TOOLS and o.allowed_tools == brain.TOOLS + brain.OMA_TOOLS and o.env == {"AGENT_SPEAK": "1"}
+        assert await b.open("agent:s1") == [] and "«Почтовый клиент»" in made[1].opts.system_prompt
+        await b.send("что там")
+        assert [await ev.get(), await ev.get()] == [("opened", "agent:s1", "agent:s1"), ("done", None)]
+        assert tags == [("sid-2", "agent:s1", str(tmp_path))]
+        assert await b.open("chat:sid-1") == [{"role": "me", "text": "привет"}] and made[2].opts.resume == "sid-1"
+        b.used -= brain.STALE_HOURS * 3600 + 1  # чат давно не трогали
+        await b.send("снова")
+        assert [await ev.get(), await ev.get()] == [("opened", "new", "chat:sid-1"), ("opened", "chat:sid-4", "new")]
+        assert made[3].opts.resume is None and b.key == "chat:sid-4"
+        await b.close()
 
     asyncio.run(run())
