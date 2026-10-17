@@ -1,17 +1,11 @@
 {
   "schemaVersion": 1,
   "id": "predmaxim.agent-speak",
-  "name": "Agent speech",
+  "name": "Oma",
   "version": "1.0.0",
   "author": "predmaxim",
-  "description": "agent-speakd control: state, pause, mode, intermediate statuses, voice and speed",
-  "kinds": ["bar-widget"],
-  "entryPoints": { "barWidget": "Panel.qml" },
-  "barWidget": {
-    "displayName": "Agent speech",
-    "description": "Read-aloud of AI agents: state and settings",
-    "category": "Audio",
-    "allowMultiple": false,
-    "defaultSection": "right"
-  }
+  "description": "Oma, the deputy over AI agents: an orb with bubbles over the windows and a window with the agents and chats",
+  "kinds": ["panel"],
+  "keepLoaded": true,
+  "entryPoints": { "panel": "Oma.qml" }
 }

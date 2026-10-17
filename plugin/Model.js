@@ -44,6 +44,18 @@ function orbTip(st) {
 var BUBBLES_MAX = 3
 var BUBBLE_TTL = 10000
 
+// The oldest of three bubbles fades away from its neighbour: alpha at the
+// edge towards it and at the far edge.
+var OLDEST_NEAR = 0.8
+var OLDEST_FAR = 0.1
+
+// MultiEffect's softest mask (maskThresholdMin 0.5, maskSpreadAtMin 1) draws
+// smoothstep(mask alpha), measured on Qt 6.11; this is the mask alpha that
+// comes out as `alpha`.
+function maskAlpha(alpha) {
+  return 0.5 - Math.sin(Math.asin(1 - 2 * alpha) / 3)
+}
+
 // Add, update (append or replace) or drop a bubble; the touched one goes last.
 function pushBubble(stack, b, now) {
   var rest = stack.filter(function(x) { return x.id !== b.id })

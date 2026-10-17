@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -57,6 +57,9 @@ assert.strictEqual(M.omaCmd({ do: "talk" }), '{"cmd":"oma","action":{"do":"talk"
 assert.strictEqual(M.HOURS.length, 24)
 assert.strictEqual(M.HOURS[0], "00:00")
 assert.strictEqual(M.HOURS[23], "23:00")
+// The oldest bubble's mask: smoothstep(maskAlpha(a)) is a again
+const smooth = a => 3 * a * a - 2 * a * a * a
+for (const a of [M.OLDEST_NEAR, M.OLDEST_FAR, 0, 0.5, 1]) assert.ok(Math.abs(smooth(M.maskAlpha(a)) - a) < 1e-9, "maskAlpha " + a)
 
 // Every key from orbTip, ago and stateLabel has a Russian line
 const keys = new Set()
@@ -91,10 +94,8 @@ for (const s of secs) for (const o of s.options) assert.strictEqual(typeof o.val
 
 // Every tr("…") in the QML files and Model.js has a Russian line, and no ru line is dead
 const files = fs.readdirSync(__dirname).filter(f => f.endsWith(".qml"))
-// Panel.qml and Indicator.qml are deleted in Task 11 — remove this exclusion with them
-const scanned = files.filter(f => !["Panel.qml", "Indicator.qml"].includes(f))
 const used = new Set(keys)
-for (const f of scanned.concat("Model.js"))
+for (const f of files.concat("Model.js"))
   for (const m of fs.readFileSync(__dirname + "/" + f, "utf8").matchAll(/\btr\("((?:[^"\\]|\\.)*)"/g)) {
     const k = JSON.parse(`"${m[1]}"`)
     assert.ok(Object.prototype.hasOwnProperty.call(I.TABLES.ru, k), f + ": no ru for " + k)

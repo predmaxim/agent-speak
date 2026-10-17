@@ -7,7 +7,7 @@ var TABLES = {
   ru: {
     "Oma is not running": "Ома не запущена", "Oma is loading": "Ома загружается", "Oma is listening": "Ома слушает",
     "Oma is thinking": "Ома думает", "Oma is speaking": "Ома говорит", "Paused": "Пауза", "Quiet mode": "Тихий режим",
-    "Oma": "Ома", "%1 waiting": "Ждут ответа: %1",
+    "Oma": "Ома", "%1 waiting": "Ждут ответа: %1", "Send": "Отправить",
     "just now": "только что", "%1 min": "%1 мин", "%1 h": "%1 ч", "%1 d": "%1 д",
     "Working": "Работает", "Waiting": "Ждёт", "Done": "Готово", "Idle": "Свободен",
     "INTERMEDIATE STATUSES": "ПРОМЕЖУТОЧНЫЕ СТАТУСЫ", "Read": "Читать", "Final answer only": "Только итог",
