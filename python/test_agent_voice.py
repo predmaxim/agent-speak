@@ -445,3 +445,88 @@ def test_brain_reconnects_after_failed_connect_and_dead_stream(monkeypatch, tmp_
         await b.close()
 
     asyncio.run(run())
+
+
+# --- процесс Омы ---
+from agent_voice.__main__ import Oma
+from agent_voice.link import watch
+
+
+def test_oma_routes_talk_draft_send_and_quiet_answer():
+    sent, emitted = [], []
+
+    class FakeEar:
+        open, pid = False, 1
+        async def start(self): self.open = True
+        async def stop(self): self.open = False
+
+    class FakeBrain:
+        key, texts = "new", []
+        async def send(self, t): self.texts.append(t)
+        async def open(self, k): self.key = k; return []
+        async def interrupt(self): pass
+        def chats(self): return []
+
+    oma = Oma(Conversation(), FakeEar(), FakeBrain(), SimpleNamespace(ready=True),
+              send=lambda c: (emitted if c["cmd"] == "emit" else sent).append(c))
+
+    async def run():
+        await oma.command({"do": "talk"})
+        assert oma.ear.open
+        await oma.event(("phrase", "как дела у почты"))
+        assert emitted[-1]["line"]["bubble"] == {"id": "draft", "who": "Ты", "text": "как дела у почты", "kind": "draft", "append": False}
+        await oma.command({"do": "send"})
+        assert oma.brain.texts == ["как дела у почты"] and not oma.ear.open
+        oma.conv.set_quiet(True)
+        await oma.event(("delta", "Почта ждёт твоего ответа сейчас. "))
+        assert not any(c["cmd"] == "voice" for c in sent)
+        assert any(e["line"].get("bubble", {}).get("kind") == "oma" for e in emitted)
+
+    asyncio.run(run())
+
+
+def test_watch_ignores_unknown_lines_and_eof_ends(tmp_path):
+    import socket, threading
+    path = str(tmp_path / "s.sock")
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind(path)
+    srv.listen(1)
+
+    def serve():
+        c, _ = srv.accept()
+        c.recv(100)
+        c.sendall('{"running":true,"speaking":true,"quiet":false}\n{"bubble":{"id":"x"}}\n{"agents":[{"id":"a"}]}\nмусор\n'.encode())
+        c.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    st, ag = [], []
+    asyncio.run(asyncio.wait_for(watch(st.append, ag.append, sock=path), 2))
+    assert [s["speaking"] for s in st] == [True] and ag == [[{"id": "a"}]]
+
+
+def test_oma_stale_chat_line_lands_in_new_chat_and_done_syncs():
+    lines = []
+
+    class FakeBrain:
+        key = "new"
+        async def open(self, k): self.key = k; return [{"role": "me", "text": "давно"}]
+        async def send(self, t):  # как Brain при устаревшем чате: "opened" в очередь, ключ уже "new"
+            self.pending, self.key = ("opened", "new", self.key), "new"
+        def chats(self): return [{"key": "chat:old"}]
+
+    oma = Oma(Conversation(), None, FakeBrain(), SimpleNamespace(ready=True),
+              send=lambda c: c["cmd"] == "emit" and lines.append(c["line"]))
+    me = {"role": "me", "text": "снова привет"}
+
+    async def run():
+        await oma.command({"do": "open", "key": "chat:old"})
+        assert lines[-1] == {"chat": {"key": "chat:old", "messages": [{"role": "me", "text": "давно"}]}}
+        await oma.command({"do": "ask", "text": "снова привет", "key": "chat:old"})
+        await oma.event(oma.brain.pending)
+        assert lines[-1] == {"chat": {"key": "new", "was": "chat:old", "messages": [me]}}
+        await oma.event(("delta", "Привет, чем помочь сегодня? "))
+        await oma.event(("done", None))
+        assert lines[-2:] == [{"chat": {"key": "new", "messages": [me, {"role": "oma", "text": "Привет, чем помочь сегодня?"}]}},
+                              {"chats": [{"key": "chat:old"}]}]
+
+    asyncio.run(run())
