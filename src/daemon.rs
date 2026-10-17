@@ -2,7 +2,7 @@
 
 use crate::agents::{self, Live, Registry};
 use crate::assemble::{Assembler, MdEvent};
-use crate::config::Config;
+use crate::config::{hhmm, in_window, Config};
 use crate::dedup::Dedup;
 use crate::focus::{self, Agent, SessionRef};
 use crate::ipc::{self, Msg};
@@ -69,7 +69,8 @@ struct Oma {
     stdin: Option<ChildStdin>,
     state: String,
     dialog: bool,              // постоянный диалог: статусы и финалы агентов звучат
-    retry_at: Option<Instant>, // упала — когда поднять
+    retry_at: Option<Instant>, // упала или не запустилась — когда поднять
+    failing: bool,             // запуск не удаётся: в журнал — только первая ошибка подряд
 }
 
 /// Что звучит: тихий режим глушит всё, кроме чтения по хоткею и образца голоса;
@@ -103,7 +104,7 @@ struct State {
     oma: Oma,
     voice_cmd: Vec<String>, // запуск Омы; в тестах — заглушка
     minutes: Box<dyn Fn() -> u32>, // местное время, минуты от полуночи; в тестах — 12:00
-    sched: Option<bool>,           // тихо ли по расписанию на прошлом tick; None — ещё не считали
+    sched: Option<(bool, u32, u64)>, // прошлый tick: (тихо по расписанию, минуты, эпоха в с); None — ещё не было
     registry: Registry,
     scan: Box<dyn FnMut() -> Vec<Live>>, // живые сессии агентов; в тестах — подделка
     now_secs: Box<dyn Fn() -> u64>,      // эпоха в секундах — время событий реестра
@@ -417,6 +418,12 @@ impl State {
         self.cfg.quiet((self.minutes)())
     }
 
+    /// Очередь — только то, что слышно сейчас: выключен диалог или настала тишина — лишнее выбросить.
+    /// Звучащая фраза доигрывает.
+    fn purge(&self) {
+        self.shared.queue.lock().unwrap().retain_audible(self.oma.dialog, self.quiet());
+    }
+
     /// Удержание фраз агентов, пока Ома думает или говорит; снятие будит поток воспроизведения.
     fn hold(&self, on: bool) {
         self.shared.queue.lock().unwrap().set_hold(on);
@@ -434,6 +441,7 @@ impl State {
         *self.shared.voice.lock().unwrap() = (self.cfg.speaker.clone(), self.cfg.rate.clone());
         self.reassign_default();
         self.shared.queue.lock().unwrap().set_max_age(Duration::from_secs(self.cfg.max_age_secs));
+        self.purge(); // могла включиться тишина
         self.broadcast();
     }
 
@@ -643,9 +651,15 @@ impl State {
                 eprintln!("agent-speak: Ома запущена (pid {})", c.id());
                 self.oma.stdin = c.stdin.take();
                 self.oma.child = Some(c);
+                self.oma.failing = false;
             }
-            // не повторяем: скорее всего нет voice-venv, а журнал не засоряем раз в 10 с
-            Err(e) => eprintln!("agent-speak: Ома не запустилась: {e}"),
+            Err(e) => {
+                if !self.oma.failing {
+                    eprintln!("agent-speak: Ома не запустилась, пробую раз в {} с: {e}", OMA_RETRY.as_secs());
+                }
+                self.oma.failing = true;
+                self.oma.retry_at = Some((self.clock)() + OMA_RETRY);
+            }
         }
     }
 
@@ -671,6 +685,7 @@ impl State {
         self.oma.state = "off".into();
         self.oma.dialog = false;
         self.hold(false);
+        self.purge();
         self.oma.retry_at = Some((self.clock)() + OMA_RETRY);
         self.broadcast();
     }
@@ -687,24 +702,33 @@ impl State {
         if self.oma.retry_at.is_some_and(|t| now >= t) {
             self.oma_spawn();
         }
-        let sched = self.cfg.scheduled_quiet((self.minutes)());
-        if let Some(prev) = self.sched.filter(|p| *p != sched) {
-            // граница расписания: ручное переключение снимается
-            let before = match self.cfg.quiet_override.as_str() {
-                "on" => true,
-                "off" => false,
-                _ => prev,
-            };
-            if !self.cfg.quiet_override.is_empty() {
-                eprintln!("agent-speak: граница расписания — ручной тихий режим ({}) снят", self.cfg.quiet_override);
-                self.cfg.quiet_override.clear();
-                self.cfg.save();
-            }
-            if self.quiet() != before {
-                self.broadcast();
+        let (min, secs) = ((self.minutes)(), (self.now_secs)());
+        let sched = self.cfg.scheduled_quiet(min);
+        if let Some((was, pmin, psecs)) = self.sched {
+            // ноутбук спал: tick не шёл, граница могла пройти и дважды — значение то же
+            let gap = secs.saturating_sub(psecs);
+            let slept_over = self.cfg.quiet_schedule
+                && gap > 60
+                && (gap >= 24 * 3600 || [&self.cfg.quiet_from, &self.cfg.quiet_to].into_iter().filter_map(|b| hhmm(b)).any(|b| in_window(pmin, min, b)));
+            if was != sched || slept_over {
+                // граница расписания: ручное переключение снимается
+                let before = match self.cfg.quiet_override.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => was,
+                };
+                if !self.cfg.quiet_override.is_empty() {
+                    eprintln!("agent-speak: граница расписания — ручной тихий режим ({}) снят", self.cfg.quiet_override);
+                    self.cfg.quiet_override.clear();
+                    self.cfg.save();
+                }
+                if self.quiet() != before {
+                    self.purge();
+                    self.broadcast();
+                }
             }
         }
-        self.sched = Some(sched);
+        self.sched = Some((sched, min, secs));
         if now >= self.next_scan {
             self.next_scan = now + SCAN_EVERY;
             self.rescan();
@@ -726,6 +750,7 @@ impl State {
                 self.hold(matches!(state.as_str(), "thinking" | "speaking"));
                 self.oma.state = state;
                 self.oma.dialog = dialog;
+                self.purge(); // диалог выключен — финалы и статусы агентов не доигрываются
             }
             Msg::Oma { action } => self.oma_send(&action),
             Msg::Emit { line } => self.broadcast_line(&format!("{line}\n")),
@@ -1102,6 +1127,67 @@ mod tests {
     }
 
     #[test]
+    fn override_cleared_when_boundary_crossed_in_sleep() {
+        let _h = TempHome::new("quiet-sleep");
+        let mut st = test_state();
+        let hm = |s| crate::config::hhmm(s).unwrap();
+        let m = Arc::new(std::sync::atomic::AtomicU32::new(hm("21:00")));
+        let secs = Arc::new(std::sync::atomic::AtomicU64::new(1000));
+        let (mm, ss) = (m.clone(), secs.clone());
+        st.minutes = Box::new(move || mm.load(Ordering::SeqCst));
+        st.now_secs = Box::new(move || ss.load(Ordering::SeqCst));
+        st.cfg.quiet_override = "on".into();
+        st.tick();
+        secs.fetch_add(1, Ordering::SeqCst); // обычный tick, ничего не пересёк
+        st.tick();
+        assert_eq!(st.cfg.quiet_override, "on");
+        m.store(hm("22:00"), Ordering::SeqCst); // долгий сон без границы
+        secs.fetch_add(3600, Ordering::SeqCst);
+        st.tick();
+        assert_eq!(st.cfg.quiet_override, "on");
+        m.store(hm("09:00"), Ordering::SeqCst); // проспал 23:00 и 08:00: расписание то же — false
+        secs.fetch_add(11 * 3600, Ordering::SeqCst);
+        st.tick();
+        assert_eq!(st.cfg.quiet_override, "");
+        assert!(!st.quiet());
+    }
+
+    #[test]
+    fn dialog_off_drops_held_final() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("s1"), 0);
+        st.on_msg(Msg::VoiceState { state: "thinking".into(), dialog: true });
+        st.on_hook("stop", &serde_json::json!({"session_id": "s1", "last_assistant_message": "Финал агента готов."}));
+        assert!(!st.shared.queue.lock().unwrap().is_empty());
+        st.on_msg(Msg::VoiceState { state: "idle".into(), dialog: false });
+        assert!(texts(&st).is_empty());
+    }
+
+    #[test]
+    fn quiet_on_drops_queued_keeps_preview() {
+        let _h = TempHome::new("quiet-purge");
+        let mut st = test_state();
+        st.enqueue(Agent::Claude, "a", "Нужно разрешение.", Kind::Urgent);
+        st.on_msg(Msg::Voice { text: "Ответ Омы здесь.".into() });
+        say(&mut st);
+        st.on_msg(Msg::Set { key: "quiet_override".into(), value: serde_json::json!("on") });
+        assert_eq!(texts(&st), ["Так звучит этот голос."]);
+    }
+
+    #[test]
+    fn failed_spawn_retried_after_backoff() {
+        let _h = TempHome::new("oma-fail");
+        let (mut st, env) = env_state();
+        st.voice_cmd = vec!["/nonexistent/agent-voice".into()];
+        st.oma_spawn();
+        assert!(st.oma.child.is_none() && st.oma.retry_at.is_some());
+        st.voice_cmd = vec!["true".into()];
+        *env.1.lock().unwrap() += Duration::from_secs(11);
+        st.tick();
+        assert!(st.oma.child.is_some());
+    }
+
+    #[test]
     fn oma_actions_go_to_child_stdin() {
         let h = TempHome::new("oma-stdin");
         std::fs::create_dir_all(&h.dir).unwrap();
@@ -1314,12 +1400,15 @@ mod tests {
 
     #[test]
     fn dead_oma_respawned_after_backoff() {
+        let _h = TempHome::new("oma-dead"); // oma_spawn создаёт папку в HOME
         let (mut st, env) = env_state();
         st.voice_cmd = vec!["true".into()];
         st.oma_spawn();
+        st.on_msg(Msg::VoiceState { state: "thinking".into(), dialog: true });
         std::thread::sleep(Duration::from_millis(200));
         st.tick();
         assert!(st.oma.child.is_none() && st.oma.state == "off");
+        assert!(!st.oma.dialog && !st.shared.queue.lock().unwrap().held());
         *env.1.lock().unwrap() += Duration::from_secs(9);
         st.tick();
         assert!(st.oma.child.is_none());

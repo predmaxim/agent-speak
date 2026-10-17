@@ -66,6 +66,11 @@ impl Queue {
         self.hold = on;
     }
 
+    /// Выбросить не слышное сейчас (выключен диалог, тихий режим); см. daemon::audible.
+    pub fn retain_audible(&mut self, dialog: bool, quiet: bool) {
+        self.items.retain(|i| crate::daemon::audible(&i.kind, dialog, quiet));
+    }
+
     #[cfg(test)]
     pub fn held(&self) -> bool {
         self.hold
