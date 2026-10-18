@@ -19,6 +19,7 @@ Item {
   property var link
   property var draft: null           // Oma's draft bubble, shown at the chat's end
   property bool shown: false
+  property string viewing: ""   // a screenshot open over the window
   function toggle() {
     if (shown) shown = false
     else open("")
@@ -133,9 +134,10 @@ Item {
   // The keys: the field on the main page, the catcher on the others.
   function refocus() { (root.page === "main" ? field : keyCatcher).forceActiveFocus() }
 
-  // Esc step by step: a page → clear the field → the agent's chat → close.
+  // Esc step by step: a screenshot → a page → clear the field → the agent's chat → close.
   function back() {
-    if (root.page !== "main") root.showPage("main")
+    if (root.viewing) root.viewing = ""
+    else if (root.page !== "main") root.showPage("main")
     else if (field.text !== "") field.text = ""
     else if (root.agentChat) root.openChat(root.generalKey)
     else root.shown = false
@@ -227,6 +229,7 @@ Item {
 
   // Hidden: no dropdown stays open into the next time.
   onShownChanged: {
+    viewing = ""
     if (!shown) {
       speakerBox.close()
       rateBox.close()
@@ -850,6 +853,23 @@ Item {
         }
       }
     }
+
+    // A screenshot over the window, fitted; a click or Esc closes it.
+    Rectangle {
+      anchors.fill: parent
+      visible: root.viewing !== ""
+      color: Qt.rgba(0, 0, 0, 0.85)
+
+      Image {
+        anchors.fill: parent
+        anchors.margins: Style.space(40)
+        fillMode: Image.PreserveAspectFit
+        asynchronous: true
+        source: root.viewing ? "file://" + root.viewing : ""
+      }
+
+      MouseArea { anchors.fill: parent; onClicked: root.viewing = "" }
+    }
   }
 
   // A chat line: a bubble tinted like the orb's ones, as wide as its text (up
@@ -906,7 +926,7 @@ Item {
           visible: text !== ""
         }
 
-        // Thumbnails; a click opens the picture in the default viewer.
+        // Thumbnails; a click opens the picture over the window.
         Flow {
           id: pics
           width: parent.width
@@ -928,7 +948,7 @@ Item {
               MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: Qt.openUrlExternally("file://" + parent.modelData)
+                onClicked: root.viewing = parent.modelData
               }
             }
           }
