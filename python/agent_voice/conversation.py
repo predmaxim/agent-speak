@@ -50,8 +50,9 @@ class Conversation:
         return acts
 
     def talk(self):
-        if self.dialog:
-            return []
+        if self.dialog:  # слух и так открыт: клик — перебивание, как голосом
+            acts = self._stop_turn()
+            return acts + self._to(self._rest()) if acts else []
         if self.state in ("listening", "paused"):
             return self.send()
         acts = self._stop_turn() + [("ear", True)]

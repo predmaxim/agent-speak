@@ -4,6 +4,9 @@ import os
 import subprocess
 
 
+INJECTED = ("<system-reminder>", "<command-", "<local-command")  # вставки Claude Code в реплики пользователя
+
+
 def _blocks(content):
     return [{"type": "text", "text": content}] if isinstance(content, str) else (content or [])
 
@@ -25,11 +28,15 @@ def transcript_tail(path: str, limit: int = 4000) -> str:
             blocks = _blocks(d["message"]["content"])
         except (ValueError, KeyError, TypeError):
             continue
+        if kind == "user" and d.get("isMeta"):  # служебные строки, а не слова пользователя
+            continue
         for b in blocks:
             if not isinstance(b, dict):
                 continue
             if b.get("type") == "text" and kind in ("user", "assistant"):
                 t = str(b.get("text", ""))
+                if kind == "user" and t.lstrip().startswith(INJECTED):
+                    continue
                 if len(t) > 1000:
                     t = t[:1000] + "…"
                 lines.append(("ты: " if kind == "user" else "агент: ") + t)
@@ -65,12 +72,12 @@ def mic_outputs() -> list:
 
 
 def foreign_capture(outputs: list, own: set) -> bool:
-    """Микрофон слушает не виртуальный поток чужого процесса."""
+    """Микрофон слушает не виртуальный поток чужого процесса (монитор выхода — cava, OBS — не в счёт)."""
     own = {str(x) for x in own}
     for o in outputs:
-        if o.get("corked"):
-            continue
         p = o.get("properties", {})
+        if o.get("corked") or p.get("stream.monitor") == "true":
+            continue
         if p.get("node.virtual") != "true" and p.get("application.process.id") not in own:
             return True
     return False

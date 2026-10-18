@@ -179,8 +179,8 @@ class Oma:
                 self._chat("me", a[1])
             elif k == "interrupt":
                 await self.brain.interrupt()
-            elif k == "stop":
-                self.send({"cmd": "stop"})
+            elif k == "stop":  # перебивание: финалы агентов, удержанные за Омой, демон не выбрасывает
+                self.send({"cmd": "hush"})
             elif k == "say":
                 self.send({"cmd": "voice", "text": a[1]})
             elif k == "show":
@@ -265,8 +265,7 @@ async def main():
         async def power():
             while True:
                 ac = on_ac()
-                if ac:  # от сети слух готов сразу: VAD тоже тёплый
-                    oma.bg(oma.ear.warm())
+                oma.bg(oma.ear.warm())  # VAD тёплый всегда: CPU, дёшево; первый клик не ждёт torch
                 if ac or oma.ear.open:  # от сети — тёплый; слух открыт — модель «используется»
                     oma.warm()
                 if not oma.ear.open:  # «300 с без слуха» считаются от закрытия слуха

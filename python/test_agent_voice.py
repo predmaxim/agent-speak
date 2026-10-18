@@ -82,7 +82,7 @@ def test_quiet_shows_without_saying():
 def test_dialog_sends_each_phrase_and_barges_in():
     cv = Conversation()
     assert cv.set_dialog(True) == [("ear", True), ("state", "listening")]
-    assert cv.talk() == []
+    assert cv.talk() == []  # клик в диалоге — перебивание, а обрывать нечего
     assert cv.phrase("как дела у почты") == [("send", "как дела у почты"), ("state", "thinking")]
     cv.delta("Почта ждёт твоего ответа сейчас. ")
     cv.audio(True)
@@ -96,6 +96,18 @@ def test_click_while_speaking_interrupts_and_listens():
     cv.delta("Длинный ответ про всё сразу. ")
     cv.audio(True)
     assert cv.talk() == [("stop",), ("interrupt",), ("ear", True), ("state", "listening")]
+
+
+def test_click_in_dialog_barges_in():
+    cv = Conversation()
+    cv.set_dialog(True)
+    cv.phrase("расскажи про почту")
+    assert cv.talk() == [("interrupt",), ("state", "listening")]  # думает — ход оборван
+    cv.phrase("тогда про сборку")
+    cv.delta("Сборка идёт уже десять минут. ")
+    cv.audio(True)
+    assert cv.talk() == [("stop",), ("interrupt",), ("state", "listening")]  # говорит — звук и ход оборваны
+    assert cv.dialog and cv.delta("хвост ответа здесь. ") == []
 
 
 def test_statuses_audio_does_not_end_draft():
@@ -231,6 +243,20 @@ def test_selection_trims_and_survives_errors():
     assert selection(run=boom) == ""
 
 
+def test_transcript_tail_skips_meta_and_injected_user_lines(tmp_path):
+    rows = [
+        {"type": "user", "isMeta": True, "message": {"content": "Caveat: служебное"}},
+        {"type": "user", "message": {"content": "<system-reminder>напоминание</system-reminder>"}},
+        {"type": "user", "message": {"content": [{"type": "text", "text": "<command-name>/clear</command-name>"}]}},
+        {"type": "user", "message": {"content": "<local-command-stdout>ok</local-command-stdout>"}},
+        {"type": "user", "message": {"content": "почини сборку"}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Смотрю."}]}},
+    ]
+    p = tmp_path / "t.jsonl"
+    p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows))
+    assert transcript_tail(str(p)).splitlines() == ["ты: почини сборку", "агент: Смотрю."]
+
+
 def test_transcript_tail_caps_long_message(tmp_path):
     row = {"type": "assistant", "message": {"content": [{"type": "text", "text": "я" * 5000}]}}
     p = tmp_path / "t.jsonl"
@@ -241,6 +267,11 @@ def test_transcript_tail_caps_long_message(tmp_path):
 
 def test_foreign_capture_skips_corked():
     assert not foreign_capture([{"corked": True, "properties": {"application.process.id": "7"}}], set())
+
+
+def test_foreign_capture_skips_monitor_streams():
+    # cava, OBS и т. п. пишут звук рабочего стола (монитор выхода), а не микрофон
+    assert not foreign_capture([{"properties": {"application.process.id": "7", "stream.monitor": "true"}}], set())
 
 
 def test_on_ac_usb_counts(tmp_path):
@@ -353,11 +384,19 @@ def test_messages_of_keeps_text_only():
 
 def test_format_agents_and_find():
     t = format_agents(E, now=1000)
-    assert t.splitlines()[0] == "Почтовый клиент (omarchy-mail) — ждёт ответа, 1 мин: Клод задал вопрос: какой вариант?"
-    assert "agent-speak (agent-speak) — работает, только что: Запускаю тесты" in t
+    assert t.splitlines()[0] == "Почтовый клиент (omarchy-mail, id s1) — ждёт ответа, 1 мин: Клод задал вопрос: какой вариант?"
+    assert "agent-speak (agent-speak, id s2, в фокусе) — работает, только что: Запускаю тесты" in t
     assert find_entry(E, "почтов")["id"] == "s1" and find_entry(E, "s2")["id"] == "s2"
     assert find_entry(E, "") is None and find_entry(E, "нет такого") is None
     assert format_agents([], 0) == "Агентов нет."
+
+
+def test_tools_read_only_and_agent_by_id():
+    from agent_voice import brain
+    assert "WebSearch" in brain.TOOLS and "WebFetch" not in brain.TOOLS  # наружу — только поиск
+    tools = {t.name: t.description for t in brain.oma_tools(lambda: E)}
+    assert all("id из agents" in tools[n] for n in ("agent_feed", "agent_tail"))
+    assert "id" in tools["agents"]
 
 
 def test_agent_prompt_names_agent():
@@ -410,11 +449,14 @@ def test_brain_chat_keys_tag_and_stale(monkeypatch, tmp_path):
         assert o.cwd == str(tmp_path) and o.resume is None and o.system_prompt == OMA_PROMPT
         assert o.tools == brain.TOOLS and o.allowed_tools == brain.TOOLS + brain.OMA_TOOLS and o.env == {"AGENT_SPEAK": "1"}
         assert o.strict_mcp_config and list(o.mcp_servers) == ["oma"]
-        assert await b.open("agent:s1") == [] and "«Почтовый клиент»" in made[1].opts.system_prompt
+        assert await b.open("agent:s1") == [] and len(made) == 1  # open только читает историю: claude не запускается
         await b.send("что там")
+        assert "«Почтовый клиент»" in made[1].opts.system_prompt
         assert [await ev.get(), await ev.get()] == [("opened", "agent:s1", "agent:s1"), ("done", None)]
         assert tags == [("sid-2", "agent:s1", str(tmp_path))]
-        assert await b.open("chat:sid-1") == [{"role": "me", "text": "привет"}] and made[2].opts.resume == "sid-1"
+        assert await b.open("chat:sid-1") == [{"role": "me", "text": "привет"}] and len(made) == 2
+        await b.send("ещё")  # подключение — с первой реплики, продолжением сессии
+        assert made[2].opts.resume == "sid-1" and await ev.get() == ("done", None)
         b.used -= brain.STALE_HOURS * 3600 + 1  # чат давно не трогали
         await b.send("снова")
         assert [await ev.get(), await ev.get()] == [("opened", "new", "chat:sid-1"), ("opened", "chat:sid-4", "new")]
@@ -442,6 +484,28 @@ def test_brain_reconnects_after_failed_connect_and_dead_stream(monkeypatch, tmp_
         assert made[1].interrupts == 0 and not b.st["skip"]
         await b.send("три")
         assert made[2].sent == ["три"] and made[2].opts.resume == "sid-2"
+        await b.close()
+
+    asyncio.run(run())
+
+
+def test_brain_interrupt_only_while_turn_in_flight(monkeypatch, tmp_path):
+    brain, made, _ = _fake_sdk(monkeypatch, tmp_path)
+
+    async def run():
+        ev = asyncio.Queue()
+        b = brain.Brain(ev, lambda: E)
+        await b.send("раз")
+        assert [await ev.get(), await ev.get()] == [("opened", "chat:sid-1", "new"), ("done", None)]
+        await b.interrupt()  # ход уже кончился — перебивать нечего
+        assert made[0].interrupts == 0 and not b.st["skip"]
+        await b.send("два")
+        assert await asyncio.wait_for(ev.get(), 1) == ("done", None)  # следующий ответ не проглочен
+        await b.send("три")
+        await b.interrupt()  # ход в полёте: перебит, его хвост глотается
+        assert made[0].interrupts == 1
+        await asyncio.sleep(0.05)
+        assert ev.empty() and not b.st["skip"]
         await b.close()
 
     asyncio.run(run())
@@ -483,6 +547,13 @@ def test_oma_routes_talk_draft_send_and_quiet_answer():
         assert any(e["line"].get("bubble", {}).get("kind") == "oma" for e in emitted)
 
     asyncio.run(run())
+
+
+def test_oma_stop_action_hushes_daemon():
+    sent = []
+    oma = Oma(Conversation(), None, None, SimpleNamespace(ready=True), send=sent.append)
+    asyncio.run(oma.act([("stop",)]))
+    assert sent == [{"cmd": "hush"}]  # перебивание Омы: финалы агентов в очереди остаются
 
 
 def test_watch_ignores_unknown_lines_and_eof_ends(tmp_path):

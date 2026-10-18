@@ -12,7 +12,7 @@ from .context import _blocks, selection, transcript_tail
 
 OMA_DIR = os.path.expanduser("~/.local/share/agent-speak/oma")
 MODEL = "claude-sonnet-5-5"
-TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch"]
+TOOLS = ["Read", "Glob", "Grep", "WebSearch"]  # без WebFetch: наружу Ома ничего не отправляет
 OMA_TOOLS = ["mcp__oma__agents", "mcp__oma__agent_feed", "mcp__oma__agent_tail", "mcp__oma__selection"]
 STALE_HOURS = 2
 OMA_PROMPT = ("Ты — Ома, голосовой заместитель пользователя. Следишь за его ИИ-агентами (Claude Code, Codex) в терминалах "
@@ -82,8 +82,10 @@ def _ago(sec: int) -> str:
 
 
 def format_agents(entries, now) -> str:
-    return "\n".join(f'{e["title"]} ({e["project"]}) — {STATES.get(e["state"], e["state"])}, '
-                     f'{_ago(int(now - e["since"]))}: {e["status"]}' for e in entries) or "Агентов нет."
+    """Строка на агента; id — чтобы различать агентов с одинаковым названием."""
+    return "\n".join(f'{e["title"]} ({e["project"]}, id {e["id"]}{", в фокусе" if e.get("focused") else ""}) — '
+                     f'{STATES.get(e["state"], e["state"])}, {_ago(int(now - e["since"]))}: {e["status"]}'
+                     for e in entries) or "Агентов нет."
 
 
 def find_entry(entries, query: str):
@@ -101,19 +103,20 @@ def _text(t: str) -> dict:
 
 def oma_tools(snapshot) -> list:
     """Инструменты Омы поверх снимка агентов демона."""
-    @tool("agents", "Агенты пользователя: название, проект, состояние, давность, последний статус.", {})
+    @tool("agents", "Агенты пользователя: название, проект, id, в фокусе ли, состояние, давность, последний статус.", {})
     async def agents(args):
         return _text(format_agents(snapshot(), time.time()))
 
-    @tool("agent_feed", "Лента последних статусов агента. agent — id, часть названия или проекта.", {"agent": str})
+    @tool("agent_feed", "Лента последних статусов агента. agent — id из agents (названия повторяются; "
+                        "подойдёт и часть названия или проекта).", {"agent": str})
     async def agent_feed(args):
         e = find_entry(snapshot(), args.get("agent", ""))
         if not e:
             return _text("Агент не найден.")
         return _text("\n".join(f'{l["kind"]}: {l["text"]}' for l in e["feed"]) or "Лента пуста.")
 
-    @tool("agent_tail", "Конец переписки агента с пользователем. agent — id, часть названия или проекта; "
-                        "пусто — агент в фокусе.",
+    @tool("agent_tail", "Конец переписки агента с пользователем. agent — id из agents (подойдёт и часть названия "
+                        "или проекта); пусто — агент в фокусе.",
           {"type": "object", "properties": {"agent": {"type": "string"}}})
     async def agent_tail(args):
         entries = snapshot()
@@ -137,21 +140,28 @@ class Brain:
         os.makedirs(OMA_DIR, exist_ok=True)
         self.events, self.snapshot, self.tools = events, snapshot, oma_tools(snapshot)
         self.key, self.sid, self.client, self.reader = "new", None, None, None
-        self.st, self.used = {"skip": False}, time.time()
+        self.st, self.used, self.turns = {"skip": False}, time.time(), 0  # turns: запросов без ResultMessage
 
     def chats(self) -> list:
         return general_chats(list_sessions(OMA_DIR))
 
     async def open(self, key: str) -> list:
-        """Переподключиться к чату key (продолжение сессии по id) и вернуть его историю."""
+        """Перейти к чату key и вернуть его историю. claude не запускается: подключится первый send."""
         await self.close()
-        self.key, self.sid, self.st, self.used = key, None, {"skip": False}, time.time()
-        prompt = OMA_PROMPT
+        self.key, self.sid, self.used = key, None, time.time()
         if key.startswith("chat:"):
             self.sid = key[5:]
         elif key.startswith("agent:"):
-            aid = key[6:]
-            self.sid = find_agent_chat(list_sessions(OMA_DIR), aid)
+            self.sid = find_agent_chat(list_sessions(OMA_DIR), key[6:])
+        return messages_of(get_session_messages(self.sid, directory=OMA_DIR)) if self.sid else []
+
+    async def _connect(self):
+        """Клиент текущего чата: продолжение сессии по id, если она уже есть."""
+        await self.close()  # мёртвый клиент прошлого подключения
+        self.st, self.turns = {"skip": False}, 0
+        prompt = OMA_PROMPT
+        if self.key.startswith("agent:"):
+            aid = self.key[6:]
             prompt = agent_prompt(find_entry(self.snapshot(), aid) or {"id": aid, "title": aid, "cwd": "?"})
         client = ClaudeSDKClient(ClaudeAgentOptions(
             cwd=OMA_DIR, model=MODEL, system_prompt=prompt, tools=TOOLS, allowed_tools=TOOLS + OMA_TOOLS,
@@ -159,37 +169,41 @@ class Brain:
             resume=self.sid, include_partial_messages=True, setting_sources=[], env={"AGENT_SPEAK": "1"}))
         await client.connect()  # упал — клиента нет, следующий send попробует снова
         self.client, self.reader = client, asyncio.create_task(self._read(client))
-        return messages_of(get_session_messages(self.sid, directory=OMA_DIR)) if self.sid else []
 
     async def _read(self, client):
         try:
             async for m in client.receive_messages():
-                if type(m).__name__ == "ResultMessage" and self.sid is None and m.session_id:
-                    self.sid, was = m.session_id, self.key
-                    if was.startswith("agent:"):
-                        with contextlib.suppress(OSError, ValueError):  # без тега чат лишь не найдётся по агенту
-                            tag_session(self.sid, was, directory=OMA_DIR)
-                    else:
-                        self.key = f"chat:{self.sid}"
-                    await self.events.put(("opened", self.key, was))
+                if type(m).__name__ == "ResultMessage":
+                    self.turns = max(0, self.turns - 1)
+                    if self.sid is None and m.session_id:
+                        self.sid, was = m.session_id, self.key
+                        if was.startswith("agent:"):
+                            with contextlib.suppress(OSError, ValueError):  # без тега чат лишь не найдётся по агенту
+                                tag_session(self.sid, was, directory=OMA_DIR)
+                        else:
+                            self.key = f"chat:{self.sid}"
+                        await self.events.put(("opened", self.key, was))
                 for e in claude_events(m, self.st):
                     await self.events.put(e)
+            self.turns = 0
             await self.events.put(("error", "Claude: сессия оборвалась"))
         except Exception as e:  # SDK упал — ход кончается; следующий send переподключится
+            self.turns = 0
             await self.events.put(("error", f"Claude: {e}"))
 
     async def send(self, text: str):
         if self.key.startswith("chat:") and time.time() - self.used > STALE_HOURS * 3600:
             await self.events.put(("opened", "new", self.key))  # до open: ключ станет "new", даже если connect упадёт
             await self.open("new")
-        elif not self.reader or self.reader.done():
-            await self.open(self.key)
+        if not self.reader or self.reader.done():
+            await self._connect()
         self.used = time.time()
+        self.turns += 1  # до query: ResultMessage может прийти раньше, чем query вернётся
         await self.client.query(text)
 
     async def interrupt(self):
-        if self.reader and not self.reader.done():
-            # ponytail: interrupt сразу после ResultMessage съест следующий ход; счётчик ходов, если это всплывёт
+        """Перебить ход в полёте; кончившийся не трогаем — иначе skip съест следующий ответ."""
+        if self.turns and self.reader and not self.reader.done():
             self.st["skip"] = True
             await self.client.interrupt()
 
