@@ -87,9 +87,11 @@ function tone(kind) {
 
 var TONE_ALPHA = { me: 0.18, oma: 0.07, agent: 0 }
 
-// Esc is grabbed only while it means something: a draft to cancel, or the hold after a cancel.
+// Esc is grabbed only while it means something: a draft Oma is still hearing
+// (listening or loading; paused means the mic is someone else's, Esc too), or
+// the hold after a cancel.
 function escWanted(draft, st, holding) {
-  return (draft !== null && !!st && st.running && st.oma !== "off") || holding
+  return (draft !== null && !!st && st.running && ["listening", "loading"].indexOf(st.oma) >= 0) || holding
 }
 
 function dismiss(stack, id) {
