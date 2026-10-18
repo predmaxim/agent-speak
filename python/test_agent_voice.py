@@ -194,6 +194,39 @@ def test_status_audio_does_not_end_draft():
     assert (cv.state, cv.draft) == ("listening", "подожди")
 
 
+def test_short_phrase_after_draft_still_sends():
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1); cv.phrase("какая погода", 1); cv.speech_start(2); cv.phrase(".", 2)
+    cv.tick()
+    clk.t += SEND_PAUSE
+    assert cv.tick() == [("drop_draft",), ("send", "какая погода"), ("state", "thinking")]
+
+
+def test_silence_ends_after_cancel():
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1); cv.cancel(); cv.tick()
+    clk.t += SILENCE_END
+    assert cv.tick() == [("ear", False), ("state", "idle")]
+
+
+def test_cancel_outside_conversation_returns_to_idle():
+    clk, cv = _conv()
+    cv.ask("вопрос тут")
+    assert cv.cancel() == [("interrupt",), ("state", "idle")] and cv.state == "idle"
+
+
+def test_short_phrase_keeps_hearing_mark():
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1); cv.speech_start(2)
+    assert cv.phrase("", 1) == [("draft", "", True)]
+
+
+def test_mic_busy_keeps_draft():
+    clk, cv = _conv()
+    cv.talk(); cv.phrase("черновик тут", 1); cv.speech_start(2)
+    assert cv.mic_busy(True) == [("state", "paused"), ("draft", "черновик тут", False)]
+
+
 import json
 import asyncio
 from types import SimpleNamespace

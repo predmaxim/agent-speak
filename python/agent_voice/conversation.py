@@ -100,7 +100,7 @@ class Conversation:
     def cancel(self):
         """Esc: выбросить фразу; идущий ответ оборвать."""
         acts = self._stop_turn() + self._drop()
-        return acts + (self._to(self._rest()) if self.active and self.state in ("thinking", "speaking") else [])
+        return acts + self._to(self._rest())
 
     def ask(self, text):
         t = text.strip()
@@ -125,7 +125,7 @@ class Conversation:
             return []
         t = text.strip()
         if len(t) < 2:
-            return [("draft", self.draft, self.hearing)] if self.draft else [("drop_draft",)]
+            return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else [("drop_draft",)]
         self.draft = f"{self.draft} {t}".strip()
         self.send_at = self.clock() + SEND_PAUSE
         self.quiet_at = self.clock() + SILENCE_END
@@ -133,6 +133,12 @@ class Conversation:
 
     def tick(self):
         now = self.clock()
+        if self.active and not self.hearing and self.state in ("listening", "paused"):
+            # дедлайны снимает speech_start; если фраза их не вернула (шум, отмена) — взводим здесь
+            if self.quiet_at is None:
+                self.quiet_at = now + SILENCE_END
+            if self.draft and self.send_at is None:
+                self.send_at = now + SEND_PAUSE
         if self.state == "listening" and not self.hearing and self.draft and self.send_at is not None and now >= self.send_at:
             text = self.draft.strip()
             acts = ([("stop",)] if self.audio_busy else []) + self._drop()  # статус агента, что звучит, обрываем
@@ -175,7 +181,12 @@ class Conversation:
         self.mic = on
         if on:
             acts = self._to("paused") if self.state == "listening" else []
-            return acts + self._drop()
+            had = self.draft or self.hearing
+            self.cut = self.started
+            if not had:
+                return acts
+            # черновик остаётся, гасится только «…»
+            return acts + ([("draft", self.draft, False)] if self.draft else [("drop_draft",)])
         return self._to("listening") if self.state == "paused" else []
 
     def set_quiet(self, on):
