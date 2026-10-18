@@ -120,32 +120,121 @@ pub fn scan_all() -> Vec<Live> {
     v
 }
 
-/// Последний заголовок сессии (`custom-title` или `ai-title`) из хвоста транскрипта: читаем с конца кусками по 64 КиБ, не больше 1 МиБ.
-// ponytail: кэш по размеру файла, если скан раз в 2 с станет заметен.
-fn session_title(transcript: &Path) -> Option<String> {
+/// Строки транскрипта с конца: читаем кусками по 64 КиБ, не дальше `limit` байт от конца; `each` вернул true — хватит.
+fn tail_lines(transcript: &Path, limit: u64, mut each: impl FnMut(&[u8]) -> bool) {
     use std::io::{Read, Seek, SeekFrom};
     const CHUNK: u64 = 64 << 10;
-    const LIMIT: u64 = 1 << 20;
-    let mut f = std::fs::File::open(transcript).ok()?;
-    let len = f.metadata().ok()?.len();
+    let Ok(mut f) = std::fs::File::open(transcript) else { return };
+    let Ok(len) = f.metadata().map(|m| m.len()) else { return };
     let (mut pos, mut carry) = (len, Vec::new());
-    while pos > 0 && len - pos < LIMIT {
+    while pos > 0 && len - pos < limit {
         let start = pos.saturating_sub(CHUNK);
         let mut buf = vec![0; (pos - start) as usize];
-        f.seek(SeekFrom::Start(start)).ok()?;
-        f.read_exact(&mut buf).ok()?;
+        if f.seek(SeekFrom::Start(start)).is_err() || f.read_exact(&mut buf).is_err() {
+            return;
+        }
         buf.extend_from_slice(&carry);
         pos = start;
         // начало куска может быть обрезанной строкой: оставляем её для склейки со следующим куском
         let from = if pos == 0 { 0 } else { buf.iter().position(|&b| b == b'\n').map_or(buf.len(), |i| i + 1) };
-        let found = buf[from..].split(|&b| b == b'\n').rev().find_map(line_title);
-        if found.is_some() {
-            return found;
+        if buf[from..].split(|&b| b == b'\n').rev().any(&mut each) {
+            return;
         }
         buf.truncate(from);
         carry = buf;
     }
-    None
+}
+
+/// Последний заголовок сессии (`custom-title` или `ai-title`) из хвоста транскрипта, не дальше 1 МиБ от конца.
+// ponytail: кэш по размеру файла, если скан раз в 2 с станет заметен.
+fn session_title(transcript: &Path) -> Option<String> {
+    let mut title = None;
+    tail_lines(transcript, 1 << 20, |l| {
+        title = line_title(l);
+        title.is_some()
+    });
+    title
+}
+
+/// История агента для ленты — последние FEED_MAX реплик транскрипта Claude: промпты пользователя, тексты
+/// агента и пересказ его хода. Хвост транскрипта, не дальше 16 МиБ (там и тяжёлые строки запросов к API).
+pub fn history(transcript: &Path) -> VecDeque<Line> {
+    let mut lines = VecDeque::new();
+    tail_lines(transcript, 16 << 20, |l| {
+        if let Some(line) = history_line(l) {
+            lines.push_front(line);
+        }
+        lines.len() >= FEED_MAX
+    });
+    lines
+}
+
+/// Реплика транскрипта: промпт пользователя — только набранный человеком (`origin.kind` = human; у старых
+/// записей без `origin` — не isMeta, без тега в начале), без тела навыков, сообщений других сессий
+/// (`<agent-message>`), `<task-notification>`, подписей картинок; текст агента — его блоки `text`.
+fn history_line(l: &[u8]) -> Option<Line> {
+    let has = |pat: &[u8]| l.windows(pat.len()).any(|w| w == pat);
+    if !(has(b"\"type\":\"user\"") || has(b"\"type\":\"assistant\"") || has(b"\"queued_command\"")) {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(l).ok()?;
+    if v["isSidechain"].as_bool() == Some(true) {
+        return None;
+    }
+    // сообщение, отправленное посреди хода, — вложение queued_command со своим origin
+    let (kind, content, origin, meta) = match v["type"].as_str()? {
+        "user" => ("prompt", &v["message"]["content"], &v["origin"], &v["isMeta"]),
+        "attachment" if v["attachment"]["type"] == "queued_command" => {
+            let a = &v["attachment"];
+            ("prompt", &a["prompt"], &a["origin"], &a["isMeta"])
+        }
+        "assistant" => ("status", &v["message"]["content"], &Value::Null, &Value::Null),
+        _ => return None,
+    };
+    let text = match content {
+        Value::String(t) => t.clone(),
+        // у агента ещё и пересказ хода (thinking при thinkingDisplay = updates): терминал показывает его как
+        // реплику, а MessageDisplay его не шлёт; скрытое мышление в транскрипте пустое
+        Value::Array(blocks) => blocks.iter().filter_map(|b| match b["type"].as_str() {
+            Some("text") => b["text"].as_str(),
+            Some("thinking") if v["thinkingDisplay"] == "updates" => b["thinking"].as_str(),
+            _ => None,
+        }).collect::<Vec<_>>().join("\n"),
+        _ => return None,
+    };
+    if kind == "prompt" {
+        let human = match origin["kind"].as_str() {
+            Some(k) => k == "human",
+            None => meta.as_bool() != Some(true) && !technical(&text),
+        };
+        if !human || content.as_array().is_some_and(|b| b.iter().any(|b| b["type"] == "tool_result")) {
+            return None;
+        }
+    }
+    let text = plain(&text);
+    (!text.trim().is_empty()).then(|| Line { at: v["timestamp"].as_str().and_then(epoch).unwrap_or(0), kind, text: text.chars().take(LINE_MAX).collect() })
+}
+
+/// Служебная вставка Claude Code в виде промпта: начинается с XML-тега (`<agent-message …>`,
+/// `<task-notification>`, `<command-name>` …) или это сообщение другой сессии.
+fn technical(text: &str) -> bool {
+    let t = text.trim_start();
+    (t.starts_with('<') && t[1..].starts_with(|c: char| c.is_ascii_lowercase())) || t.starts_with("Another Claude session sent a message")
+}
+
+/// «2026-10-18T12:57:03.123Z» → секунды Unix (UTC).
+fn epoch(ts: &str) -> Option<u64> {
+    let n = |r: std::ops::Range<usize>| ts.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    let (hh, mm, ss) = (n(11..13)?, n(14..16)?, n(17..19)?);
+    // дни от 1970-01-01 по григорианскому календарю (days_from_civil, Howard Hinnant)
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    u64::try_from(days * 86400 + hh * 3600 + mm * 60 + ss).ok()
 }
 
 fn line_title(line: &[u8]) -> Option<String> {
@@ -211,7 +300,9 @@ impl Registry {
                 changed = true;
                 self.entries.push(Entry {
                     id: l.id, agent: l.agent, title: l.title, project: folder(&l.cwd), cwd: l.cwd, transcript,
-                    state: l.state, status: String::new(), since: now, focused: false, feed: VecDeque::new(), heard: false,
+                    state: l.state, status: String::new(), since: now, focused: false, heard: false,
+                    // агент впервые на глазах (и после перезапуска демона): лента начинается с его истории
+                    feed: if l.agent == "claude" { history(&l.transcript) } else { VecDeque::new() },
                 });
             }
         }
@@ -234,6 +325,9 @@ impl Registry {
         if let Some(s) = status {
             e.status = s;
         }
+        if text.is_empty() {
+            return true;
+        }
         if e.feed.len() == FEED_MAX {
             e.feed.pop_front();
         }
@@ -241,9 +335,22 @@ impl Registry {
         true
     }
 
+    /// Ход агента начат. Служебные вставки Claude Code под видом промпта (отчёт
+    /// сабагента `<agent-message …>`, `<task-notification>` …) — не реплика
+    /// пользователя: ход идёт, в ленту не пишем.
+    /// Конец хода: лента — снова по транскрипту (живые события хуков теряют пересказ хода и пропускают
+    /// служебные вставки, история их правит). Пустая история (файла нет) ленту не трогает.
+    pub fn reload(&mut self, id: &str) {
+        let Some(e) = self.entries.iter_mut().find(|e| e.id == id && e.agent == "claude") else { return };
+        let h = history(Path::new(&e.transcript));
+        if !h.is_empty() {
+            e.feed = h;
+        }
+    }
+
     pub fn prompt(&mut self, id: &str, text: &str, now: u64) -> bool {
-        let text = &plain(text);
-        self.event(id, "prompt", text, State::Working, None, now)
+        let text = if technical(text) { String::new() } else { plain(text) };
+        self.event(id, "prompt", &text, State::Working, None, now)
     }
 
     pub fn status(&mut self, id: &str, text: &str, now: u64) -> bool {
@@ -370,6 +477,41 @@ mod tests {
     }
 
     #[test]
+    fn history_keeps_only_human_prompts_and_shown_agent_text() {
+        let root = std::env::temp_dir().join(format!("oma-history-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let p = root.join("t.jsonl");
+        let user = |c: &str, extra: &str| format!(r#"{{"type":"user","message":{{"role":"user","content":{c}}},"timestamp":"2026-10-18T13:14:36.268Z"{extra}}}"#);
+        let lines = [
+            user(r#""сделай орб""#, r#","origin":{"kind":"human"},"promptSource":"typed""#),
+            user(r#""Base directory for this skill: …""#, r#","isMeta":true"#),
+            user(r#""Another Claude session sent a message:
+<agent-message from="a1">отчёт""#, r#","isMeta":true,"origin":{"kind":"peer"}"#),
+            user(r#""<task-notification>готово</task-notification>""#, ""),
+            user(r#""старый промпт""#, ""),
+            user(r#"[{"type":"tool_result","content":"ok"}]"#, ""),
+            user(r#"[{"type":"text","text":"[Image #3] это не мои"},{"type":"image"}]"#, r#","origin":{"kind":"human"}"#),
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":""}]},"thinkingDisplay":"updates"}"#.into(),
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Демон в порядке."}]},"thinkingDisplay":"updates"}"#.into(),
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#.into(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Готово."}]}}"#.into(),
+            r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"сабагент"}]}}"#.into(),
+            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"посреди хода","commandMode":"prompt","origin":{"kind":"human"}}}"#.into(),
+            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":[{"type":"text","text":"с картинкой"},{"type":"image"}],"origin":{"kind":"human"}}}"#.into(),
+            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification>x</task-notification>","origin":{"kind":"task-notification"}}}"#.into(),
+            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"<agent-message from=\"a\">отчёт","origin":{"kind":"peer"},"isMeta":true}}"#.into(),
+            r#"{"type":"api-request-blob","x":"user"}"#.into(),
+        ];
+        std::fs::write(&p, lines.join("\n") + "\n").unwrap();
+        let h: Vec<(&str, String)> = history(&p).into_iter().map(|l| (l.kind, l.text)).collect();
+        assert_eq!(h, [("prompt", "сделай орб".to_string()), ("prompt", "старый промпт".into()), ("prompt", "[Image #3] это не мои".into()),
+            ("status", "Демон в порядке.".into()), ("status", "Готово.".into()), ("prompt", "посреди хода".into()), ("prompt", "с картинкой".into())]);
+        assert_eq!(history_line(lines[0].as_bytes()).unwrap().at, 1_792_329_276);
+        assert!(history(&root.join("нет.jsonl")).is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn title_from_transcript() {
         let root = std::env::temp_dir().join(format!("oma-title-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -406,6 +548,13 @@ mod tests {
         assert_eq!(r.get("a").unwrap().state, State::Idle);
         assert!(r.prompt("a", "запусти тесты", 900));
         assert_eq!(r.get("a").unwrap().feed.back().unwrap().kind, "prompt");
+        let n = r.get("a").unwrap().feed.len();
+        assert!(r.prompt("a", "<agent-message from=\"x\">\n[Subagent hand-back] отчёт", 901));
+        assert!(r.prompt("a", "  <task-notification>готово</task-notification>", 902));
+        let a = r.get("a").unwrap();
+        assert_eq!((a.feed.len(), a.state, a.since), (n, State::Working, 902));
+        assert!(r.prompt("a", "<3 спасибо", 903)); // не тег — реплика
+        assert_eq!(r.get("a").unwrap().feed.len(), n + 1);
         assert!(!r.status("чужой", "текст", 1));
     }
 

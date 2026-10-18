@@ -11,10 +11,13 @@ import "I18n.js" as I18n
 // Oma's orb: a circle anywhere on the focused screen with up to three
 // bubbles beside it. It lives on the Overlay layer, over fullscreen windows
 // too (the orb_over_fullscreen setting off: on Top, under them), and clicks
-// pass through everything but the circle and the bubbles. The
-// window is only as big as its content, so the circle's animations repaint a
-// few pixels, not the screen; while the circle is dragged the window spans
-// the free area of the screen; the drop keeps the place, near a corner it snaps.
+// pass through everything but the circle and the bubbles. The window always
+// spans the free area of the screen and never changes its anchors or size: a
+// drag only moves the circle inside it (a window that resized and re-anchored
+// for a drag made the compositor show a frame of the old buffer — the orb
+// jumped to the middle of the screen or blinked). The cost: while the circle
+// animates (a conversation only) the whole window repaints. The drop keeps
+// the place, near a corner it snaps.
 PanelWindow {
   id: win
 
@@ -42,33 +45,17 @@ PanelWindow {
   property string dropped: ""
   onSavedChanged: dropped = ""
   // The screen is null for a moment after a focus switch.
-  readonly property var pos: Model.parsePos(dropped || saved,
-    (screen ? screen.width : 0) - 2 * gap, (screen ? screen.height : 0) - 2 * gap, slotSize)
+  readonly property var pos: Model.parsePos(dropped || saved, width, height, slotSize)
   readonly property bool atTop: pos.atTop
   readonly property bool atLeft: pos.atLeft
 
-  // A drag measures the pointer from the drag area's corner: at rest the
-  // window sits pos.dx/dy off that corner, so fromCorner adds the offset back
-  // and the numbers hold across the resize, wherever the bar's zone puts the area.
   property bool dragging: false
-  // The offset lives in the slot only during a drag; at rest the margins carry it.
-  readonly property real ox: dragging ? pos.dx : 0
-  readonly property real oy: dragging ? pos.dy : 0
   property real dragDX: 0   // the pointer's way from the press
   property real dragDY: 0
   property bool tipShown: false
 
   // A focus switch moves the window to another screen and the drag with it is lost.
   onScreenChanged: dragging = false
-
-  // A drag's start and its drop switch the anchors, and for a frame the
-  // compositor shows the old-size buffer under the new ones (the orb jumped
-  // to the middle of the screen and back): nothing is drawn until the new
-  // size comes. The timer is for a size that never comes (a drag undone at once).
-  property bool reanchoring: false
-  onDraggingChanged: { reanchoring = true; reanchorGuard.restart() }
-  onWidthChanged: reanchoring = false
-  Timer { id: reanchorGuard; interval: 250; onTriggered: win.reanchoring = false }
 
   function drop() {
     win.dropped = Model.place(orbSlot.x, orbSlot.y, win.width, win.height, win.slotSize, Style.space(64))
@@ -89,21 +76,8 @@ PanelWindow {
   WlrLayershell.namespace: "predmaxim-oma-orb"
   // Oma's window is on Overlay too: the orb steps down under it while it is open.
   WlrLayershell.layer: win.link.speech.orb_over_fullscreen && !win.covered ? WlrLayer.Overlay : WlrLayer.Top
-  anchors {
-    top: win.dragging || win.atTop
-    bottom: win.dragging || !win.atTop
-    left: win.dragging || win.atLeft
-    right: win.dragging || !win.atLeft
-  }
-  // Out of a drag only the two anchored edges carry the offset.
-  margins {
-    top: win.gap + (!win.dragging && win.atTop ? win.pos.dy : 0)
-    bottom: win.gap + (!win.dragging && !win.atTop ? win.pos.dy : 0)
-    left: win.gap + (!win.dragging && win.atLeft ? win.pos.dx : 0)
-    right: win.gap + (!win.dragging && !win.atLeft ? win.pos.dx : 0)
-  }
-  implicitWidth: win.slotSize + (win.bubbles.length ? win.spacing + column.width : 0)
-  implicitHeight: Math.max(win.slotSize, column.height)
+  anchors { top: true; bottom: true; left: true; right: true }
+  margins { top: win.gap; bottom: win.gap; left: win.gap; right: win.gap }
 
   // The Repeater makes its bubbles after the bindings first run, and itemAt()
   // notifies nothing: without `made` the mask kept the circle alone, and
@@ -120,9 +94,8 @@ PanelWindow {
     id: orbSlot
     width: win.slotSize
     height: win.slotSize
-    opacity: win.reanchoring ? 0 : 1
-    x: Math.max(0, Math.min(parent.width - width, (win.atLeft ? win.ox : parent.width - width - win.ox) + (win.dragging ? win.dragDX : 0)))
-    y: Math.max(0, Math.min(parent.height - height, (win.atTop ? win.oy : parent.height - height - win.oy) + (win.dragging ? win.dragDY : 0)))
+    x: Math.max(0, Math.min(parent.width - width, (win.atLeft ? win.pos.dx : parent.width - width - win.pos.dx) + (win.dragging ? win.dragDX : 0)))
+    y: Math.max(0, Math.min(parent.height - height, (win.atTop ? win.pos.dy : parent.height - height - win.pos.dy) + (win.dragging ? win.dragDY : 0)))
 
     OrbFace {
       anchors.fill: parent
@@ -140,15 +113,10 @@ PanelWindow {
       hoverEnabled: true
       acceptedButtons: Qt.LeftButton | Qt.RightButton
       cursorShape: Qt.PointingHandCursor
-      property point start    // the press, from the anchored corner
+      property point start    // the press, in the window: the window never moves
       property bool moved     // this press became a drag, even one cut short by a screen switch
 
-      function fromCorner(mouse) {
-        var p = orbArea.mapToItem(null, mouse.x, mouse.y)
-        var rx = win.dragging ? 0 : win.pos.dx   // the window's offset from the area corner
-        var ry = win.dragging ? 0 : win.pos.dy
-        return Qt.point(win.atLeft ? p.x + rx : p.x - win.width - rx, win.atTop ? p.y + ry : p.y - win.height - ry)
-      }
+      function inWindow(mouse) { return orbArea.mapToItem(null, mouse.x, mouse.y) }
 
       onContainsMouseChanged: {
         win.tipShown = false
@@ -158,12 +126,12 @@ PanelWindow {
       onPressed: function(mouse) {
         win.tipShown = false
         tipDelay.stop()
-        start = fromCorner(mouse)
+        start = inWindow(mouse)
         moved = false
       }
       onPositionChanged: function(mouse) {
         if (!(pressedButtons & Qt.LeftButton)) return
-        var p = fromCorner(mouse)
+        var p = inWindow(mouse)
         if (!win.dragging && Math.hypot(p.x - start.x, p.y - start.y) <= Style.space(8)) return
         win.dragDX = p.x - start.x
         win.dragDY = p.y - start.y
@@ -180,7 +148,7 @@ PanelWindow {
     }
   }
 
-  // The tooltip has its own popup window: the orb's window is too small for it.
+  // The tooltip has its own popup window, out of the orb window's mask.
   Timer {
     id: tipDelay
     interval: 400
@@ -222,7 +190,6 @@ PanelWindow {
   Column {
     id: column
     spacing: win.spacing
-    opacity: win.reanchoring ? 0 : 1
     x: win.atLeft ? orbSlot.x + orbSlot.width + win.spacing : orbSlot.x - win.spacing - width
     y: win.atTop ? orbSlot.y : orbSlot.y + orbSlot.height - height
 
@@ -236,7 +203,7 @@ PanelWindow {
         required property int index
         readonly property var bubble: win.bubbles[win.atTop ? win.bubbles.length - 1 - index : index] || null
         readonly property string tone: slot.bubble ? Model.tone(slot.bubble.kind) : "agent"
-        readonly property color base: tone === "me" ? Color.accent : Color.foreground
+        readonly property color base: tone === "me" ? Model.ME_TINT : Color.foreground
         readonly property string shown: {
           if (!slot.bubble) return ""
           var t = slot.bubble.text || ""

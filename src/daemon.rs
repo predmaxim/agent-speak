@@ -933,6 +933,7 @@ impl State {
                 let transcript = PathBuf::from(p["transcript_path"].as_str().unwrap_or_default());
                 let last = final_message(p, &transcript);
                 self.turn_done(&session, &rest, last.as_deref().unwrap_or_default());
+                self.registry.reload(&session);
                 if self.auto() {
                     if self.cfg.read_intermediate {
                         for s in rest {

@@ -590,32 +590,13 @@ Item {
                 Repeater {
                   model: root.agent ? root.agent.feed : []
 
-                  Item {
+                  ChatLine {
                     required property var modelData
                     width: parent.width
-                    height: feedText.implicitHeight
-
-                    Text {
-                      id: feedTime
-                      anchors.baseline: feedText.baseline
-                      textFormat: Text.PlainText
-                      text: Qt.formatTime(new Date(parent.modelData.at * 1000), "HH:mm")
-                      color: root.dim
-                      font.family: root.font
-                      font.pixelSize: Style.font.body
-                    }
-
-                    Text {
-                      id: feedText
-                      x: feedTime.implicitWidth + Style.space(10)
-                      width: parent.width - x
-                      textFormat: Text.PlainText
-                      text: parent.modelData.text
-                      color: parent.modelData.kind === "question" ? Color.urgent : root.fg
-                      font.family: root.font
-                      font.pixelSize: Style.font.title
-                      wrapMode: Text.Wrap
-                    }
+                    role: modelData.kind === "prompt" ? "me" : "agent"
+                    label: Qt.formatTime(new Date(modelData.at * 1000), "HH:mm")
+                    body: modelData.text
+                    bodyColor: modelData.kind === "question" ? Color.urgent : root.fg
                   }
                 }
 
@@ -870,43 +851,56 @@ Item {
     }
   }
 
-  // A chat line: a card tinted like the orb's bubbles, ТЫ/ОМА above the text.
-  component ChatLine: Rectangle {
+  // A chat line: a bubble tinted like the orb's ones, as wide as its text (up
+  // to 80% of the chat); mine at the right, Oma's and agents' at the left;
+  // ТЫ/ОМА (an agent's feed: the time) above the text.
+  component ChatLine: Item {
     id: chatLine
     property string role: "me"
     property string body: ""
+    property string label: (role === "me" ? root.tr("You") : root.tr("Oma")).toUpperCase()
     property color bodyColor: root.fg
     readonly property string tone: Model.tone(role)
-    readonly property color base: tone === "me" ? Color.accent : Color.foreground
-    implicitHeight: lineText.implicitHeight + Style.space(10) * 2
-    color: Qt.tint(Color.popups.background, Qt.rgba(base.r, base.g, base.b, Model.TONE_ALPHA[tone]))
-    radius: Style.cornerRadius
+    readonly property color base: tone === "me" ? Model.ME_TINT : Color.foreground
+    readonly property int pad: Style.space(10)
+    implicitHeight: bubble.height
 
-    Column {
-      id: lineText
-      x: Style.space(10)
-      y: Style.space(10)
-      width: parent.width - Style.space(10) * 2
-      spacing: Style.space(4)
+    Rectangle {
+      id: bubble
+      anchors.right: chatLine.tone === "me" ? parent.right : undefined
+      width: Math.min(parent.width * 0.8, Math.max(labelText.implicitWidth, bodyText.implicitWidth) + chatLine.pad * 2)
+      height: lineText.implicitHeight + chatLine.pad * 2
+      color: Qt.tint(Color.popups.background, Qt.rgba(chatLine.base.r, chatLine.base.g, chatLine.base.b, Math.max(0.05, Model.TONE_ALPHA[chatLine.tone])))
+      radius: Style.cornerRadius
 
-      Text {
-        textFormat: Text.PlainText
-        text: (chatLine.role === "me" ? root.tr("You") : root.tr("Oma")).toUpperCase()
-        color: root.dim
-        font.family: root.font
-        font.pixelSize: Style.font.body
-        font.bold: true
-        font.letterSpacing: 1.2
-      }
+      Column {
+        id: lineText
+        x: chatLine.pad
+        y: chatLine.pad
+        width: parent.width - chatLine.pad * 2
+        spacing: Style.space(4)
 
-      Text {
-        width: parent.width
-        textFormat: Text.PlainText
-        text: chatLine.body
-        color: chatLine.bodyColor
-        font.family: root.font
-        font.pixelSize: Style.font.title
-        wrapMode: Text.Wrap
+        Text {
+          id: labelText
+          textFormat: Text.PlainText
+          text: chatLine.label
+          color: root.dim
+          font.family: root.font
+          font.pixelSize: Style.font.body
+          font.bold: true
+          font.letterSpacing: 1.2
+        }
+
+        Text {
+          id: bodyText
+          width: parent.width
+          textFormat: Text.PlainText
+          text: chatLine.body
+          color: chatLine.bodyColor
+          font.family: root.font
+          font.pixelSize: Style.font.title
+          wrapMode: Text.Wrap
+        }
       }
     }
   }

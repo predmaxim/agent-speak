@@ -81,7 +81,7 @@ const d = { id: "draft", kind: "draft", text: "" }
 assert.deepStrictEqual(M.withDraft([{ id: "a" }, { id: "b" }, { id: "c" }], d).map(b => b.id), ["b", "c", "draft"])
 assert.strictEqual(M.withDraft([{ id: "a" }], null).length, 1)
 assert.deepStrictEqual(["me", "draft", "oma", "status", "final", "question"].map(M.tone), ["me", "me", "oma", "agent", "agent", "agent"])
-assert.deepStrictEqual(M.TONE_ALPHA, { me: 0.18, oma: 0.07, agent: 0 })
+assert.deepStrictEqual(M.TONE_ALPHA, { me: 0.22, oma: 0.07, agent: 0 })
 for (const oma of ["listening", "loading"])
   assert.strictEqual(M.escWanted(d, Object.assign({}, st, { oma }), false), true)
 for (const oma of ["off", "idle", "paused", "thinking", "speaking"])

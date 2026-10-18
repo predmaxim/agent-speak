@@ -85,7 +85,11 @@ function tone(kind) {
   return kind === "me" || kind === "draft" ? "me" : kind === "oma" ? "oma" : "agent"
 }
 
-var TONE_ALPHA = { me: 0.18, oma: 0.07, agent: 0 }
+var TONE_ALPHA = { me: 0.22, oma: 0.07, agent: 0 }
+
+// My lines' own tint, the orb's listening green: the theme's accent may be
+// grey, the foreground's shade (rules.md, the agent-speak section).
+var ME_TINT = "#6fd38c"
 
 // Esc is grabbed only while it means something: a draft Oma is still hearing
 // (listening or loading; paused means the mic is someone else's, Esc too), or
