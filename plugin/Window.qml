@@ -917,7 +917,10 @@ Item {
         Text {
           id: bodyText
           width: parent.width
-          textFormat: Text.PlainText
+          // Agents answer in Markdown: lists, headings, code keep their shape
+          // (the daemon drops ![images](…): MarkdownText would fetch them).
+          textFormat: Text.MarkdownText
+          onLinkActivated: function(link) { Qt.openUrlExternally(link) }
           text: chatLine.body
           color: chatLine.bodyColor
           font.family: root.font

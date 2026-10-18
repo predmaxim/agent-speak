@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 pub const FEED_MAX: usize = 20; // строк ленты на агента
-pub const LINE_MAX: usize = 300; // символов в строке ленты
+pub const LINE_MAX: usize = 8000; // символов в строке ленты: чат окна показывает сообщение целиком
 pub const IDLE_AFTER: u64 = 600; // с после «готово» → «простаивает»
 const STATUS_MAX: usize = 120;
 
@@ -215,8 +215,8 @@ fn history_line(l: &[u8], images: &Path) -> Option<Line> {
         }
     }
     let pics = if kind == "prompt" { save_images(content, images) } else { Vec::new() };
-    let text = plain(&text);
-    (!text.trim().is_empty() || !pics.is_empty())
+    let text = shown(&text);
+    (!text.is_empty() || !pics.is_empty())
         .then(|| Line { at: v["timestamp"].as_str().and_then(epoch).unwrap_or(0), kind, text: text.chars().take(LINE_MAX).collect(), images: pics })
 }
 
@@ -246,6 +246,29 @@ fn save_images(content: &Value, dir: &Path) -> Vec<String> {
         }
         Some(path.to_string_lossy().into_owned())
     }).collect()
+}
+
+/// Текст для чата окна: Markdown как есть (окно его рисует), без картинок-ссылок `![alt](url)` — вместо
+/// них alt: Text.MarkdownText качал бы их сам, а на загрузке картинок он падает.
+fn shown(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text.trim();
+    while let Some(i) = rest.find("![") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 2..];
+        match after.find("](").and_then(|j| after[j..].find(')').map(|k| (j, j + k))) {
+            Some((j, end)) => {
+                out.push_str(&after[..j]);
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str("![");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Служебная вставка Claude Code в виде промпта: начинается с XML-тега (`<agent-message …>`,
@@ -372,17 +395,28 @@ impl Registry {
     /// сабагента `<agent-message …>`, `<task-notification>` …) — не реплика
     /// пользователя: ход идёт, в ленту не пишем.
     /// Конец хода: лента — снова по транскрипту (живые события хуков теряют пересказ хода и пропускают
-    /// служебные вставки, история их правит). Пустая история (файла нет) ленту не трогает.
-    pub fn reload(&mut self, id: &str) {
+    /// служебные вставки, история их правит). Пустая история (файла нет) ленту не трогает. Последний ответ
+    /// (`last`, из хука Stop) Claude Code к этому моменту часто ещё не дописал в файл — такой остаётся в конце.
+    pub fn reload(&mut self, id: &str, last: &str) {
         let Some(e) = self.entries.iter_mut().find(|e| e.id == id && e.agent == "claude") else { return };
-        let h = history(Path::new(&e.transcript), &images_dir());
-        if !h.is_empty() {
-            e.feed = h;
+        let mut h = history(Path::new(&e.transcript), &images_dir());
+        if h.is_empty() {
+            return;
         }
+        let last = shown(last);
+        if !last.is_empty() && h.back().is_none_or(|l| l.text != last) {
+            if let Some(f) = e.feed.iter().rev().find(|l| l.kind == "final" && l.text == last) {
+                if h.len() == FEED_MAX {
+                    h.pop_front();
+                }
+                h.push_back(f.clone());
+            }
+        }
+        e.feed = h;
     }
 
     pub fn prompt(&mut self, id: &str, text: &str, now: u64) -> bool {
-        let text = if technical(text) { String::new() } else { plain(text) };
+        let text = if technical(text) { String::new() } else { shown(text) };
         self.event(id, "prompt", &text, State::Working, None, now)
     }
 
@@ -397,8 +431,7 @@ impl Registry {
     }
 
     pub fn finished(&mut self, id: &str, text: &str, now: u64) -> bool {
-        let text = &plain(text);
-        self.event(id, "final", text, State::Done, Some(first_sentence(text)), now)
+        self.event(id, "final", &shown(text), State::Done, Some(first_sentence(&plain(text))), now)
     }
 
     /// done старше IDLE_AFTER → idle. true — что-то изменилось.
@@ -552,6 +585,25 @@ mod tests {
     }
 
     #[test]
+    fn reload_keeps_the_last_answer_not_yet_in_the_transcript_and_markdown() {
+        let root = std::env::temp_dir().join(format!("oma-reload-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let p = root.join("t.jsonl");
+        std::fs::write(&p, r#"{"type":"user","message":{"content":"сделай"},"origin":{"kind":"human"}}"#.to_string() + "\n").unwrap();
+        let mut r = Registry::new();
+        let mut l = live("a", true);
+        l.transcript = p.clone();
+        r.sync(vec![l], 0);
+        let answer = "Готово:\n\n- **один**\n- два ![схема](http://x/y.png)";
+        r.finished("a", answer, 5);
+        r.reload("a", answer); // ответа в файле ещё нет
+        let a = r.get("a").unwrap();
+        let got: Vec<(&str, &str)> = a.feed.iter().map(|l| (l.kind, l.text.as_str())).collect();
+        assert_eq!(got, [("prompt", "сделай"), ("final", "Готово:\n\n- **один**\n- два схема")]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn title_from_transcript() {
         let root = std::env::temp_dir().join(format!("oma-title-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -605,7 +657,7 @@ mod tests {
         for i in 0..25 { r.status("a", &format!("статус {i}"), i); }
         let a = r.get("a").unwrap();
         assert_eq!((a.feed.len(), a.feed.front().unwrap().text.as_str()), (FEED_MAX, "статус 5"));
-        r.status("a", &"я".repeat(500), 30);
+        r.status("a", &"я".repeat(LINE_MAX + 100), 30);
         assert_eq!(r.get("a").unwrap().feed.back().unwrap().text.chars().count(), LINE_MAX);
     }
 
