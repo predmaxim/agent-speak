@@ -678,3 +678,12 @@ def test_ear_warm_loads_vad_once():
 
     asyncio.run(run())
     assert loads == [1]
+
+
+def test_foreign_capture_skips_own_named_stream():
+    # PipeWire не отдаёт pid у pw-record: свой поток узнаём по имени узла
+    from agent_voice.context import OWN_NODE, foreign_capture
+    from agent_voice.ear import REC_CMD
+    assert not foreign_capture([{"properties": {"node.name": OWN_NODE}}], {42})
+    assert foreign_capture([{"properties": {"node.name": "pw-record"}}], {42})
+    assert OWN_NODE in " ".join(REC_CMD)

@@ -71,12 +71,16 @@ def mic_outputs() -> list:
         return []
 
 
+# Имя узла записи Омы: PipeWire не отдаёт pid у pw-record, свой поток узнаём по нему.
+OWN_NODE = "oma-ear"
+
+
 def foreign_capture(outputs: list, own: set) -> bool:
     """Микрофон слушает не виртуальный поток чужого процесса (монитор выхода — cava, OBS — не в счёт)."""
     own = {str(x) for x in own}
     for o in outputs:
         p = o.get("properties", {})
-        if o.get("corked") or p.get("stream.monitor") == "true":
+        if o.get("corked") or p.get("stream.monitor") == "true" or p.get("node.name") == OWN_NODE:
             continue
         if p.get("node.virtual") != "true" and p.get("application.process.id") not in own:
             return True

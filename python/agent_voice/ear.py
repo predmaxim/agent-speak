@@ -6,11 +6,12 @@ import time
 
 import numpy as np
 
+from .context import OWN_NODE
 from .segment import Segmenter
 
 RATE, FRAME = 16000, 512  # 512 отсчётов = 32 мс
 # Вход по умолчанию: эхоподавление живёт в цепочке микрофона (omarchy-mic-denoise).
-REC_CMD = ["pw-record", "--rate", str(RATE), "--channels", "1", "--format", "s16", "-"]
+REC_CMD = ["pw-record", "-P", "{ node.name = " + OWN_NODE + " }", "--rate", str(RATE), "--channels", "1", "--format", "s16", "-"]
 
 
 def load_whisper():
