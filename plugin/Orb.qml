@@ -83,9 +83,9 @@ PanelWindow {
 
   mask: Region {
     Region { item: orbSlot; shape: RegionShape.Ellipse }
-    Region { item: slots.count > 0 && slots.itemAt(0).visible ? slots.itemAt(0) : null }
-    Region { item: slots.count > 1 && slots.itemAt(1).visible ? slots.itemAt(1) : null }
-    Region { item: slots.count > 2 && slots.itemAt(2).visible ? slots.itemAt(2) : null }
+    Region { item: slots.itemAt(0) && slots.itemAt(0).visible ? slots.itemAt(0) : null }
+    Region { item: slots.itemAt(1) && slots.itemAt(1).visible ? slots.itemAt(1) : null }
+    Region { item: slots.itemAt(2) && slots.itemAt(2).visible ? slots.itemAt(2) : null }
   }
 
   Item {
