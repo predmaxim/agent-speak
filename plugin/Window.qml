@@ -86,6 +86,7 @@ Item {
   // A chat on the right; its messages come back in Oma's `chat` line.
   function openChat(key) {
     if (key !== root.chatKey) { root.setKey(key); root.messages = [] }
+    root.scrollDown()
     root.send({ do: "open", key: key })
     root.showPage("main")
   }
@@ -93,6 +94,7 @@ Item {
   function newChat() {
     root.setKey("new")
     root.messages = []
+    root.scrollDown()
     root.send({ do: "new" })
     root.showPage("main")
   }
@@ -179,11 +181,30 @@ Item {
   }
 
   // To the chat's end, and kept there (chatView.follow) while the layer
-  // window gets its size and long lines wrap. Every new messages array comes
-  // here too: it resets the view to its top.
+  // window gets its size and long lines wrap.
   function scrollDown() {
     chatView.follow = true
     Qt.callLater(function() { chatView.positionViewAtEnd() })
+  }
+
+  // The open chat's new lines. A new array resets the view to its top: a
+  // following chat goes back to its end; one the user scrolled up goes back
+  // to the line at its top, as far into it, and stays scrolled up.
+  function setMessages(list) {
+    var v = chatView
+    if (v.follow) {
+      root.messages = list
+      return root.scrollDown()
+    }
+    var i = v.indexAt(0, v.contentY)
+    if (i < 0) i = v.indexAt(0, v.contentY + v.spacing)   // the gap between two lines
+    var line = i >= 0 ? v.itemAtIndex(i) : null
+    var off = v.contentY - (line ? line.y : v.originY)    // no line: in the agent's feed above them
+    root.messages = list
+    if (line) v.positionViewAtIndex(i, ListView.Beginning)
+    else v.positionViewAtBeginning()
+    v.contentY += off
+    v.returnToBounds()
   }
 
   // Shown: ask Oma for her current chat (a keyless `open` switches nothing;
@@ -202,7 +223,6 @@ Item {
       toBox.close()
     }
   }
-  onMessagesChanged: root.scrollDown()
   // The draft is the footer, not the model: it keeps the end only while the chat follows.
   onDraftChanged: if (chatView.follow) root.scrollDown()
   onRowCountChanged: if (root.cursor >= root.rowCount) root.cursor = root.rowCount - 1
@@ -213,9 +233,9 @@ Item {
       var shownChat = Model.chatFor(root.chatKey, c)
       if (!shownChat) return
       root.setKey(shownChat.key)
-      root.messages = shownChat.messages
+      root.setMessages(shownChat.messages)
     }
-    function onChatDelta(d) { if (d.key === root.chatKey) root.messages = Model.chatApply(root.messages, d) }
+    function onChatDelta(d) { if (d.key === root.chatKey) root.setMessages(Model.chatApply(root.messages, d)) }
     function onChats(list) { root.chatList = list }
   }
 
