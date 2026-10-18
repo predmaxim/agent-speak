@@ -13,7 +13,7 @@ import "I18n.js" as I18n
 // it, and clicks pass through everything but the circle and the bubbles. The
 // window is only as big as its content, so the circle's animations repaint a
 // few pixels, not the screen; while the circle is dragged the window spans
-// the free area of the screen, and the drop picks the nearest corner.
+// the free area of the screen; the drop keeps the place, near a corner it snaps.
 PanelWindow {
   id: win
 
@@ -34,13 +34,15 @@ PanelWindow {
   readonly property int spacing: Style.space(8)
   readonly property int textLines: 4   // a bubble's text beyond this is elided
 
-  // The corner from the daemon; a drop shows its corner before the daemon confirms it.
-  readonly property string saved: link.speech.orb_corner || "bottom-right"
+  // The place from the daemon ("corner,dx,dy"); a drop shows its place before the daemon confirms it.
+  readonly property string saved: link.speech.orb_pos || "bottom-right,0,0"
   property string dropped: ""
   onSavedChanged: dropped = ""
-  readonly property string corner: dropped || saved
-  readonly property bool atTop: corner.indexOf("top") === 0
-  readonly property bool atLeft: corner.indexOf("left") > 0
+  // The screen is null for a moment after a focus switch.
+  readonly property var pos: Model.parsePos(dropped || saved,
+    (screen ? screen.width : 0) - 2 * gap, (screen ? screen.height : 0) - 2 * gap, slotSize)
+  readonly property bool atTop: pos.atTop
+  readonly property bool atLeft: pos.atLeft
 
   // A drag measures the pointer from the window's anchored corner: the corner
   // window and the area-wide window of a drag share that corner, so the
@@ -54,8 +56,8 @@ PanelWindow {
   onScreenChanged: dragging = false
 
   function drop() {
-    win.dropped = Model.corner(orbSlot.x + win.slotSize / 2, orbSlot.y + win.slotSize / 2, win.width, win.height)
-    win.link.send(Model.set("orb_corner", win.dropped))
+    win.dropped = Model.place(orbSlot.x, orbSlot.y, win.width, win.height, win.slotSize, Style.space(64))
+    win.link.send(Model.set("orb_pos", win.dropped))
     win.dragging = false
   }
 
@@ -77,7 +79,13 @@ PanelWindow {
     left: win.dragging || win.atLeft
     right: win.dragging || !win.atLeft
   }
-  margins { top: win.gap; bottom: win.gap; left: win.gap; right: win.gap }
+  // Out of a drag only the two anchored edges carry the offset.
+  margins {
+    top: win.gap + (!win.dragging && win.atTop ? win.pos.dy : 0)
+    bottom: win.gap + (!win.dragging && !win.atTop ? win.pos.dy : 0)
+    left: win.gap + (!win.dragging && win.atLeft ? win.pos.dx : 0)
+    right: win.gap + (!win.dragging && !win.atLeft ? win.pos.dx : 0)
+  }
   implicitWidth: win.slotSize + (win.bubbles.length ? win.spacing + column.width : 0)
   implicitHeight: Math.max(win.slotSize, column.height)
 
@@ -92,8 +100,8 @@ PanelWindow {
     id: orbSlot
     width: win.slotSize
     height: win.slotSize
-    x: Math.max(0, Math.min(parent.width - width, (win.atLeft ? 0 : parent.width - width) + (win.dragging ? win.dragDX : 0)))
-    y: Math.max(0, Math.min(parent.height - height, (win.atTop ? 0 : parent.height - height) + (win.dragging ? win.dragDY : 0)))
+    x: Math.max(0, Math.min(parent.width - width, (win.atLeft ? win.pos.dx : parent.width - width - win.pos.dx) + (win.dragging ? win.dragDX : 0)))
+    y: Math.max(0, Math.min(parent.height - height, (win.atTop ? win.pos.dy : parent.height - height - win.pos.dy) + (win.dragging ? win.dragDY : 0)))
 
     OrbFace {
       anchors.fill: parent
@@ -104,7 +112,7 @@ PanelWindow {
     }
 
     // Left click talks, right click toggles the window; a left drag past
-    // Style.space(8) carries the circle and the drop saves the nearest corner.
+    // Style.space(8) carries the circle and the drop keeps the place.
     MouseArea {
       id: orbArea
       anchors.fill: parent
@@ -202,10 +210,17 @@ PanelWindow {
         id: slot
         required property int index
         readonly property var bubble: win.bubbles[win.atTop ? win.bubbles.length - 1 - index : index] || null
-        readonly property bool draft: bubble !== null && bubble.kind === "draft"
+        readonly property string tone: slot.bubble ? Model.tone(slot.bubble.kind) : "agent"
+        readonly property color base: tone === "me" ? Color.accent : Color.foreground
+        readonly property string shown: {
+          if (!slot.bubble) return ""
+          var t = slot.bubble.text || ""
+          if (slot.bubble.kind !== "draft" || !slot.bubble.hearing) return t
+          return t ? t + " …" : "…"
+        }
         readonly property bool faded: win.bubbles.length >= Model.BUBBLES_MAX && bubble === win.bubbles[0]
         readonly property real inner: Math.min(Style.space(360) - card.contentLeftInset - card.contentRightInset,
-          Math.max(who.implicitWidth, body.implicitWidth, draft ? send.implicitWidth : 0))
+          Math.max(who.implicitWidth, body.implicitWidth))
         visible: bubble !== null
         x: win.atLeft ? 0 : column.width - width
         width: card.width
@@ -215,7 +230,7 @@ PanelWindow {
           id: card
           width: slot.inner + contentLeftInset + contentRightInset
           height: content.implicitHeight + contentTopInset + contentBottomInset
-          color: Color.popups.background
+          color: Qt.tint(Color.popups.background, Qt.rgba(slot.base.r, slot.base.g, slot.base.b, Model.TONE_ALPHA[slot.tone]))
           borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
           padding: Style.spacing.xxl
           radius: Style.cornerRadius
@@ -230,7 +245,8 @@ PanelWindow {
           MouseArea {
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
-            onClicked: win.dismissed(slot.bubble.id)
+            // A draft is cleared by Esc or the orb, not by a click.
+            onClicked: if (slot.bubble.kind !== "draft") win.dismissed(slot.bubble.id)
           }
 
           Column {
@@ -256,23 +272,13 @@ PanelWindow {
               id: body
               width: parent.width
               textFormat: Text.PlainText
-              text: slot.bubble ? slot.bubble.text || "" : ""
+              text: slot.shown
               color: Color.popups.text
               font.family: Style.font.family
               font.pixelSize: Style.font.title
               wrapMode: Text.Wrap
               maximumLineCount: win.textLines
               elide: Text.ElideRight
-            }
-
-            Button {
-              id: send
-              visible: slot.draft
-              text: win.tr("Send")
-              fontSize: Style.font.title
-              foreground: Color.popups.text
-              bordered: true
-              onClicked: win.link.send(Model.omaCmd({ do: "send" }))
             }
           }
         }
