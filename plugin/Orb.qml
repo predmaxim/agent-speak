@@ -21,7 +21,6 @@ PanelWindow {
   property var link
   property var bubbles: []
   property bool covered: false   // Oma's window is open
-  property bool hearing: false   // Oma hears a voice
   signal dismissed(string key)
   signal windowToggled()
   signal chatOpened(string key)   // a bubble's chat: "agent:<id>", or "" for Oma's current one
@@ -128,7 +127,6 @@ PanelWindow {
     OrbFace {
       anchors.fill: parent
       mode: win.mode
-      hearing: win.hearing
       size: win.size
       line: win.line
       breathMax: win.breathMax

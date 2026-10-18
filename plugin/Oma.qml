@@ -82,7 +82,6 @@ Item {
   Plugin.Orb {
     link: link
     covered: omaWindow.shown
-    hearing: !!root.draft && !!root.draft.hearing
     bubbles: omaWindow.shown ? [] : Model.withDraft(root.bubbles, root.draft)
     onDismissed: function(key) { root.bubbles = Model.dismiss(root.bubbles, key) }
     onWindowToggled: omaWindow.toggle()
