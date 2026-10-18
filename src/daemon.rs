@@ -531,6 +531,7 @@ impl State {
     }
 
     fn bubble(&mut self, id: &str, who: &str, text: &str, kind: &str, append: bool) {
+        let text = crate::text::clean::plain(text); // разметка markdown пузырю не нужна
         let b = serde_json::json!({"bubble": {"id": id, "who": who, "text": text, "kind": kind, "append": append, "drop": false}});
         self.broadcast_line(&format!("{b}\n"));
     }

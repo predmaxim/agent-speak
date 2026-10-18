@@ -32,6 +32,25 @@ pub fn clean(raw: &str) -> String {
     out.join("\n")
 }
 
+/// Текст для показа (лента агента, пузыри): без разметки markdown, но без замен для озвучки.
+pub fn plain(raw: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_code = false;
+    for line in raw.lines() {
+        let l = line.trim();
+        if l.starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code || l.is_empty() {
+            continue;
+        }
+        let l = strip_marker(l).replace("**", "").replace("__", "").replace('`', "");
+        out.push(l.split_whitespace().collect::<Vec<_>>().join(" "));
+    }
+    out.join(" ")
+}
+
 /// Строка таблицы → «a, b, c»; разделитель |---| → None.
 fn table_row(l: &str) -> Option<String> {
     let cells: Vec<&str> = l.trim_matches('|').split('|').map(str::trim).collect();
@@ -169,6 +188,11 @@ fn end_sentence(mut l: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_strips_markdown_keeps_text() {
+        assert_eq!(plain("- **Орб** справа, `orb_corner`\n## Итог\n```\nls\n```\n1. Готово"), "Орб справа, orb_corner Итог Готово");
+    }
 
     #[test]
     fn code_block_removed() {

@@ -1,4 +1,5 @@
 //! Реестр живых агентов пользователя: кто работает, ждёт ответа или закончил; лента событий каждого.
+use crate::text::clean::plain;
 use crate::focus;
 use serde::Serialize;
 use serde_json::Value;
@@ -190,18 +191,22 @@ impl Registry {
     }
 
     pub fn prompt(&mut self, id: &str, text: &str, now: u64) -> bool {
+        let text = &plain(text);
         self.event(id, "prompt", text, State::Working, None, now)
     }
 
     pub fn status(&mut self, id: &str, text: &str, now: u64) -> bool {
+        let text = &plain(text);
         self.event(id, "status", text, State::Working, Some(text.chars().take(LINE_MAX).collect()), now)
     }
 
     pub fn question(&mut self, id: &str, text: &str, now: u64) -> bool {
+        let text = &plain(text);
         self.event(id, "question", text, State::Waiting, Some(text.chars().take(LINE_MAX).collect()), now)
     }
 
     pub fn finished(&mut self, id: &str, text: &str, now: u64) -> bool {
+        let text = &plain(text);
         self.event(id, "final", text, State::Done, Some(first_sentence(text)), now)
     }
 
