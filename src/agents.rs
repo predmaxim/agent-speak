@@ -78,9 +78,14 @@ pub fn scan_claude(sessions: &Path, projects: &Path, start_of: impl Fn(u32) -> O
             }
             let cwd = v["cwd"].as_str().unwrap_or_default().to_string();
             let name = v["name"].as_str().unwrap_or_default();
-            let title = if v["nameSource"] != "derived" && !name.is_empty() { name.to_string() } else { folder(&cwd) };
             let file = format!("{id}.jsonl");
             let transcript = dirs.iter().map(|d| d.join(&file)).find(|p| p.exists()).unwrap_or_default();
+            // имя сессии, иначе её заголовок из транскрипта (как в окне), иначе папка
+            let title = if v["nameSource"] != "derived" && !name.is_empty() {
+                name.to_string()
+            } else {
+                session_title(&transcript).unwrap_or_else(|| folder(&cwd))
+            };
             let state = match v["status"].as_str() {
                 Some("busy") => State::Working,
                 Some("waiting") => State::Waiting,
@@ -117,6 +122,47 @@ pub fn scan_all() -> Vec<Live> {
 
 /// Время старта процесса — поле 22 /proc/<pid>/stat (такты с загрузки); None — процесса нет.
 /// Имя процесса в скобках бывает с пробелами — поля считаются после последней «)».
+/// Последний заголовок сессии (`custom-title` или `ai-title`) из хвоста транскрипта: читаем с конца кусками по 64 КиБ, не больше 1 МиБ.
+// ponytail: кэш по размеру файла, если скан раз в 2 с станет заметен.
+fn session_title(transcript: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const CHUNK: u64 = 64 << 10;
+    const LIMIT: u64 = 1 << 20;
+    let mut f = std::fs::File::open(transcript).ok()?;
+    let len = f.metadata().ok()?.len();
+    let (mut pos, mut carry) = (len, Vec::new());
+    while pos > 0 && len - pos < LIMIT {
+        let start = pos.saturating_sub(CHUNK);
+        let mut buf = vec![0; (pos - start) as usize];
+        f.seek(SeekFrom::Start(start)).ok()?;
+        f.read_exact(&mut buf).ok()?;
+        buf.extend_from_slice(&carry);
+        pos = start;
+        // начало куска может быть обрезанной строкой: оставляем её для склейки со следующим куском
+        let from = if pos == 0 { 0 } else { buf.iter().position(|&b| b == b'\n').map_or(buf.len(), |i| i + 1) };
+        let found = buf[from..].split(|&b| b == b'\n').rev().find_map(line_title);
+        if found.is_some() {
+            return found;
+        }
+        buf.truncate(from);
+        carry = buf;
+    }
+    None
+}
+
+fn line_title(line: &[u8]) -> Option<String> {
+    if !(line.windows(7).any(|w| w == b"-title\"")) {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(line).ok()?;
+    let key = match v["type"].as_str()? {
+        "custom-title" => "customTitle",
+        "ai-title" => "aiTitle",
+        _ => return None,
+    };
+    v[key].as_str().filter(|t| !t.trim().is_empty()).map(str::to_string)
+}
+
 pub fn proc_start(pid: u32) -> Option<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     stat.rsplit_once(')')?.1.split_whitespace().nth(19).map(str::to_string)
@@ -308,13 +354,32 @@ mod tests {
         // pid переиспользован: у процесса с этим номером другое время старта
         std::fs::write(ss.join("5.json"), r#"{"pid":5,"sessionId":"e","cwd":"/w","kind":"interactive","entrypoint":"cli","procStart":"999"}"#).unwrap();
         std::fs::write(ss.join("6.json"), r#"{"pid":6,"sessionId":"f","cwd":"/w","kind":"interactive","entrypoint":"cli","procStart":"100"}"#).unwrap();
-        std::fs::write(pp.join("-home-u-Work/a.jsonl"), "").unwrap();
+        std::fs::write(pp.join("-home-u-Work/a.jsonl"), "{\"type\":\"ai-title\",\"aiTitle\":\"Скилл GitGuardian\"}\n").unwrap();
         let got = scan_claude(&ss, &pp, |pid| (pid != 4).then(|| "100".to_string()));
         let mut ids: Vec<(String, String)> = got.iter().map(|l| (l.id.clone(), l.title.clone())).collect();
         ids.sort();
-        assert_eq!(ids, [("a".into(), "Work".into()), ("b".into(), "Почтовый клиент".into()), ("f".into(), "w".into())]);
+        assert_eq!(ids, [("a".into(), "Скилл GitGuardian".into()), ("b".into(), "Почтовый клиент".into()), ("f".into(), "w".into())]);
         assert!(proc_start(std::process::id()).is_some_and(|s| s.parse::<u64>().is_ok()));
         assert!(got.iter().find(|l| l.id == "a").unwrap().transcript.ends_with("-home-u-Work/a.jsonl"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn title_from_transcript() {
+        let root = std::env::temp_dir().join(format!("oma-title-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let p = root.join("t.jsonl");
+        let junk = "{\"type\":\"assistant\",\"x\":\"юникод\"}\n".repeat(10_000);
+        let mut text = format!("{{\"type\":\"ai-title\",\"aiTitle\":\"Старое\"}}\n{junk}");
+        text += &format!("{{\"type\":\"ai-title\",\"aiTitle\":\"Скилл GitGuardian\"}}\n{junk}");
+        std::fs::write(&p, &text).unwrap();
+        assert_eq!(session_title(&p).as_deref(), Some("Скилл GitGuardian"));
+        text += "{\"type\":\"custom-title\",\"customTitle\":\"мой\"}\n";
+        std::fs::write(&p, &text).unwrap();
+        assert_eq!(session_title(&p).as_deref(), Some("мой"));
+        std::fs::write(&p, &junk).unwrap();
+        assert_eq!(session_title(&p), None);
+        assert_eq!(session_title(&root.join("нет.jsonl")), None);
         let _ = std::fs::remove_dir_all(root);
     }
 
