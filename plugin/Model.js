@@ -25,11 +25,12 @@ function parseLine(line) {
   return null
 }
 
-// What the orb shows, by priority.
+// What the orb shows, by priority. Oma down is "off", yet a waiting agent still shows.
 function orbMode(st) {
   if (!st || !st.running) return "off"
   if (["loading", "listening", "thinking", "speaking", "paused"].indexOf(st.oma) >= 0) return st.oma
   if (st.waiting > 0) return "waiting"
+  if (st.oma === "off") return "off"
   return st.quiet ? "quiet" : "idle"
 }
 
@@ -67,9 +68,10 @@ function pushBubble(stack, b, now) {
   return rest.concat([nb]).slice(-BUBBLES_MAX)
 }
 
-// Everything goes once the newest bubble is old enough; quiet mode keeps them.
+// Everything goes once the newest bubble is old enough; quiet mode keeps them,
+// and so does a draft: its Send button must not vanish while the user thinks.
 function expire(stack, now, quiet) {
-  if (quiet || !stack.length) return stack
+  if (quiet || !stack.length || stack.some(function(b) { return b.kind === "draft" })) return stack
   var last = Math.max.apply(null, stack.map(function(b) { return b.at }))
   return now - last >= BUBBLE_TTL ? [] : stack
 }
