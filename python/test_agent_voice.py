@@ -3,7 +3,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 from agent_voice.segment import Segmenter
 from agent_voice.chunker import Chunker
-from agent_voice.conversation import Conversation
+from agent_voice.conversation import Conversation, SEND_PAUSE, SILENCE_END
 
 
 def feed(seg, probs):
@@ -45,33 +45,135 @@ def test_chunker_newline_ends_sentence():
     assert c.feed("Первая строка достаточно длинная\nвторая") == ["Первая строка достаточно длинная"]
 
 
-def test_talk_draft_send():
-    cv = Conversation()
-    assert cv.talk() == [("ear", True), ("state", "listening")]
-    assert cv.phrase("какая погода") == [("draft", "какая погода")]
-    assert cv.phrase("в Москве") == [("draft", "какая погода в Москве")]
-    assert cv.talk() == [("drop_draft",), ("ear", False), ("send", "какая погода в Москве"), ("state", "thinking")]
+class Clock:
+    t = 0.0
+
+    def __call__(self):
+        return self.t
 
 
-def test_talk_without_draft_cancels():
-    cv = Conversation()
-    cv.talk()
-    assert cv.talk() == [("drop_draft",), ("ear", False), ("state", "idle")]
+def _conv():
+    clk = Clock()
+    return clk, Conversation(clock=clk)
 
 
-def test_answer_shown_and_said_then_idle():
-    cv = Conversation()
-    cv.talk(); cv.phrase("вопрос тут"); cv.send()
+def _ask_answer(clk, cv):
+    """В разговоре: вопрос → пауза → отправка → ответ звучит."""
+    cv.talk(); cv.phrase("вопрос тут", 1)
+    clk.t += SEND_PAUSE; cv.tick()
+    cv.delta("Солнечно, плюс двадцать градусов. ")
+    cv.audio(True)
+
+
+def test_talk_listens_and_pause_sends():
+    clk, cv = _conv()
+    assert cv.talk() == [("ear", True), ("state", "listening")] and cv.active
+    assert cv.speech_start(1) == [("draft", "", True)]
+    assert cv.phrase("какая погода", 1) == [("draft", "какая погода", False)]
+    clk.t += 1.0; assert cv.tick() == []
+    assert cv.speech_start(2) == [("draft", "какая погода", True)]
+    clk.t += 5; assert cv.tick() == []                      # пока слышит — не отправляет
+    assert cv.phrase("в Москве", 2) == [("draft", "какая погода в Москве", False)]
+    clk.t += SEND_PAUSE
+    assert cv.tick() == [("drop_draft",), ("send", "какая погода в Москве"), ("state", "thinking")]
+
+
+def test_answer_then_listens_again():
+    clk, cv = _conv()
+    cv.talk(); cv.phrase("вопрос тут", 1)
+    clk.t += SEND_PAUSE; cv.tick()
+    assert cv.state == "thinking"
     acts = cv.delta("Солнечно, плюс двадцать градусов. ")
     assert ("show", "Солнечно, плюс двадцать градусов.") in acts and ("say", "Солнечно, плюс двадцать градусов.") in acts
     assert acts[-1] == ("state", "speaking")
     cv.audio(True)
     assert cv.done() == []
-    assert cv.audio(False) == [("state", "idle")]
+    assert cv.audio(False) == [("state", "listening")] and cv.active
+
+
+def test_click_while_listening_ends_and_drops_draft():
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1); cv.phrase("черновик тут", 1)
+    assert cv.talk() == [("drop_draft",), ("ear", False), ("state", "idle")] and not cv.active
+
+
+def test_click_while_speaking_interrupts_and_listens():
+    clk, cv = _conv()
+    _ask_answer(clk, cv)
+    assert cv.talk() == [("stop",), ("interrupt",), ("state", "listening")]
+
+
+def test_click_while_speaking_typed_answer_starts_conversation():
+    clk, cv = _conv()
+    cv.ask("расскажи"); cv.delta("Длинный ответ про всё сразу. "); cv.audio(True)
+    assert cv.talk() == [("stop",), ("interrupt",), ("ear", True), ("state", "listening")] and cv.active
+
+
+def test_cancel_drops_phrase_in_flight():
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1); cv.phrase("раз два", 1); cv.speech_start(2)
+    assert cv.cancel() == [("drop_draft",)]
+    assert cv.phrase("три четыре", 2) == []                 # распознано после отмены
+    assert cv.speech_start(3) == [("draft", "", True)]
+    assert cv.phrase("пять шесть", 3) == [("draft", "пять шесть", False)]
+    cv.cancel(); assert cv.cancel() == []                    # отменять нечего
+
+
+def test_silence_ends_conversation():
+    clk, cv = _conv()
+    cv.talk(); clk.t += SILENCE_END - 0.1; assert cv.tick() == []
+    clk.t += 0.2; assert cv.tick() == [("ear", False), ("state", "idle")]
+    assert cv.end() == []
+
+
+def test_silence_not_counted_while_hearing_or_answering():
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1); clk.t += 60; assert cv.tick() == []
+    cv.phrase("вопрос тут", 1); clk.t += SEND_PAUSE; cv.tick()  # → thinking
+    clk.t += 60; assert cv.tick() == []
+    cv.done(); clk.t += SILENCE_END - 1; assert cv.tick() == []  # счёт — заново с «слушаю»
+
+
+def test_end_stops_turn():
+    clk, cv = _conv()
+    cv.talk(); cv.phrase("вопрос тут", 1)
+    clk.t += SEND_PAUSE; cv.tick()
+    assert cv.end() == [("interrupt",), ("ear", False), ("state", "idle")]
+
+
+def test_phrase_after_end_dropped():
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1); cv.talk()
+    assert cv.phrase("поздно уже", 1) == [] and cv.draft == ""
+
+
+def test_voice_barge_in():
+    clk, cv = _conv()
+    cv.talk(); cv.phrase("вопрос тут", 1)
+    clk.t += SEND_PAUSE; cv.tick()
+    cv.delta("Сборка идёт уже десять минут. "); cv.audio(True)
+    assert cv.speech_start(2) == [("stop",), ("interrupt",), ("state", "listening"), ("draft", "", True)]
+
+
+def test_mic_busy_clears_hearing():
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1)
+    assert cv.mic_busy(True) == [("state", "paused"), ("drop_draft",)]
+    assert cv.phrase("это для voxtype", 1) == []
+    assert cv.mic_busy(False) == [("state", "listening")]
+    clk.t += SILENCE_END; assert cv.tick() == [("ear", False), ("state", "idle")]
+
+
+def test_ask_in_conversation_keeps_listening():
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1); cv.phrase("черновик тут", 1)
+    assert cv.ask("который час") == [("drop_draft",), ("send", "который час"), ("state", "thinking")]
+    cv.delta("Сейчас ровно три часа дня. "); cv.audio(True); cv.done(); cv.audio(False)
+    assert cv.state == "listening" and cv.active
 
 
 def test_quiet_shows_without_saying():
-    cv = Conversation()
+    clk, cv = _conv()
     cv.set_quiet(True)
     cv.ask("который час")
     acts = cv.delta("Сейчас ровно три часа дня. ")
@@ -79,56 +181,18 @@ def test_quiet_shows_without_saying():
     assert cv.done() == [("state", "idle")]
 
 
-def test_dialog_sends_each_phrase_and_barges_in():
-    cv = Conversation()
-    assert cv.set_dialog(True) == [("ear", True), ("state", "listening")]
-    assert cv.talk() == []  # клик в диалоге — перебивание, а обрывать нечего
-    assert cv.phrase("как дела у почты") == [("send", "как дела у почты"), ("state", "thinking")]
-    cv.delta("Почта ждёт твоего ответа сейчас. ")
-    cv.audio(True)
-    assert cv.speech_start() == [("stop",), ("interrupt",), ("state", "listening")]
-    assert cv.set_dialog(False) == [("ear", False), ("state", "idle")]
+def test_short_phrases_dropped():
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1)
+    assert cv.phrase(" а ", 1) == [("drop_draft",)] and cv.ask("ж") == []
 
 
-def test_click_while_speaking_interrupts_and_listens():
-    cv = Conversation()
-    cv.ask("расскажи")
-    cv.delta("Длинный ответ про всё сразу. ")
-    cv.audio(True)
-    assert cv.talk() == [("stop",), ("interrupt",), ("ear", True), ("state", "listening")]
-
-
-def test_click_in_dialog_barges_in():
-    cv = Conversation()
-    cv.set_dialog(True)
-    cv.phrase("расскажи про почту")
-    assert cv.talk() == [("interrupt",), ("state", "listening")]  # думает — ход оборван
-    cv.phrase("тогда про сборку")
-    cv.delta("Сборка идёт уже десять минут. ")
-    cv.audio(True)
-    assert cv.talk() == [("stop",), ("interrupt",), ("state", "listening")]  # говорит — звук и ход оборваны
-    assert cv.dialog and cv.delta("хвост ответа здесь. ") == []
-
-
-def test_statuses_audio_does_not_end_draft():
-    cv = Conversation()
-    cv.talk(); cv.phrase("подожди")
+def test_status_audio_does_not_end_draft():
+    clk, cv = _conv()
+    cv.talk(); cv.phrase("подожди", 1)
     assert cv.audio(True) == [] and cv.audio(False) == []
     assert (cv.state, cv.draft) == ("listening", "подожди")
 
-
-def test_mic_busy_pauses_listening():
-    cv = Conversation()
-    cv.set_dialog(True)
-    assert cv.mic_busy(True) == [("state", "paused")]
-    assert cv.phrase("это для voxtype") == []
-    assert cv.mic_busy(False) == [("state", "listening")]
-
-
-def test_short_phrases_dropped():
-    cv = Conversation()
-    cv.talk()
-    assert cv.phrase(" а ") == [] and cv.ask("ж") == []
 
 import json
 import asyncio
@@ -280,24 +344,6 @@ def test_on_ac_usb_counts(tmp_path):
         (tmp_path / n / "type").write_text(typ)
         (tmp_path / n / "online").write_text(on)
     assert on_ac(str(tmp_path))
-
-
-def test_ask_from_talk_listening_closes_ear():
-    cv = Conversation()
-    cv.talk(); cv.phrase("черновик тут")
-    acts = cv.ask("который час")
-    assert ("ear", False) in acts
-    cv.delta("Сейчас ровно три часа дня. ")
-    cv.audio(True); cv.done()
-    cv.audio(False)
-    assert cv.state == "idle"
-
-
-def test_click_stops_status_audio_and_keeps_draft():
-    cv = Conversation()
-    cv.talk(); cv.phrase("подожди меня"); cv.audio(True)
-    acts = cv.talk()
-    assert acts[0] == ("stop",) and ("send", "подожди меня") in acts
 
 
 from agent_voice.ear import Whisper
