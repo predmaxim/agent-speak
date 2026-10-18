@@ -44,10 +44,13 @@ PanelWindow {
   readonly property bool atTop: pos.atTop
   readonly property bool atLeft: pos.atLeft
 
-  // A drag measures the pointer from the window's anchored corner: the corner
-  // window and the area-wide window of a drag share that corner, so the
-  // numbers hold across the resize, wherever the bar's zone puts the area.
+  // A drag measures the pointer from the drag area's corner: at rest the
+  // window sits pos.dx/dy off that corner, so fromCorner adds the offset back
+  // and the numbers hold across the resize, wherever the bar's zone puts the area.
   property bool dragging: false
+  // The offset lives in the slot only during a drag; at rest the margins carry it.
+  readonly property real ox: dragging ? pos.dx : 0
+  readonly property real oy: dragging ? pos.dy : 0
   property real dragDX: 0   // the pointer's way from the press
   property real dragDY: 0
   property bool tipShown: false
@@ -100,8 +103,8 @@ PanelWindow {
     id: orbSlot
     width: win.slotSize
     height: win.slotSize
-    x: Math.max(0, Math.min(parent.width - width, (win.atLeft ? win.pos.dx : parent.width - width - win.pos.dx) + (win.dragging ? win.dragDX : 0)))
-    y: Math.max(0, Math.min(parent.height - height, (win.atTop ? win.pos.dy : parent.height - height - win.pos.dy) + (win.dragging ? win.dragDY : 0)))
+    x: Math.max(0, Math.min(parent.width - width, (win.atLeft ? win.ox : parent.width - width - win.ox) + (win.dragging ? win.dragDX : 0)))
+    y: Math.max(0, Math.min(parent.height - height, (win.atTop ? win.oy : parent.height - height - win.oy) + (win.dragging ? win.dragDY : 0)))
 
     OrbFace {
       anchors.fill: parent
@@ -124,7 +127,9 @@ PanelWindow {
 
       function fromCorner(mouse) {
         var p = orbArea.mapToItem(null, mouse.x, mouse.y)
-        return Qt.point(win.atLeft ? p.x : p.x - win.width, win.atTop ? p.y : p.y - win.height)
+        var rx = win.dragging ? 0 : win.pos.dx   // the window's offset from the area corner
+        var ry = win.dragging ? 0 : win.pos.dy
+        return Qt.point(win.atLeft ? p.x + rx : p.x - win.width - rx, win.atTop ? p.y + ry : p.y - win.height - ry)
       }
 
       onContainsMouseChanged: {
