@@ -25,6 +25,9 @@ pub struct Line {
     pub at: u64,
     pub kind: &'static str, // prompt | status | question | final
     pub text: String,
+    /// Картинки промпта (скриншоты) — файлы в кэше, см. `images_dir`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -158,10 +161,10 @@ fn session_title(transcript: &Path) -> Option<String> {
 
 /// История агента для ленты — последние FEED_MAX реплик транскрипта Claude: промпты пользователя, тексты
 /// агента и пересказ его хода. Хвост транскрипта, не дальше 16 МиБ (там и тяжёлые строки запросов к API).
-pub fn history(transcript: &Path) -> VecDeque<Line> {
+pub fn history(transcript: &Path, images: &Path) -> VecDeque<Line> {
     let mut lines = VecDeque::new();
     tail_lines(transcript, 16 << 20, |l| {
-        if let Some(line) = history_line(l) {
+        if let Some(line) = history_line(l, images) {
             lines.push_front(line);
         }
         lines.len() >= FEED_MAX
@@ -172,7 +175,7 @@ pub fn history(transcript: &Path) -> VecDeque<Line> {
 /// Реплика транскрипта: промпт пользователя — только набранный человеком (`origin.kind` = human; у старых
 /// записей без `origin` — не isMeta, без тега в начале), без тела навыков, сообщений других сессий
 /// (`<agent-message>`), `<task-notification>`, подписей картинок; текст агента — его блоки `text`.
-fn history_line(l: &[u8]) -> Option<Line> {
+fn history_line(l: &[u8], images: &Path) -> Option<Line> {
     let has = |pat: &[u8]| l.windows(pat.len()).any(|w| w == pat);
     if !(has(b"\"type\":\"user\"") || has(b"\"type\":\"assistant\"") || has(b"\"queued_command\"")) {
         return None;
@@ -211,8 +214,38 @@ fn history_line(l: &[u8]) -> Option<Line> {
             return None;
         }
     }
+    let pics = if kind == "prompt" { save_images(content, images) } else { Vec::new() };
     let text = plain(&text);
-    (!text.trim().is_empty()).then(|| Line { at: v["timestamp"].as_str().and_then(epoch).unwrap_or(0), kind, text: text.chars().take(LINE_MAX).collect() })
+    (!text.trim().is_empty() || !pics.is_empty())
+        .then(|| Line { at: v["timestamp"].as_str().and_then(epoch).unwrap_or(0), kind, text: text.chars().take(LINE_MAX).collect(), images: pics })
+}
+
+/// Кэш картинок промптов: `$XDG_CACHE_HOME/agent-speak/images` (по умолчанию `~/.cache/…`).
+// ponytail: кэш не чистится — скриншоты по сотне КиБ; чистить по возрасту, если разрастётся.
+pub fn images_dir() -> PathBuf {
+    let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"));
+    cache.join("agent-speak/images")
+}
+
+/// Картинки base64 из блоков промпта — в файлы `<хеш данных>.<тип>` (уже записанный не пишется заново); пути.
+fn save_images(content: &Value, dir: &Path) -> Vec<String> {
+    use base64::Engine;
+    use std::hash::{Hash, Hasher};
+    let Some(blocks) = content.as_array() else { return Vec::new() };
+    blocks.iter().filter(|b| b["type"] == "image" && b["source"]["type"] == "base64").filter_map(|b| {
+        let data = b["source"]["data"].as_str()?;
+        let ext = b["source"]["media_type"].as_str()?.strip_prefix("image/")?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        data.hash(&mut h);
+        let path = dir.join(format!("{:016x}.{ext}", h.finish()));
+        if !path.exists() {
+            let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+            std::fs::create_dir_all(dir).ok()?;
+            std::fs::write(&path, bytes).ok()?;
+        }
+        Some(path.to_string_lossy().into_owned())
+    }).collect()
 }
 
 /// Служебная вставка Claude Code в виде промпта: начинается с XML-тега (`<agent-message …>`,
@@ -302,7 +335,7 @@ impl Registry {
                     id: l.id, agent: l.agent, title: l.title, project: folder(&l.cwd), cwd: l.cwd, transcript,
                     state: l.state, status: String::new(), since: now, focused: false, heard: false,
                     // агент впервые на глазах (и после перезапуска демона): лента начинается с его истории
-                    feed: if l.agent == "claude" { history(&l.transcript) } else { VecDeque::new() },
+                    feed: if l.agent == "claude" { history(&l.transcript, &images_dir()) } else { VecDeque::new() },
                 });
             }
         }
@@ -331,7 +364,7 @@ impl Registry {
         if e.feed.len() == FEED_MAX {
             e.feed.pop_front();
         }
-        e.feed.push_back(Line { at: now, kind, text: text.chars().take(LINE_MAX).collect() });
+        e.feed.push_back(Line { at: now, kind, text: text.chars().take(LINE_MAX).collect(), images: Vec::new() });
         true
     }
 
@@ -342,7 +375,7 @@ impl Registry {
     /// служебные вставки, история их правит). Пустая история (файла нет) ленту не трогает.
     pub fn reload(&mut self, id: &str) {
         let Some(e) = self.entries.iter_mut().find(|e| e.id == id && e.agent == "claude") else { return };
-        let h = history(Path::new(&e.transcript));
+        let h = history(Path::new(&e.transcript), &images_dir());
         if !h.is_empty() {
             e.feed = h;
         }
@@ -497,17 +530,24 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Готово."}]}}"#.into(),
             r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"сабагент"}]}}"#.into(),
             r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"посреди хода","commandMode":"prompt","origin":{"kind":"human"}}}"#.into(),
-            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":[{"type":"text","text":"с картинкой"},{"type":"image"}],"origin":{"kind":"human"}}}"#.into(),
+            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":[{"type":"text","text":"с картинкой"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0K"}}],"origin":{"kind":"human"}}}"#.into(),
             r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification>x</task-notification>","origin":{"kind":"task-notification"}}}"#.into(),
             r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"<agent-message from=\"a\">отчёт","origin":{"kind":"peer"},"isMeta":true}}"#.into(),
             r#"{"type":"api-request-blob","x":"user"}"#.into(),
         ];
         std::fs::write(&p, lines.join("\n") + "\n").unwrap();
-        let h: Vec<(&str, String)> = history(&p).into_iter().map(|l| (l.kind, l.text)).collect();
+        let pics = root.join("img");
+        let all = history(&p, &pics);
+        let h: Vec<(&str, String)> = all.iter().map(|l| (l.kind, l.text.clone())).collect();
         assert_eq!(h, [("prompt", "сделай орб".to_string()), ("prompt", "старый промпт".into()), ("prompt", "[Image #3] это не мои".into()),
             ("status", "Демон в порядке.".into()), ("status", "Готово.".into()), ("prompt", "посреди хода".into()), ("prompt", "с картинкой".into())]);
-        assert_eq!(history_line(lines[0].as_bytes()).unwrap().at, 1_792_329_276);
-        assert!(history(&root.join("нет.jsonl")).is_empty());
+        assert_eq!(history_line(lines[0].as_bytes(), &pics).unwrap().at, 1_792_329_276);
+        assert!(history(&root.join("нет.jsonl"), &pics).is_empty());
+        // картинка промпта — файлом в кэше, тот же файл при повторном чтении
+        let img = &all.back().unwrap().images;
+        assert_eq!(img.len(), 1);
+        assert_eq!(std::fs::read(&img[0]).unwrap(), b"\x89PNG\r\n");
+        assert_eq!(&history(&p, &pics).back().unwrap().images, img);
         let _ = std::fs::remove_dir_all(root);
     }
 

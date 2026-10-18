@@ -596,6 +596,7 @@ Item {
                     role: modelData.kind === "prompt" ? "me" : "agent"
                     label: Qt.formatTime(new Date(modelData.at * 1000), "HH:mm")
                     body: modelData.text
+                    images: modelData.images || []
                     bodyColor: modelData.kind === "question" ? Color.urgent : root.fg
                   }
                 }
@@ -853,13 +854,15 @@ Item {
 
   // A chat line: a bubble tinted like the orb's ones, as wide as its text (up
   // to 80% of the chat); mine at the right, Oma's and agents' at the left;
-  // ТЫ/ОМА (an agent's feed: the time) above the text.
+  // ТЫ/ОМА (an agent's feed: the time) above the text, screenshots below it
+  // (such a bubble is as wide as it may be).
   component ChatLine: Item {
     id: chatLine
     property string role: "me"
     property string body: ""
     property string label: (role === "me" ? root.tr("You") : root.tr("Oma")).toUpperCase()
     property color bodyColor: root.fg
+    property var images: []   // screenshots of the prompt: files in the daemon's cache
     readonly property string tone: Model.tone(role)
     readonly property color base: tone === "me" ? Model.ME_TINT : Color.foreground
     readonly property int pad: Style.space(10)
@@ -868,7 +871,7 @@ Item {
     Rectangle {
       id: bubble
       anchors.right: chatLine.tone === "me" ? parent.right : undefined
-      width: Math.min(parent.width * 0.8, Math.max(labelText.implicitWidth, bodyText.implicitWidth) + chatLine.pad * 2)
+      width: chatLine.images.length ? parent.width * 0.8 : Math.min(parent.width * 0.8, Math.max(labelText.implicitWidth, bodyText.implicitWidth) + chatLine.pad * 2)
       height: lineText.implicitHeight + chatLine.pad * 2
       color: Qt.tint(Color.popups.background, Qt.rgba(chatLine.base.r, chatLine.base.g, chatLine.base.b, Math.max(0.05, Model.TONE_ALPHA[chatLine.tone])))
       radius: Style.cornerRadius
@@ -900,6 +903,35 @@ Item {
           font.family: root.font
           font.pixelSize: Style.font.title
           wrapMode: Text.Wrap
+          visible: text !== ""
+        }
+
+        // Thumbnails; a click opens the picture in the default viewer.
+        Flow {
+          id: pics
+          width: parent.width
+          spacing: Style.space(6)
+          visible: chatLine.images.length > 0
+
+          Repeater {
+            model: chatLine.images
+
+            Image {
+              required property string modelData
+              height: Style.space(120)
+              width: Math.min(pics.width, implicitWidth * height / Math.max(1, implicitHeight))
+              sourceSize.height: height * 2
+              fillMode: Image.PreserveAspectFit
+              asynchronous: true
+              source: "file://" + modelData
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: Qt.openUrlExternally("file://" + parent.modelData)
+              }
+            }
+          }
         }
       }
     }
