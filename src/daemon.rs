@@ -66,6 +66,7 @@ struct Status<'a> {
     quiet_from: &'a str,
     quiet_to: &'a str,
     orb_pos: &'a str,
+    orb_over_fullscreen: bool,
     waiting: usize,
 }
 
@@ -480,6 +481,7 @@ impl State {
             quiet_from: &self.cfg.quiet_from,
             quiet_to: &self.cfg.quiet_to,
             orb_pos: &self.cfg.orb_pos,
+            orb_over_fullscreen: self.cfg.orb_over_fullscreen,
             waiting: self.registry.waiting(),
         };
         format!("{}\n", serde_json::to_string(&st).unwrap())
@@ -532,9 +534,15 @@ impl State {
         self.push_agents();
     }
 
-    fn bubble(&mut self, id: &str, who: &str, text: &str, kind: &str, append: bool) {
+    /// Пузырь агента session (по нему окно открывает чат агента); единственный агент
+    /// в фокусе пузырей не даёт — пользователь и так смотрит на него.
+    fn bubble(&mut self, session: &str, id: &str, who: &str, text: &str, kind: &str, append: bool) {
+        let alone = self.registry.only().is_some_and(|e| e.id == session);
+        if alone && self.focused().is_some_and(|f| f.id == session) {
+            return;
+        }
         let text = crate::text::clean::plain(text); // разметка markdown пузырю не нужна
-        let b = serde_json::json!({"bubble": {"id": id, "who": who, "text": text, "kind": kind, "append": append, "drop": false}});
+        let b = serde_json::json!({"bubble": {"id": id, "agent": session, "who": who, "text": text, "kind": kind, "append": append, "drop": false}});
         self.broadcast_line(&format!("{b}\n"));
     }
 
@@ -548,10 +556,10 @@ impl State {
         self.registry.finished(session, last, (self.now_secs)());
         let Some(who) = self.who(session) else { return };
         if !self.is_active(session) {
-            self.bubble(&format!("f-{session}"), &who, "готово", "final", false);
+            self.bubble(session, &format!("f-{session}"), &who, "готово", "final", false);
         } else if !rest.is_empty() {
             self.seq += 1;
-            self.bubble(&format!("r-{}", self.seq), &who, &rest.join(" "), "status", false);
+            self.bubble(session, &format!("r-{}", self.seq), &who, &rest.join(" "), "status", false);
         }
     }
 
@@ -896,7 +904,7 @@ impl State {
                     let text = claude::last_question(&tail).map_or(msg, |q| format!("вопрос: {q}"));
                     self.registry.question(&session, &text, now);
                     if let Some(who) = self.who(&session) {
-                        self.bubble(&format!("q-{session}"), &who, &text, "question", false);
+                        self.bubble(&session, &format!("q-{session}"), &who, &text, "question", false);
                     }
                 }
             }
@@ -913,7 +921,7 @@ impl State {
                 for s in self.asm.push(&ev) {
                     self.registry.status(&ev.session, &s, now);
                     if let Some(who) = &who {
-                        self.bubble(&ev.message_id, who, &s, "status", true);
+                        self.bubble(&ev.session, &ev.message_id, who, &s, "status", true);
                     }
                     if speak {
                         self.enqueue_msg(Agent::Claude, &ev.session, &s, Kind::Status, &ev.message_id, true);
@@ -973,7 +981,7 @@ impl State {
                 self.registry.status(&id, &b.text, now);
                 if let Some(who) = &who {
                     self.seq += 1;
-                    self.bubble(&format!("r-{}", self.seq), who, &b.text, "status", false);
+                    self.bubble(&id, &format!("r-{}", self.seq), who, &b.text, "status", false);
                 }
                 if speak {
                     self.enqueue_new(agent.clone(), &id, &b.text, Kind::Status);
@@ -1090,7 +1098,7 @@ mod tests {
         let st = test_state();
         assert_eq!(
             st.status_line(),
-            "{\"running\":true,\"speaking\":false,\"paused\":false,\"read_intermediate\":true,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"waiting\":0}\n"
+            "{\"running\":true,\"speaking\":false,\"paused\":false,\"read_intermediate\":true,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0}\n"
         );
     }
 
@@ -1952,6 +1960,21 @@ mod tests {
         assert_eq!(b.len(), 1);
         assert_eq!((b[0]["who"].as_str(), b[0]["kind"].as_str(), b[0]["append"].as_bool()), (Some("T-s1"), Some("status"), Some(true)));
         assert!(st.registry.get("s2").unwrap().feed.iter().any(|l| l.text.contains("Читаю план")));
+    }
+
+    #[test]
+    fn lone_focused_agent_gives_no_bubbles() {
+        let (mut st, env) = env_state();
+        with_agents(&mut st, &["s1"]);
+        at(&mut st, &env, Some("s1"), 0);
+        let mut r = sub(&mut st);
+        md(&mut st, "s1", "Запускаю тесты. ");
+        st.on_hook("notification", &serde_json::json!({"session_id": "s1", "message": "Claude needs your permission to use Bash", "cwd": "/p/s1"}));
+        assert!(bubbles(&mut r).is_empty());
+        at(&mut st, &env, None, 1); // фокус ушёл на не-агента: s1 остаётся активной
+        md(&mut st, "s1", "Тесты прошли. ");
+        let b = bubbles(&mut r);
+        assert_eq!((b.len(), b[0]["agent"].as_str()), (1, Some("s1")));
     }
 
     #[test]

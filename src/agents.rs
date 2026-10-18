@@ -218,6 +218,11 @@ impl Registry {
         changed
     }
 
+    /// Единственный агент, если он один.
+    pub fn only(&self) -> Option<&Entry> {
+        if let [e] = self.entries.as_slice() { Some(e) } else { None }
+    }
+
     pub fn get(&self, id: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.id == id)
     }

@@ -21,12 +21,15 @@ pub struct Config {
     pub agents_voice: bool,
     /// позиция орба: "<угол>,<dx>,<dy>", см. valid_pos
     pub orb_pos: String,
+    /// орб и пузыри — и над полноэкранными окнами (слой Overlay), иначе под ними (Top)
+    pub orb_over_fullscreen: bool,
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config { speaker: "xenia".into(), rate: "medium".into(), max_age_secs: 30, read_intermediate: true,
-            quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: false, orb_pos: "bottom-right,0,0".into() }
+            quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: false, orb_pos: "bottom-right,0,0".into(),
+            orb_over_fullscreen: true }
     }
 }
 
@@ -87,6 +90,7 @@ impl Config {
             "quiet_override" if ["", "on", "off"].contains(&s) => self.quiet_override = s.into(),
             "agents_voice" if value.is_boolean() => self.agents_voice = value.as_bool().unwrap(),
             "orb_pos" if valid_pos(s) => self.orb_pos = s.into(),
+            "orb_over_fullscreen" if value.is_boolean() => self.orb_over_fullscreen = value.as_bool().unwrap(),
             _ => return false,
         }
         true
@@ -162,6 +166,7 @@ mod tests {
         }
         assert!(c.set("agents_voice", &json!(true)) && c.agents_voice);
         assert!(!c.set("agents_voice", &json!("true")));
+        assert!(c.orb_over_fullscreen && c.set("orb_over_fullscreen", &json!(false)) && !c.orb_over_fullscreen);
         assert!(!c.set("orb_corner", &json!("top-left")));
     }
 
