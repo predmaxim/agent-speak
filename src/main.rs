@@ -24,7 +24,7 @@ fn main() {
         Some("read") => Msg::Read,
         Some("stop") => Msg::Stop,
         Some("pause") => Msg::Pause,
-        Some("voice") => Msg::Oma { action: serde_json::json!({"do": "dialog"}) },
+        Some("voice") => Msg::Oma { action: serde_json::json!({"do": "talk"}) },
         Some("hook") => {
             // вложенные вызовы моделей словаря не должны озвучиваться
             if std::env::var_os("AGENT_SPEAK").is_some() {

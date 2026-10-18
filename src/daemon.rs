@@ -59,12 +59,13 @@ struct Status<'a> {
     rate: &'a str,
     project: &'a str,
     oma: &'a str,
-    dialog: bool,
+    talking: bool,
+    agents_voice: bool,
     quiet: bool,
     quiet_schedule: bool,
     quiet_from: &'a str,
     quiet_to: &'a str,
-    orb_corner: &'a str,
+    orb_pos: &'a str,
     waiting: usize,
 }
 
@@ -74,7 +75,7 @@ struct Oma {
     child: Option<Child>,
     stdin: Option<ChildStdin>,
     state: String,
-    dialog: bool,              // постоянный диалог: статусы и финалы агентов звучат
+    talking: bool,             // идёт разговор с Омой (для окна)
     retry_at: Option<Instant>, // упала или не запустилась — когда поднять
     failing: bool,             // запуск не удаётся: в журнал — только первая ошибка подряд
     started: Option<Instant>,  // когда запущена нынешняя
@@ -82,12 +83,12 @@ struct Oma {
 }
 
 /// Что звучит: тихий режим глушит всё, кроме чтения по хоткею и образца голоса;
-/// статусы и финалы агентов — только в постоянном диалоге; срочное и ответы Омы — всегда.
-pub fn audible(kind: &Kind, dialog: bool, quiet: bool) -> bool {
+/// статусы и финалы агентов — только при agents_voice; срочное и ответы Омы — всегда.
+pub fn audible(kind: &Kind, agents: bool, quiet: bool) -> bool {
     match kind {
         Kind::Read | Kind::Preview => true,
         _ if quiet => false,
-        Kind::Status | Kind::Manual => dialog,
+        Kind::Status | Kind::Manual => agents,
         Kind::Urgent | Kind::Voice => true,
     }
 }
@@ -414,24 +415,24 @@ impl State {
             || (self.shared.busy.load(Ordering::SeqCst) && *self.shared.current.lock().unwrap() == session && q.popped_final(session))
     }
 
-    /// Постоянный диалог: агенты звучат.
+    /// Агенты звучат (настройка agents_voice).
     fn auto(&self) -> bool {
-        self.oma.dialog
+        self.cfg.agents_voice
     }
 
-    /// Промежуточные статусы читаются по ходу работы (диалог + read_intermediate).
+    /// Промежуточные статусы читаются по ходу работы (agents_voice + read_intermediate).
     fn live(&self) -> bool {
-        self.oma.dialog && self.cfg.read_intermediate
+        self.cfg.agents_voice && self.cfg.read_intermediate
     }
 
     fn quiet(&self) -> bool {
         self.cfg.quiet((self.minutes)())
     }
 
-    /// Очередь — только то, что слышно сейчас: выключен диалог или настала тишина — лишнее выбросить.
+    /// Очередь — только то, что слышно сейчас: выключен голос агентов или настала тишина — лишнее выбросить.
     /// Звучащая фраза доигрывает.
     fn purge(&self) {
-        self.shared.queue.lock().unwrap().retain_audible(self.oma.dialog, self.quiet());
+        self.shared.queue.lock().unwrap().retain_audible(self.cfg.agents_voice, self.quiet());
     }
 
     /// Удержание фраз агентов, пока Ома думает или говорит; снятие будит поток воспроизведения.
@@ -472,12 +473,13 @@ impl State {
             rate: &self.cfg.rate,
             project: &project,
             oma: &self.oma.state,
-            dialog: self.oma.dialog,
+            talking: self.oma.talking,
+            agents_voice: self.cfg.agents_voice,
             quiet: self.quiet(),
             quiet_schedule: self.cfg.quiet_schedule,
             quiet_from: &self.cfg.quiet_from,
             quiet_to: &self.cfg.quiet_to,
-            orb_corner: &self.cfg.orb_corner,
+            orb_pos: &self.cfg.orb_pos,
             waiting: self.registry.waiting(),
         };
         format!("{}\n", serde_json::to_string(&st).unwrap())
@@ -569,8 +571,8 @@ impl State {
 
     /// only_new: пропустить уже поставленные фразы, поставленные — запомнить (dedup).
     fn enqueue_msg(&mut self, agent: Agent, session: &str, raw: &str, kind: Kind, msg: &str, only_new: bool) -> usize {
-        if !audible(&kind, self.oma.dialog, self.quiet()) {
-            eprintln!("agent-speak: пропущено (диалог: {}, тихо: {}): {}", self.oma.dialog, self.quiet(), raw.chars().take(40).collect::<String>());
+        if !audible(&kind, self.cfg.agents_voice, self.quiet()) {
+            eprintln!("agent-speak: пропущено (агенты: {}, тихо: {}): {}", self.cfg.agents_voice, self.quiet(), raw.chars().take(40).collect::<String>());
             return 0;
         }
         let (sentences, unknown) = prepare(raw, &self.terms.lock().unwrap());
@@ -714,7 +716,7 @@ impl State {
             let _ = c.wait();
         }
         self.oma.state = "off".into();
-        self.oma.dialog = false;
+        self.oma.talking = false;
         self.hold(false);
         self.purge();
         self.oma.retry_at = Some(now + Duration::from_secs(wait));
@@ -778,11 +780,11 @@ impl State {
             Msg::Voice { text } => {
                 self.enqueue(Agent::Claude, "voice", &text, Kind::Voice); // звучит ли — решает audible
             }
-            Msg::VoiceState { state, dialog } => {
+            Msg::VoiceState { state, talking } => {
                 self.hold(matches!(state.as_str(), "thinking" | "speaking"));
                 self.oma.state = state;
-                self.oma.dialog = dialog;
-                self.purge(); // диалог выключен — финалы и статусы агентов не доигрываются
+                self.oma.talking = talking;
+                self.purge();
             }
             Msg::Oma { action } => self.oma_send(&action),
             Msg::Emit { line } => self.broadcast_line(&format!("{line}\n")),
@@ -1088,7 +1090,7 @@ mod tests {
         let st = test_state();
         assert_eq!(
             st.status_line(),
-            "{\"running\":true,\"speaking\":false,\"paused\":false,\"read_intermediate\":true,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"dialog\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_corner\":\"bottom-right\",\"waiting\":0}\n"
+            "{\"running\":true,\"speaking\":false,\"paused\":false,\"read_intermediate\":true,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"waiting\":0}\n"
         );
     }
 
@@ -1102,9 +1104,9 @@ mod tests {
     }
 
     #[test]
-    fn voice_text_plays_without_dialog() {
+    fn voice_text_plays_without_agents_voice() {
         let mut st = test_state();
-        assert!(!st.oma.dialog);
+        assert!(!st.cfg.agents_voice);
         st.on_msg(Msg::Voice { text: "Ответ Омы здесь.".into() });
         assert!(!st.shared.queue.lock().unwrap().is_empty());
     }
@@ -1117,9 +1119,9 @@ mod tests {
         st.subscribe(theirs);
         assert_eq!(next(&mut r)["oma"], "off");
         next(&mut r); // строка агентов
-        st.on_msg(Msg::VoiceState { state: "thinking".into(), dialog: true });
+        st.on_msg(Msg::VoiceState { state: "thinking".into(), talking: true });
         let s = next(&mut r);
-        assert_eq!((s["oma"].as_str(), s["dialog"].as_bool()), (Some("thinking"), Some(true)));
+        assert_eq!((s["oma"].as_str(), s["talking"].as_bool()), (Some("thinking"), Some(true)));
     }
 
     #[test]
@@ -1186,13 +1188,13 @@ mod tests {
     }
 
     #[test]
-    fn dialog_off_drops_held_final() {
+    fn agents_voice_off_drops_held_final() {
         let (mut st, env) = env_state();
         at(&mut st, &env, Some("s1"), 0);
-        st.on_msg(Msg::VoiceState { state: "thinking".into(), dialog: true });
+        st.on_msg(Msg::VoiceState { state: "thinking".into(), talking: true });
         st.on_hook("stop", &serde_json::json!({"session_id": "s1", "last_assistant_message": "Финал агента готов."}));
         assert!(!st.shared.queue.lock().unwrap().is_empty());
-        st.on_msg(Msg::VoiceState { state: "idle".into(), dialog: false });
+        st.on_msg(Msg::Set { key: "agents_voice".into(), value: serde_json::json!(false) });
         assert!(texts(&st).is_empty());
     }
 
@@ -1236,11 +1238,11 @@ mod tests {
     }
 
     #[test]
-    fn voice_state_sets_dialog_and_hold() {
+    fn voice_state_sets_talking_and_hold() {
         let mut st = test_state();
-        st.on_msg(Msg::VoiceState { state: "thinking".into(), dialog: true });
-        assert!(st.oma.dialog && st.shared.queue.lock().unwrap().held());
-        st.on_msg(Msg::VoiceState { state: "listening".into(), dialog: true });
+        st.on_msg(Msg::VoiceState { state: "thinking".into(), talking: true });
+        assert!(st.oma.talking && st.shared.queue.lock().unwrap().held());
+        st.on_msg(Msg::VoiceState { state: "listening".into(), talking: true });
         assert!(!st.shared.queue.lock().unwrap().held());
     }
 
@@ -1328,13 +1330,13 @@ mod tests {
     fn hush_cuts_oma_keeps_held_final_of_focused_agent() {
         let (mut st, env) = env_state();
         at(&mut st, &env, Some("s1"), 0);
-        st.on_msg(Msg::VoiceState { state: "speaking".into(), dialog: true });
+        st.on_msg(Msg::VoiceState { state: "speaking".into(), talking: true });
         st.on_hook("stop", &serde_json::json!({"session_id": "s1", "last_assistant_message": "Финал агента готов."}));
         st.on_msg(Msg::Voice { text: "Ответ Омы дальше.".into() });
         let g0 = st.shared.generation.load(Ordering::SeqCst);
         st.on_msg(Msg::Hush);
         assert!(st.shared.generation.load(Ordering::SeqCst) > g0, "звучащая фраза оборвана");
-        st.on_msg(Msg::VoiceState { state: "listening".into(), dialog: true });
+        st.on_msg(Msg::VoiceState { state: "listening".into(), talking: true });
         assert_eq!(texts(&st), ["Финал агента готов."]);
     }
 
@@ -1452,7 +1454,7 @@ mod tests {
         let path = dir.join("sess1.jsonl");
         std::fs::write(&path, "").unwrap();
         let mut st = test_state();
-        st.oma.dialog = true;
+        st.cfg.agents_voice = true;
         st.set_active(SessionRef { agent: Agent::Claude, id: "sess1".into(), transcript: path.clone(), project: "p".into() });
         st.on_file(&path); // регистрирует смещение
         let line = r#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"Привет, это текст."}]}}"#;
@@ -1473,7 +1475,7 @@ mod tests {
 
     fn env_state() -> (State, Env) {
         let mut st = test_state();
-        st.oma.dialog = true;
+        st.cfg.agents_voice = true;
         let focus: Arc<Mutex<Option<SessionRef>>> = Default::default();
         let now = Arc::new(Mutex::new(Instant::now()));
         let (f, n) = (focus.clone(), now.clone());
@@ -1503,13 +1505,16 @@ mod tests {
     }
 
     #[test]
-    fn statuses_spoken_only_in_dialog() {
+    fn statuses_spoken_by_agents_voice() {
         let (mut st, env) = env_state();
-        st.oma.dialog = false;
+        st.cfg.agents_voice = false;
         at(&mut st, &env, Some("s1"), 0);
         md(&mut st, "s1", "Запускаю тесты сейчас. ");
         assert!(texts(&st).is_empty());
-        st.oma.dialog = true;
+        st.oma.talking = true; // разговор сам по себе агентов не озвучивает
+        md(&mut st, "s1", "Ещё один статус тут. ");
+        assert!(texts(&st).is_empty());
+        st.cfg.agents_voice = true;
         md(&mut st, "s1", "Тесты прошли успешно. ");
         assert_eq!(texts(&st), ["Тесты прошли успешно."]);
     }
@@ -1520,11 +1525,11 @@ mod tests {
         let (mut st, env) = env_state();
         st.voice_cmd = vec!["true".into()];
         st.oma_spawn();
-        st.on_msg(Msg::VoiceState { state: "thinking".into(), dialog: true });
+        st.on_msg(Msg::VoiceState { state: "thinking".into(), talking: true });
         std::thread::sleep(Duration::from_millis(200));
         st.tick();
         assert!(st.oma.child.is_none() && st.oma.state == "off");
-        assert!(!st.oma.dialog && !st.shared.queue.lock().unwrap().held());
+        assert!(!st.oma.talking && !st.shared.queue.lock().unwrap().held());
         *env.1.lock().unwrap() += Duration::from_secs(9);
         st.tick();
         assert!(st.oma.child.is_none());
@@ -1857,7 +1862,7 @@ mod tests {
     #[test]
     fn each_session_gets_own_stable_voice() {
         let mut st = test_state(); // голос по умолчанию xenia
-        st.oma.dialog = true; // финалы звучат только в диалоге
+        st.cfg.agents_voice = true;
         st.enqueue(Agent::Claude, "a", "Раз.", Kind::Manual);
         st.enqueue(Agent::Claude, "b", "Два.", Kind::Manual);
         st.enqueue(Agent::Claude, "a", "Три.", Kind::Urgent);
@@ -1867,7 +1872,7 @@ mod tests {
     #[test]
     fn voices_wrap_around_least_recently_assigned() {
         let mut st = test_state();
-        st.oma.dialog = true; // финалы звучат только в диалоге
+        st.cfg.agents_voice = true;
         for s in ["a", "b", "c", "d", "e", "f", "g"] {
             st.enqueue(Agent::Claude, s, "Раз.", Kind::Manual);
         }
@@ -1878,7 +1883,7 @@ mod tests {
     #[test]
     fn default_change_moves_first_session_and_frees_old_default() {
         let mut st = test_state();
-        st.oma.dialog = true; // финалы звучат только в диалоге
+        st.cfg.agents_voice = true;
         st.enqueue(Agent::Claude, "a", "Раз.", Kind::Manual);
         st.enqueue(Agent::Claude, "b", "Два.", Kind::Manual); // baya
         voices(&st);

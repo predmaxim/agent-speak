@@ -17,14 +17,16 @@ pub struct Config {
     pub quiet_to: String,
     /// ручное переопределение расписания: "" (нет) / "on" / "off"
     pub quiet_override: String,
-    /// угол экрана для орба: см. CORNERS
-    pub orb_corner: String,
+    /// агенты звучат: статусы и финалы читаются вслух
+    pub agents_voice: bool,
+    /// позиция орба: "<угол>,<dx>,<dy>", см. valid_pos
+    pub orb_pos: String,
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config { speaker: "xenia".into(), rate: "medium".into(), max_age_secs: 30, read_intermediate: true,
-            quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), orb_corner: "bottom-right".into() }
+            quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: false, orb_pos: "bottom-right,0,0".into() }
     }
 }
 
@@ -35,6 +37,12 @@ pub fn path() -> PathBuf {
 pub const SPEAKERS: [&str; 5] = ["xenia", "baya", "kseniya", "aidar", "eugene"];
 pub const RATES: [&str; 5] = ["x-slow", "slow", "medium", "fast", "x-fast"];
 pub const CORNERS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-right"];
+
+/// `<угол>,<dx>,<dy>`: угол из CORNERS, смещения — целые 0..=10000.
+pub fn valid_pos(s: &str) -> bool {
+    let p: Vec<&str> = s.split(',').collect();
+    p.len() == 3 && CORNERS.contains(&p[0]) && p[1..].iter().all(|n| n.parse::<u32>().is_ok_and(|n| n <= 10000))
+}
 
 /// Ровно `ЧЧ:ММ` (00..23:00..59) -> минуты от полуночи.
 pub fn hhmm(s: &str) -> Option<u32> {
@@ -77,7 +85,8 @@ impl Config {
             "quiet_from" if hhmm(s).is_some() => self.quiet_from = s.into(),
             "quiet_to" if hhmm(s).is_some() => self.quiet_to = s.into(),
             "quiet_override" if ["", "on", "off"].contains(&s) => self.quiet_override = s.into(),
-            "orb_corner" if CORNERS.contains(&s) => self.orb_corner = s.into(),
+            "agents_voice" if value.is_boolean() => self.agents_voice = value.as_bool().unwrap(),
+            "orb_pos" if valid_pos(s) => self.orb_pos = s.into(),
             _ => return false,
         }
         true
@@ -111,9 +120,10 @@ mod tests {
         assert_eq!(c.max_age_secs, 30);
         assert!(c.read_intermediate);
         assert_eq!(
-            (c.quiet_schedule, c.quiet_from.as_str(), c.quiet_to.as_str(), c.quiet_override.as_str(), c.orb_corner.as_str()),
-            (true, "23:00", "08:00", "", "bottom-right")
+            (c.quiet_schedule, c.quiet_from.as_str(), c.quiet_to.as_str(), c.quiet_override.as_str()),
+            (true, "23:00", "08:00", "")
         );
+        assert_eq!((c.agents_voice, c.orb_pos.as_str()), (false, "bottom-right,0,0"));
     }
 
     #[test]
@@ -143,6 +153,19 @@ mod tests {
     }
 
     #[test]
+    fn orb_pos_and_agents_voice_set() {
+        use serde_json::json;
+        let mut c = Config::default();
+        assert!(c.set("orb_pos", &json!("top-left,120,340")) && c.orb_pos == "top-left,120,340");
+        for bad in ["middle,1,1", "top-left,1", "top-left,-1,0", "top-left,1,x", "top-left,10001,0", ""] {
+            assert!(!c.set("orb_pos", &json!(bad)), "{bad}");
+        }
+        assert!(c.set("agents_voice", &json!(true)) && c.agents_voice);
+        assert!(!c.set("agents_voice", &json!("true")));
+        assert!(!c.set("orb_corner", &json!("top-left")));
+    }
+
+    #[test]
     fn set_validates_keys_and_values() {
         use serde_json::json;
         let mut c = Config::default();
@@ -156,10 +179,8 @@ mod tests {
         assert!(c.set("quiet_schedule", &json!(false)));
         assert!(c.set("quiet_from", &json!("22:30")));
         assert!(c.set("quiet_override", &json!("on")));
-        assert!(c.set("orb_corner", &json!("top-left")));
         assert!(!c.set("quiet_from", &json!("25:00")));
         assert!(!c.set("quiet_override", &json!("maybe")));
-        assert!(!c.set("orb_corner", &json!("middle")));
         assert!(!c.set("quiet_schedule", &json!("true")));
         assert!(!c.set("max_age_secs", &json!(5))); // не настраивается из интерфейса
         assert_eq!(
