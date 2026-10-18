@@ -1189,6 +1189,7 @@ mod tests {
 
     #[test]
     fn agents_voice_off_drops_held_final() {
+        let _h = TempHome::new("agents-voice");
         let (mut st, env) = env_state();
         at(&mut st, &env, Some("s1"), 0);
         st.on_msg(Msg::VoiceState { state: "thinking".into(), talking: true });
