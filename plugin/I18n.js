@@ -9,14 +9,14 @@ var TABLES = {
   ru: {
     "Oma is not running": "Ома не запущена", "Oma is loading": "Ома загружается", "Oma is listening": "Ома слушает",
     "Oma is thinking": "Ома думает", "Oma is speaking": "Ома говорит", "Paused": "Пауза", "Quiet mode": "Тихий режим",
-    "Oma": "Ома", "%1 waiting": "Ждут ответа: %1", "Send": "Отправить",
+    "Oma": "Ома", "%1 waiting": "Ждут ответа: %1", "Read agents aloud": "Озвучивать агентов", "End conversation": "Закончить разговор",
     "just now": "только что", "%1 min": "%1 мин", "%1 h": "%1 ч", "%1 d": "%1 д",
     "Working": "Работает", "Waiting": "Ждёт", "Done": "Готово", "Idle": "Свободен",
     "INTERMEDIATE STATUSES": "ПРОМЕЖУТОЧНЫЕ СТАТУСЫ", "Read": "Читать", "Final answer only": "Только итог",
     "VOICE": "ГОЛОС", "SPEED": "СКОРОСТЬ",
     "Very slow": "Очень медленно", "Slow": "Медленно", "Normal": "Обычно", "Fast": "Быстро", "Very fast": "Очень быстро",
     "%1 agents": ["%1 агент", "%1 агента", "%1 агентов"], "Talk": "Говорить", "New chat": "Новый чат",
-    "Chat history": "История чатов", "Settings": "Настройки", "Back": "Назад", "Continuous dialog": "Постоянный диалог",
+    "Chat history": "История чатов", "Settings": "Настройки", "Back": "Назад",
     "No agents": "Агентов нет", "You": "Ты", "Ask Oma…": "Спросить Ому…", "Untitled chat": "Без названия",
     "No chats yet": "Чатов пока нет", "Quiet now": "Сейчас тихо", "On schedule": "По расписанию", "From / to": "С / до"
   }

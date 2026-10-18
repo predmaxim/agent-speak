@@ -7,7 +7,7 @@ var SAMPLE = "Так звучит этот голос."
 
 // No connection to the daemon: the status-line fields, empty.
 var OFFLINE = { running: false, speaking: false, paused: false, read_intermediate: false, speaker: "", rate: "", project: "",
-  oma: "off", dialog: false, quiet: false, quiet_schedule: false, quiet_from: "", quiet_to: "", orb_corner: "", waiting: 0 }
+  oma: "off", talking: false, agents_voice: false, quiet: false, quiet_schedule: false, quiet_from: "", quiet_to: "", orb_pos: "", waiting: 0 }
 
 // One socket line -> {type, value}, or null for anything else (a broken line must not blank the state).
 function parseLine(line) {
@@ -68,12 +68,28 @@ function pushBubble(stack, b, now) {
   return rest.concat([nb]).slice(-BUBBLES_MAX)
 }
 
-// Everything goes once the newest bubble is old enough; quiet mode keeps them,
-// and so does a draft: its Send button must not vanish while the user thinks.
+// Everything goes once the newest bubble is old enough; quiet mode keeps them.
 function expire(stack, now, quiet) {
-  if (quiet || !stack.length || stack.some(function(b) { return b.kind === "draft" })) return stack
+  if (quiet || !stack.length) return stack
   var last = Math.max.apply(null, stack.map(function(b) { return b.at }))
   return now - last >= BUBBLE_TTL ? [] : stack
+}
+
+// The draft is shown apart from the TTL'd stack: last, and the stack still holds BUBBLES_MAX.
+function withDraft(stack, draft) {
+  return draft ? stack.concat([draft]).slice(-BUBBLES_MAX) : stack
+}
+
+// Bubble kind (or chat role) -> tint: mine and the draft, Oma's, any agent's.
+function tone(kind) {
+  return kind === "me" || kind === "draft" ? "me" : kind === "oma" ? "oma" : "agent"
+}
+
+var TONE_ALPHA = { me: 0.18, oma: 0.07, agent: 0 }
+
+// Esc is grabbed only while it means something: a draft to cancel, or the hold after a cancel.
+function escWanted(draft, st, holding) {
+  return (draft !== null && !!st && st.running && st.oma !== "off") || holding
 }
 
 function dismiss(stack, id) {
@@ -113,6 +129,24 @@ function chatFor(cur, c) {
 // The screen corner nearest to the orb's centre (x, y) on a w x h screen.
 function corner(x, y, w, h) {
   return (y < h / 2 ? "top" : "bottom") + "-" + (x < w / 2 ? "left" : "right")
+}
+
+// "<corner>,<dx>,<dy>" -> corner flags and offsets from it, clamped to the
+// area (w x h) the slot (side `slot`) can move in; junk is the default corner.
+function parsePos(s, w, h, slot) {
+  var m = /^(top|bottom)-(left|right),(\d+),(\d+)$/.exec(s || "")
+  if (!m) return { atTop: false, atLeft: false, dx: 0, dy: 0 }
+  return { atTop: m[1] === "top", atLeft: m[2] === "left",
+    dx: Math.min(+m[3], Math.max(0, w - slot)), dy: Math.min(+m[4], Math.max(0, h - slot)) }
+}
+
+// Where a drag ended: (x, y) is the slot's top-left in the w x h area. The
+// corner is the one nearest the slot's centre; within `snap` of it, sticks.
+function place(x, y, w, h, slot, snap) {
+  var c = corner(x + slot / 2, y + slot / 2, w, h)
+  var dx = Math.max(0, Math.round(c.indexOf("left") >= 0 ? x : w - slot - x))
+  var dy = Math.max(0, Math.round(c.indexOf("top") >= 0 ? y : h - slot - y))
+  return Math.hypot(dx, dy) <= snap ? c + ",0,0" : c + "," + dx + "," + dy
 }
 
 var HOURS = []
