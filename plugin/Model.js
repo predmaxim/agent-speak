@@ -7,7 +7,7 @@ var SAMPLE = "Так звучит этот голос."
 
 // No connection to the daemon: the status-line fields, empty.
 var OFFLINE = { running: false, speaking: false, paused: false, read_intermediate: false, speaker: "", rate: "", project: "",
-  oma: "off", talking: false, agents_voice: false, quiet: false, quiet_schedule: false, quiet_from: "", quiet_to: "", orb_pos: "", waiting: 0 }
+  oma: "off", talking: false, agents_voice: false, quiet: false, quiet_schedule: false, quiet_from: "", quiet_to: "", orb_pos: "", orb_over_fullscreen: true, waiting: 0 }
 
 // One socket line -> {type, value}, or null for anything else (a broken line must not blank the state).
 function parseLine(line) {
@@ -188,8 +188,8 @@ function sections(tr) {
   ]
 }
 
-// The settings page's rows, top to bottom: the three sections, then quiet mode.
-var SETTINGS_ROWS = ["read_intermediate", "speaker", "rate", "quiet_now", "quiet_schedule", "quiet_hours"]
+// The settings page's rows, top to bottom: the three sections, quiet mode, the orb.
+var SETTINGS_ROWS = ["read_intermediate", "speaker", "rate", "quiet_now", "quiet_schedule", "quiet_hours", "orb_over_fullscreen"]
 
 // ←/→ (dx) or Enter (dx 1) on a settings row: the `set` to send ({key,
 // value, sample}) or null. Choices go round, switches flip; the hours row
@@ -197,6 +197,7 @@ var SETTINGS_ROWS = ["read_intermediate", "speaker", "rate", "quiet_now", "quiet
 function settingStep(row, st, dx) {
   if (row === "quiet_now") return { key: "quiet_override", value: st.quiet ? "off" : "on", sample: false }
   if (row === "quiet_schedule") return { key: "quiet_schedule", value: !st.quiet_schedule, sample: false }
+  if (row === "orb_over_fullscreen") return { key: row, value: !st.orb_over_fullscreen, sample: false }
   var sec = sections(function(t) { return t }).filter(function(x) { return x.key === row })[0]
   if (!sec) return null
   var values = sec.options.map(function(o) { return o.value })

@@ -19,10 +19,23 @@ Item {
   property var link
   property var draft: null           // Oma's draft bubble, shown at the chat's end
   property bool shown: false
-  // The window opens on the focused screen and stays there while open.
   function toggle() {
-    if (!shown) openScreen = focusedScreen()
-    shown = !shown
+    if (shown) shown = false
+    else open("")
+  }
+
+  // Opens on the focused screen (and stays there while open) with the chat
+  // `key`, an agent's from its bubble; "" asks Oma for her current chat (a
+  // keyless `open` switches nothing; her answer, `was` "*", is adopted), so
+  // after a shell restart the window follows her chat again.
+  function open(key) {
+    openScreen = focusedScreen()
+    now = Date.now() / 1000
+    shown = true
+    if (key) return openChat(key)
+    showPage("main")
+    send({ do: "open" })
+    scrollDown()
   }
 
   readonly property var tr: I18n.translator(I18n.textLanguage(function(name) { return Quickshell.env(name) }))
@@ -181,10 +194,15 @@ Item {
   }
 
   // To the chat's end, and kept there (chatView.follow) while the layer
-  // window gets its size and long lines wrap.
+  // window gets its size and long lines wrap. positionViewAtEnd needs a line:
+  // an agent's chat with only its feed (the header) goes down by hand.
   function scrollDown() {
     chatView.follow = true
-    Qt.callLater(function() { chatView.positionViewAtEnd() })
+    Qt.callLater(function() {
+      var v = chatView
+      if (v.count) v.positionViewAtEnd()
+      else v.contentY = v.originY + Math.max(0, v.contentHeight - v.height)
+    })
   }
 
   // The open chat's new lines. A new array resets the view to its top: a
@@ -207,16 +225,9 @@ Item {
     v.returnToBounds()
   }
 
-  // Shown: ask Oma for her current chat (a keyless `open` switches nothing;
-  // her answer, `was` "*", is adopted), so after a shell restart the window
-  // follows her chat again. Hidden: no dropdown stays open into the next time.
+  // Hidden: no dropdown stays open into the next time.
   onShownChanged: {
-    if (shown) {
-      root.now = Date.now() / 1000
-      root.showPage("main")
-      root.send({ do: "open" })
-      root.scrollDown()
-    } else {
+    if (!shown) {
       speakerBox.close()
       rateBox.close()
       fromBox.close()
@@ -830,6 +841,27 @@ Item {
                 fontFamily: root.font
                 onChanged: function(v) { root.choose("quiet_to", v, false); value = Qt.binding(function() { return root.speech.quiet_to }) }
                 onPopupOpenChanged: if (!popupOpen) root.refocus()
+              }
+            }
+
+            PanelSectionHeader {
+              leftPadding: Style.spacing.rowPaddingX
+              topPadding: Style.space(14)
+              bottomPadding: Style.space(4)
+              text: root.tr("Orb").toUpperCase()
+              foreground: root.fg
+              fontFamily: root.font
+              fontSize: Style.font.body
+              font.letterSpacing: 1.2
+            }
+
+            SettingRow {
+              row: 6
+              label: root.tr("Over fullscreen windows")
+              ToggleSwitch {
+                checked: root.speech.orb_over_fullscreen === true
+                foreground: root.fg
+                onToggled: root.step("orb_over_fullscreen", 1)
               }
             }
           }

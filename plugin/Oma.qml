@@ -81,9 +81,11 @@ Item {
 
   Plugin.Orb {
     link: link
+    covered: omaWindow.shown
     bubbles: omaWindow.shown ? [] : Model.withDraft(root.bubbles, root.draft)
     onDismissed: function(key) { root.bubbles = Model.dismiss(root.bubbles, key) }
     onWindowToggled: omaWindow.toggle()
+    onChatOpened: function(key) { omaWindow.open(key) }
   }
 
   // Qualified: a bare `Window` is QtQuick's.

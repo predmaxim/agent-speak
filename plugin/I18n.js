@@ -18,7 +18,8 @@ var TABLES = {
     "%1 agents": ["%1 агент", "%1 агента", "%1 агентов"], "Talk": "Говорить", "New chat": "Новый чат",
     "Chat history": "История чатов", "Settings": "Настройки", "Back": "Назад",
     "No agents": "Агентов нет", "You": "Ты", "Ask Oma…": "Спросить Ому…", "Untitled chat": "Без названия",
-    "No chats yet": "Чатов пока нет", "Quiet now": "Сейчас тихо", "On schedule": "По расписанию", "From / to": "С / до"
+    "No chats yet": "Чатов пока нет", "Quiet now": "Сейчас тихо", "On schedule": "По расписанию", "From / to": "С / до",
+    "Orb": "Орб", "Over fullscreen windows": "Над полноэкранными окнами"
   }
 }
 

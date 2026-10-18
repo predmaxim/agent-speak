@@ -9,8 +9,9 @@ import "Model.js" as Model
 import "I18n.js" as I18n
 
 // Oma's orb: a circle anywhere on the focused screen with up to three
-// bubbles beside it. It lives on the Top layer, so a fullscreen window covers
-// it, and clicks pass through everything but the circle and the bubbles. The
+// bubbles beside it. It lives on the Overlay layer, over fullscreen windows
+// too (the orb_over_fullscreen setting off: on Top, under them), and clicks
+// pass through everything but the circle and the bubbles. The
 // window is only as big as its content, so the circle's animations repaint a
 // few pixels, not the screen; while the circle is dragged the window spans
 // the free area of the screen; the drop keeps the place, near a corner it snaps.
@@ -19,8 +20,10 @@ PanelWindow {
 
   property var link
   property var bubbles: []
+  property bool covered: false   // Oma's window is open
   signal dismissed(string key)
   signal windowToggled()
+  signal chatOpened(string key)   // a bubble's chat: "agent:<id>", or "" for Oma's current one
 
   readonly property var tr: I18n.translator(I18n.textLanguage(function(name) { return Quickshell.env(name) }))
   readonly property string mode: Model.orbMode(link.speech)
@@ -58,6 +61,15 @@ PanelWindow {
   // A focus switch moves the window to another screen and the drag with it is lost.
   onScreenChanged: dragging = false
 
+  // A drag's start and its drop switch the anchors, and for a frame the
+  // compositor shows the old-size buffer under the new ones (the orb jumped
+  // to the middle of the screen and back): nothing is drawn until the new
+  // size comes. The timer is for a size that never comes (a drag undone at once).
+  property bool reanchoring: false
+  onDraggingChanged: { reanchoring = true; reanchorGuard.restart() }
+  onWidthChanged: reanchoring = false
+  Timer { id: reanchorGuard; interval: 250; onTriggered: win.reanchoring = false }
+
   function drop() {
     win.dropped = Model.place(orbSlot.x, orbSlot.y, win.width, win.height, win.slotSize, Style.space(64))
     win.link.send(Model.set("orb_pos", win.dropped))
@@ -75,7 +87,8 @@ PanelWindow {
   exclusionMode: ExclusionMode.Normal
   exclusiveZone: 0
   WlrLayershell.namespace: "predmaxim-oma-orb"
-  WlrLayershell.layer: WlrLayer.Top
+  // Oma's window is on Overlay too: the orb steps down under it while it is open.
+  WlrLayershell.layer: win.link.speech.orb_over_fullscreen && !win.covered ? WlrLayer.Overlay : WlrLayer.Top
   anchors {
     top: win.dragging || win.atTop
     bottom: win.dragging || !win.atTop
@@ -92,17 +105,22 @@ PanelWindow {
   implicitWidth: win.slotSize + (win.bubbles.length ? win.spacing + column.width : 0)
   implicitHeight: Math.max(win.slotSize, column.height)
 
+  // The Repeater makes its bubbles after the bindings first run, and itemAt()
+  // notifies nothing: without `made` the mask kept the circle alone, and
+  // clicks on the bubbles went to the window below.
+  property int made: 0
   mask: Region {
     Region { item: orbSlot; shape: RegionShape.Ellipse }
-    Region { item: slots.itemAt(0) && slots.itemAt(0).visible ? slots.itemAt(0) : null }
-    Region { item: slots.itemAt(1) && slots.itemAt(1).visible ? slots.itemAt(1) : null }
-    Region { item: slots.itemAt(2) && slots.itemAt(2).visible ? slots.itemAt(2) : null }
+    Region { item: win.made && slots.itemAt(0) && slots.itemAt(0).visible ? slots.itemAt(0) : null }
+    Region { item: win.made && slots.itemAt(1) && slots.itemAt(1).visible ? slots.itemAt(1) : null }
+    Region { item: win.made && slots.itemAt(2) && slots.itemAt(2).visible ? slots.itemAt(2) : null }
   }
 
   Item {
     id: orbSlot
     width: win.slotSize
     height: win.slotSize
+    opacity: win.reanchoring ? 0 : 1
     x: Math.max(0, Math.min(parent.width - width, (win.atLeft ? win.ox : parent.width - width - win.ox) + (win.dragging ? win.dragDX : 0)))
     y: Math.max(0, Math.min(parent.height - height, (win.atTop ? win.oy : parent.height - height - win.oy) + (win.dragging ? win.dragDY : 0)))
 
@@ -204,12 +222,14 @@ PanelWindow {
   Column {
     id: column
     spacing: win.spacing
+    opacity: win.reanchoring ? 0 : 1
     x: win.atLeft ? orbSlot.x + orbSlot.width + win.spacing : orbSlot.x - win.spacing - width
     y: win.atTop ? orbSlot.y : orbSlot.y + orbSlot.height - height
 
     Repeater {
       id: slots
       model: Model.BUBBLES_MAX
+      onItemAdded: win.made++
 
       Item {
         id: slot
@@ -247,11 +267,19 @@ PanelWindow {
             maskSpreadAtMin: 1.0
           }
 
+          // Left: the bubble's chat in Oma's window (an agent's bubble — the
+          // agent's chat, the rest — Oma's current one); right: away, and a
+          // draft's phrase is cancelled, as by Esc.
           MouseArea {
             anchors.fill: parent
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
             cursorShape: Qt.PointingHandCursor
-            // A draft is cleared by Esc or the orb, not by a click.
-            onClicked: if (slot.bubble.kind !== "draft") win.dismissed(slot.bubble.id)
+            onClicked: function(mouse) {
+              var b = slot.bubble
+              if (mouse.button === Qt.LeftButton) win.chatOpened(b.agent ? "agent:" + b.agent : "")
+              else if (b.kind === "draft") win.link.send(Model.omaCmd({ do: "cancel" }))
+              else win.dismissed(b.id)
+            }
           }
 
           Column {
@@ -261,15 +289,17 @@ PanelWindow {
             width: slot.inner
             spacing: Style.space(4)
 
+            // Who speaks as the chat's ТЫ/ОМА: dim bold caps, apart from the text.
             Text {
               id: who
               width: parent.width
               textFormat: Text.PlainText
-              text: slot.bubble ? slot.bubble.who || "" : ""
-              color: Color.popups.text
+              text: slot.bubble ? (slot.bubble.who || "").toUpperCase() : ""
+              color: Qt.darker(Color.popups.text, 1.4)
               font.family: Style.font.family
               font.pixelSize: Style.font.body
               font.bold: true
+              font.letterSpacing: 1.2
               elide: Text.ElideRight
             }
 
