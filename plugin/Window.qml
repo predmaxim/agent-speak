@@ -316,6 +316,7 @@ Item {
           // Idle while hidden: no animation runs for a window nobody sees.
           iconComponent: OrbFace {
             mode: root.shown ? Model.orbMode(root.speech) : "idle"
+            hearing: !!root.draft && !!root.draft.hearing
             size: Style.font.display
             line: Math.max(1, Style.space(2))
           }
