@@ -1,5 +1,6 @@
 """Слух: pw-record → Silero VAD (кадры 32 мс) → Segmenter → faster-whisper.
-В очередь out: ("start",) — начало речи, ("phrase", текст) — распознанная фраза."""
+В очередь out: ("start", n) — начало речи, ("phrase", текст, n) — распознанная фраза;
+n — Ear.seq, номер речи (растёт всегда, при перезапуске слуха не сбрасывается)."""
 import asyncio
 import contextlib
 import time
@@ -82,6 +83,7 @@ class Ear:
         self.out, self.whisper, self.cmd = out, whisper, list(cmd)
         self._vad_load, self._lock = vad_load, asyncio.Lock()  # lock: start/stop идут по очереди, побеждает последний вызов
         self.paused = False
+        self.seq = 0
         self._proc = self._vad = self._tasks = None
 
     @property
@@ -127,12 +129,13 @@ class Ear:
 
     async def _recognize(self, phrases):  # отдельно: распознавание не задерживает чтение микрофона (перебивание)
         while True:
-            pcm = await phrases.get()
+            n, pcm = await phrases.get()
             try:
                 model = await self.whisper.get()
-                await self.out.put(("phrase", await asyncio.to_thread(transcribe, model, pcm)))
+                await self.out.put(("phrase", await asyncio.to_thread(transcribe, model, pcm), n))
             except Exception as e:
                 await self.out.put(("error", f"recognize: {e!r}"))  # слух продолжает работать
+                await self.out.put(("phrase", "", n))  # речь закрыта: иначе Conversation.hearing застрянет
 
     async def _read(self, proc, phrases):
         import torch
@@ -146,9 +149,10 @@ class Ear:
                 x = torch.from_numpy(np.frombuffer(b, np.int16).astype(np.float32) / 32768)
                 for ev in seg.feed(self._vad(x, RATE).item(), b):
                     if ev[0] == "start":
-                        await self.out.put(ev)
+                        self.seq += 1
+                        await self.out.put(("start", self.seq))
                     else:
-                        phrases.put_nowait(ev[1])
+                        phrases.put_nowait((self.seq, ev[1]))  # фраза закрывает последнюю начатую речь
         except asyncio.IncompleteReadError:
             reason = "pw-record завершился"
         except Exception as e:

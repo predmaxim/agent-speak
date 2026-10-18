@@ -595,9 +595,7 @@ from agent_voice.__main__ import Oma
 from agent_voice.link import watch
 
 
-def test_oma_routes_talk_draft_send_and_quiet_answer():
-    sent, emitted = [], []
-
+def _oma(sent, emitted):
     class FakeEar:
         open, pid = False, 1
         async def start(self): self.open = True
@@ -610,20 +608,58 @@ def test_oma_routes_talk_draft_send_and_quiet_answer():
         async def interrupt(self): pass
         def chats(self): return []
 
-    oma = Oma(Conversation(), FakeEar(), FakeBrain(), SimpleNamespace(ready=True),
+    clk = Clock()
+    oma = Oma(Conversation(clock=clk), FakeEar(), FakeBrain(), SimpleNamespace(ready=True),
               send=lambda c: (emitted if c["cmd"] == "emit" else sent).append(c))
+    return clk, oma
+
+
+def test_oma_routes_talk_draft_tick_and_quiet_answer():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
 
     async def run():
         await oma.command({"do": "talk"})
         assert oma.ear.open
-        await oma.event(("phrase", "как дела у почты"))
-        assert emitted[-1]["line"]["bubble"] == {"id": "draft", "who": "Ты", "text": "как дела у почты", "kind": "draft", "append": False}
-        await oma.command({"do": "send"})
-        assert oma.brain.texts == ["как дела у почты"] and not oma.ear.open
+        assert sent[-1] == {"cmd": "voice_state", "state": "listening", "talking": True}
+        await oma.event(("start", 1))
+        assert emitted[-1]["line"]["bubble"] == {"id": "draft", "who": "Ты", "text": "", "kind": "draft", "hearing": True, "append": False}
+        await oma.event(("phrase", "как дела у почты", 1))
+        clk.t += SEND_PAUSE
+        await oma.event(("tick",))
+        assert oma.brain.texts == ["как дела у почты"] and oma.ear.open
+        b = [e["line"]["bubble"] for e in emitted if "bubble" in e["line"]]
+        assert b[-2]["drop"] and b[-1]["kind"] == "me" and b[-1]["text"] == "как дела у почты"
+        assert b[-1]["id"] == f"me-{os.getpid()}-{oma.n}"
         oma.conv.set_quiet(True)
         await oma.event(("delta", "Почта ждёт твоего ответа сейчас. "))
         assert not any(c["cmd"] == "voice" for c in sent)
         assert any(e["line"].get("bubble", {}).get("kind") == "oma" for e in emitted)
+
+    asyncio.run(run())
+
+
+def test_oma_locked_ends_conversation():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+
+    async def run():
+        await oma.command({"do": "talk"})
+        await oma.event(("locked",))
+        assert not oma.ear.open and sent[-1]["talking"] is False
+
+    asyncio.run(run())
+
+
+def test_oma_cancel_command():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+
+    async def run():
+        await oma.command({"do": "talk"})
+        await oma.event(("start", 1))
+        await oma.command({"do": "cancel"})
+        assert emitted[-1]["line"]["bubble"]["drop"] and emitted[-1]["line"]["bubble"]["id"] == "draft"
 
     asyncio.run(run())
 
@@ -742,6 +778,66 @@ def test_serve_eof_cuts_hung_dispatch():
         await asyncio.wait_for(task, 1)
 
     asyncio.run(run())
+
+
+def _numbered_ear(monkeypatch, whisper):
+    from agent_voice import ear as earmod
+    from agent_voice.ear import Ear
+    # две фразы: 10 кадров речи, 22 тишины, снова; VAD — по заранее заданному списку
+    probs = iter([0.9] * 10 + [0.1] * 22 + [0.9] * 10 + [0.1] * 22)
+    vad = lambda x, rate: SimpleNamespace(item=lambda: next(probs))
+    monkeypatch.setattr(earmod, "transcribe", lambda m, pcm: "слово")
+    out = asyncio.Queue()
+    return out, Ear(out, whisper, cmd=["sh", "-c", f"head -c {64 * 1024} /dev/zero; sleep 60"], vad_load=lambda: vad)
+
+
+def _drain(out, kinds):
+    async def run():
+        got = []
+        while len(got) < kinds:
+            ev = await asyncio.wait_for(out.get(), 5)
+            if ev[0] != "error" or ev[1].startswith("recognize"):
+                got.append(ev)
+        return got
+    return run
+
+
+def test_ear_numbers_speech(monkeypatch):
+    out, e = _numbered_ear(monkeypatch, Whisper(load=lambda: "m"))
+
+    async def run():
+        await e.start()
+        got = await _drain(out, 4)()
+        await e.stop()
+        return got
+
+    got = asyncio.run(run())
+    assert sorted(got, key=lambda x: (x[-1], x[0] != "start")) == [("start", 1), ("phrase", "слово", 1), ("start", 2), ("phrase", "слово", 2)]
+    assert e.seq == 2
+
+
+def test_ear_failed_recognition_still_emits_empty_phrase(monkeypatch):
+    def boom():
+        raise RuntimeError("нет модели")
+    out, e = _numbered_ear(monkeypatch, Whisper(load=boom))
+
+    async def run():
+        await e.start()
+        got = []
+        while len(got) < 6:
+            got.append(await asyncio.wait_for(out.get(), 5))
+        await e.stop()
+        return got
+
+    got = asyncio.run(run())
+    assert ("phrase", "", 1) in got and ("phrase", "", 2) in got
+    assert any(g[0] == "error" and g[1].startswith("recognize") for g in got)
+
+
+def test_locked_false_without_helper(monkeypatch):
+    from agent_voice.context import locked
+    monkeypatch.setenv("PATH", "/nonexistent")
+    assert locked() is False
 
 
 def test_ear_warm_loads_vad_once():

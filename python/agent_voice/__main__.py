@@ -12,7 +12,7 @@ import time
 import traceback
 
 from . import link
-from .context import foreign_capture, mic_outputs, on_ac
+from .context import foreign_capture, locked, mic_outputs, on_ac
 from .conversation import Conversation
 
 
@@ -86,12 +86,6 @@ class Oma:
             self.notified = (text, now)
             self.notify(text[:200])
 
-    def _dialog(self, on):
-        acts = self.conv.set_dialog(on)
-        if not any(a[0] == "state" for a in acts):  # демон узнаёт dialog только из voice_state
-            acts.append(("state", self.conv.state))
-        return acts
-
     def _chat(self, role, text):
         """Реплика — в историю текущего чата и в окно; ответ Омы — одним сообщением, как в окне."""
         h = self.history
@@ -105,12 +99,8 @@ class Oma:
         do, c = cmd.get("do"), self.conv
         if do == "talk":
             await self.act(c.talk())
-        elif do == "send":
-            await self.act(c.send())
         elif do == "cancel":
             await self.act(c.cancel())
-        elif do == "dialog":
-            await self.act(self._dialog(not c.dialog))
         elif do == "chats":
             self.emit({"chats": await asyncio.to_thread(self.brain.chats)})
         elif do == "open" and not cmd.get("key"):  # окно спрашивает текущий чат: без переключения, was "*" — принять его ключ
@@ -131,9 +121,13 @@ class Oma:
     async def event(self, ev):
         kind, c = ev[0], self.conv
         if kind == "start":
-            await self.act(c.speech_start())
+            await self.act(c.speech_start(ev[1]))
         elif kind == "phrase":
-            await self.act(c.phrase(ev[1]))
+            await self.act(c.phrase(ev[1], ev[2]))
+        elif kind == "tick":
+            await self.act(c.tick())
+        elif kind == "locked":
+            await self.act(c.end())
         elif kind == "delta":
             await self.act(c.delta(ev[1]))
         elif kind == "done":
@@ -151,8 +145,8 @@ class Oma:
             self.emit({"chat": {"key": ev[1], "was": ev[2], "messages": self.history}})
         elif kind == "error":
             self._warn(ev[1])
-            if not self.ear.open and (c.dialog or c.state in ("listening", "paused")):  # слух умер сам
-                await self.act(self._dialog(False) if c.dialog else c.cancel())
+            if not self.ear.open and c.active:  # слух умер сам
+                await self.act(c.end())
             elif c.turn and ev[1].startswith("Claude"):  # ход мозга оборвался — в покой
                 await self.act(c.done())
 
@@ -177,6 +171,7 @@ class Oma:
                     self.history = []
                 self.n += 1
                 self._chat("me", a[1])
+                self.emit({"bubble": {"id": f"me-{os.getpid()}-{self.n}", "who": "Ты", "text": a[1], "kind": "me", "append": False}})
             elif k == "interrupt":
                 await self.brain.interrupt()
             elif k == "stop":  # перебивание: финалы агентов, удержанные за Омой, демон не выбрасывает
@@ -187,12 +182,12 @@ class Oma:
                 self.emit({"bubble": {"id": f"oma-{os.getpid()}-{self.n}", "who": "Ома", "text": a[1], "kind": "oma", "append": True}})
                 self._chat("oma", a[1])
             elif k == "draft":
-                self.emit({"bubble": {"id": "draft", "who": "Ты", "text": a[1], "kind": "draft", "append": False}})
+                self.emit({"bubble": {"id": "draft", "who": "Ты", "text": a[1], "kind": "draft", "hearing": a[2], "append": False}})
             elif k == "drop_draft":
                 self.emit({"bubble": {"id": "draft", "who": "Ты", "text": "", "kind": "draft", "append": False, "drop": True}})
             elif k == "state":
                 s = "loading" if a[1] == "listening" and not self.whisper.ready else a[1]
-                self.send({"cmd": "voice_state", "state": s, "dialog": self.conv.dialog})
+                self.send({"cmd": "voice_state", "state": s, "talking": self.conv.active})
         if failed:  # после всех действий: ход уже в «thinking», done() вернёт в покой
             await self.event(("error", f"Claude: {failed}"))
 
@@ -272,6 +267,18 @@ async def main():
                     whisper.maybe_unload(ac)
                 await asyncio.sleep(30)
 
+        async def ticker():
+            while True:
+                await asyncio.sleep(0.2 if oma.conv.active else 1)
+                if oma.conv.active:
+                    events.put_nowait(("tick",))
+
+        async def lock():
+            while True:
+                await asyncio.sleep(2)
+                if oma.conv.active and await asyncio.to_thread(locked):
+                    events.put_nowait(("locked",))
+
         async def mic():
             busy = False
             while True:
@@ -285,7 +292,7 @@ async def main():
         reader = asyncio.StreamReader(limit=1 << 22)  # ask со вставленным логом бывает длинным
         await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
         loop.add_signal_handler(signal.SIGTERM, reader.feed_eof)  # voice_stop: как EOF
-        loops = [asyncio.create_task(keep(n, f)) for n, f in (("daemon", daemon), ("power", power), ("mic", mic))]
+        loops = [asyncio.create_task(keep(n, f)) for n, f in (("daemon", daemon), ("power", power), ("mic", mic), ("ticker", ticker), ("lock", lock))]
         await oma.act([("state", oma.conv.state)])  # демон считает Ому «off», пока она не скажет о себе
         await serve(oma, events, reader)
     finally:  # pw-record и claude не должны остаться сиротами

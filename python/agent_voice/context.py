@@ -87,6 +87,14 @@ def foreign_capture(outputs: list, own: set) -> bool:
     return False
 
 
+def locked() -> bool:
+    """Экран заблокирован: omarchy-hyprland-session-locked вернул 0 (1 — нет, 2 — не определить, как «нет»)."""
+    try:
+        return subprocess.run(["omarchy-hyprland-session-locked"], capture_output=True, timeout=3).returncode == 0
+    except Exception:
+        return False
+
+
 def on_ac(root: str = "/sys/class/power_supply") -> bool:
     """От сети ли питание (Mains или USB online); без таких источников (настольный) — True."""
     ac = []
