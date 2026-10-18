@@ -322,9 +322,11 @@ Item {
                 verticalPadding: Style.space(2)
                 width: Math.max(implicitWidth, implicitHeight)   // square, like an icon button
                 height: width
-                // The mic is lit while a conversation runs; a click then ends it.
+                // The mic is lit while a conversation runs; a click ends it
+                // while Oma listens, and only cuts her answer short otherwise.
                 selected: root.page === "main" && index === 0 && root.speech.talking === true
-                tooltipText: selected ? root.tr("End conversation") : modelData.tip
+                tooltipText: selected && ["listening", "paused"].indexOf(root.speech.oma) >= 0
+                  ? root.tr("End conversation") : modelData.tip
                 foreground: root.fg
                 fontFamily: root.font
                 hasCursor: root.onHead && root.headCol === index

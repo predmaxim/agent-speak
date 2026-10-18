@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
 import "." as Plugin
 import "Model.js" as Model
@@ -48,15 +49,23 @@ Item {
   // set is not the wanted one any more, so the last wanted state wins.
   Process {
     id: escBind
+    readonly property string luaOn: 'local b = _G.predmaxim_oma_esc or hl.bind("ESCAPE", hl.dsp.exec_cmd("omarchy-shell predmaxim.oma cancel")); _G.predmaxim_oma_esc = b; b:set_enabled(true)'
+    readonly property string luaOff: 'if _G.predmaxim_oma_esc then _G.predmaxim_oma_esc:set_enabled(false) end'
     property bool grab: false   // what the running (or the last) run set
-    command: ["hyprctl", "eval", grab
-      ? 'local b = _G.predmaxim_oma_esc or hl.bind("ESCAPE", hl.dsp.exec_cmd("omarchy-shell predmaxim.oma cancel")); _G.predmaxim_oma_esc = b; b:set_enabled(true)'
-      : 'if _G.predmaxim_oma_esc then _G.predmaxim_oma_esc:set_enabled(false) end']
+    command: ["hyprctl", "eval", grab ? luaOn : luaOff]
+    stdout: StdioCollector { id: escOut }
+    stderr: StdioCollector { id: escErr }
     function run(v) { grab = v; running = true }
     function apply() { if (!running && grab !== root.escWanted) run(root.escWanted) }
     onRunningChanged: apply()
+    // A failed run is not retried (a Lua error would loop); the journal shows it.
+    onExited: function(code) {
+      if (code !== 0) console.warn("predmaxim.oma: hyprctl eval exited", code, escOut.text.trim(), escErr.text.trim())
+    }
     // The shell before this one may have left the bind on.
     Component.onCompleted: run(false)
+    // Unloaded or the shell quits: Esc must not stay caught until the next start.
+    Component.onDestruction: Quickshell.execDetached(["hyprctl", "eval", luaOff])
   }
 
   // omarchy-shell predmaxim.oma toggle | talk | cancel
