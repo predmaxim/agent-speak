@@ -39,8 +39,14 @@ const SWITCH_AFTER: Duration = Duration::from_secs(5);
 /// Как часто сверять реестр агентов с диском и /proc.
 const SCAN_EVERY: Duration = Duration::from_secs(2);
 
-/// Упавшую Ому поднимаем не сразу: падающая на старте не крутится в цикле.
+/// Не запустилась — пробуем снова через OMA_RETRY.
 const OMA_RETRY: Duration = Duration::from_secs(10);
+
+/// Упавшую Ому поднимаем не сразу и всё реже (с): падающая на старте не крутится в цикле.
+const OMA_BACKOFF: [u64; 4] = [10, 30, 60, 300];
+
+/// Прожила столько — падение случайное, отсрочка снова с начала.
+const OMA_STABLE: Duration = Duration::from_secs(60);
 
 /// Строка состояния для подписчиков (плагин панели). Порядок полей — протокол.
 #[derive(Serialize)]
@@ -71,6 +77,8 @@ struct Oma {
     dialog: bool,              // постоянный диалог: статусы и финалы агентов звучат
     retry_at: Option<Instant>, // упала или не запустилась — когда поднять
     failing: bool,             // запуск не удаётся: в журнал — только первая ошибка подряд
+    started: Option<Instant>,  // когда запущена нынешняя
+    crashes: usize,            // падений подряд — шаг OMA_BACKOFF
 }
 
 /// Что звучит: тихий режим глушит всё, кроме чтения по хоткею и образца голоса;
@@ -111,6 +119,7 @@ struct State {
     next_scan: Instant,
     unknown_scan_at: Instant, // раньше — сессия не из реестра пересканирования не вызывает
     agents_sent: String, // последняя разосланная строка агентов
+    waiting_sent: usize, // waiting последней разосланной строки состояния
 }
 
 fn home() -> PathBuf {
@@ -232,6 +241,7 @@ pub fn run() {
         next_scan: Instant::now(),
         unknown_scan_at: Instant::now(),
         agents_sent: String::new(),
+        waiting_sent: 0,
     };
     st.oma_spawn();
     for ev in rx {
@@ -484,20 +494,32 @@ impl State {
     /// Состояние всем подписчикам.
     fn broadcast(&mut self) {
         let line = self.status_line();
+        self.waiting_sent = self.registry.waiting();
         self.broadcast_line(&line);
     }
 
     /// Строку (с \n) всем подписчикам; отвалившиеся удаляются молча.
+    /// Сокет закрывается целиком: копию держит ещё поток serve, а клиенту нужен EOF, чтобы переподключиться.
     fn broadcast_line(&mut self, line: &str) {
-        self.subs.retain_mut(|s| s.write_all(line.as_bytes()).is_ok());
+        self.subs.retain_mut(|s| {
+            let ok = s.write_all(line.as_bytes()).is_ok();
+            if !ok {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+            ok
+        });
     }
 
-    /// Строка агентов — подписчикам, если отличается от последней разосланной.
+    /// Строка агентов — подписчикам, если отличается от последней разосланной;
+    /// сменилось число ждущих — ещё и строка состояния (в ней waiting для орба).
     fn push_agents(&mut self) {
         let line = self.registry.line();
         if line != self.agents_sent {
             self.broadcast_line(&line);
             self.agents_sent = line;
+        }
+        if self.registry.waiting() != self.waiting_sent {
+            self.broadcast();
         }
     }
 
@@ -652,6 +674,7 @@ impl State {
                 self.oma.stdin = c.stdin.take();
                 self.oma.child = Some(c);
                 self.oma.failing = false;
+                self.oma.started = Some((self.clock)());
             }
             Err(e) => {
                 if !self.oma.failing {
@@ -675,8 +698,15 @@ impl State {
         }
     }
 
-    /// Ома упала: выключена, диалога и удержания нет; поднять через OMA_RETRY.
+    /// Ома упала: выключена, диалога и удержания нет; поднять через OMA_BACKOFF.
     fn oma_down(&mut self) {
+        let now = (self.clock)();
+        if self.oma.started.take().is_some_and(|t| now.saturating_duration_since(t) >= OMA_STABLE) {
+            self.oma.crashes = 0;
+        }
+        let wait = OMA_BACKOFF[self.oma.crashes.min(OMA_BACKOFF.len() - 1)];
+        self.oma.crashes += 1;
+        eprintln!("agent-speak: Ома поднимется через {wait} с");
         self.oma.stdin = None; // EOF — если ещё жива, выйдет сама
         if let Some(mut c) = self.oma.child.take() {
             let _ = c.kill();
@@ -686,7 +716,7 @@ impl State {
         self.oma.dialog = false;
         self.hold(false);
         self.purge();
-        self.oma.retry_at = Some((self.clock)() + OMA_RETRY);
+        self.oma.retry_at = Some(now + Duration::from_secs(wait));
         self.broadcast();
     }
 
@@ -695,7 +725,7 @@ impl State {
     fn tick(&mut self) {
         let dead = self.oma.child.as_mut().is_some_and(|c| !matches!(c.try_wait(), Ok(None)));
         if dead {
-            eprintln!("agent-speak: Ома завершилась, перезапуск через {} с", OMA_RETRY.as_secs());
+            eprintln!("agent-speak: Ома завершилась");
             self.oma_down();
         }
         let now = (self.clock)();
@@ -740,9 +770,10 @@ impl State {
     }
 
     fn on_msg(&mut self, m: Msg) {
-        let changes = matches!(m, Msg::Stop | Msg::Pause | Msg::VoiceState { .. });
+        let changes = matches!(m, Msg::Stop | Msg::Hush | Msg::Pause | Msg::VoiceState { .. });
         match m {
             Msg::Stop => self.stop(),
+            Msg::Hush => self.shared.hush(), // финалы агентов, удержанные за Омой, не теряются
             Msg::Voice { text } => {
                 self.enqueue(Agent::Claude, "voice", &text, Kind::Voice); // звучит ли — решает audible
             }
@@ -983,6 +1014,7 @@ mod tests {
             next_scan: Instant::now(),
             unknown_scan_at: Instant::now(),
             agents_sent: String::new(),
+            waiting_sent: 0,
             sched: None,
         }
     }
@@ -1250,6 +1282,87 @@ mod tests {
         next(&mut r); // при подписке
         next(&mut r); // строка агентов
         next(&mut r); // после стопа
+    }
+
+    #[test]
+    fn failed_subscriber_shut_down_so_client_reconnects() {
+        use std::io::Read;
+        let mut st = test_state();
+        let (mut ours, theirs) = UnixStream::pair().unwrap();
+        let _serve = theirs.try_clone().unwrap(); // как в serve: исходный дескриптор живёт в потоке соединения
+        st.subscribe(theirs);
+        let big = format!("{}\n", "x".repeat(64 * 1024));
+        for _ in 0..100 {
+            if st.subs.is_empty() {
+                break;
+            }
+            st.broadcast_line(&big); // клиент не читает — буфер забит, запись упирается в таймаут
+        }
+        assert!(st.subs.is_empty());
+        ours.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut buf = Vec::new();
+        assert!(ours.read_to_end(&mut buf).is_ok(), "клиент получил EOF, а не тишину");
+    }
+
+    #[test]
+    fn waiting_change_resends_status_line() {
+        let mut st = test_state();
+        st.cfg.quiet_override = "on".into(); // тишина: звука нет — Busy строку состояния не пришлёт
+        with_agents(&mut st, &["s2"]);
+        let mut r = sub(&mut st);
+        next(&mut r);
+        next(&mut r);
+        let waiting = |r: &mut BufReader<UnixStream>| -> Vec<u64> {
+            drain(r).into_iter().filter(|v| v.get("running").is_some()).map(|v| v["waiting"].as_u64().unwrap()).collect()
+        };
+        st.on_hook("notification", &serde_json::json!({"session_id": "s2", "message": "Claude needs your permission to use Bash", "cwd": "/p/s2"}));
+        assert_eq!(waiting(&mut r), [1]);
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s2", "prompt": "да"}));
+        assert_eq!(waiting(&mut r), [0]);
+    }
+
+    #[test]
+    fn hush_cuts_oma_keeps_held_final_of_focused_agent() {
+        let (mut st, env) = env_state();
+        at(&mut st, &env, Some("s1"), 0);
+        st.on_msg(Msg::VoiceState { state: "speaking".into(), dialog: true });
+        st.on_hook("stop", &serde_json::json!({"session_id": "s1", "last_assistant_message": "Финал агента готов."}));
+        st.on_msg(Msg::Voice { text: "Ответ Омы дальше.".into() });
+        let g0 = st.shared.generation.load(Ordering::SeqCst);
+        st.on_msg(Msg::Hush);
+        assert!(st.shared.generation.load(Ordering::SeqCst) > g0, "звучащая фраза оборвана");
+        st.on_msg(Msg::VoiceState { state: "listening".into(), dialog: true });
+        assert_eq!(texts(&st), ["Финал агента готов."]);
+    }
+
+    #[test]
+    fn oma_respawn_backs_off_and_resets_after_long_life() {
+        let _h = TempHome::new("oma-backoff");
+        let (mut st, env) = env_state();
+        st.voice_cmd = vec!["true".into()];
+        let now = |env: &Env| *env.1.lock().unwrap();
+        // Ома умерла: через сколько секунд её поднимут; потом поднять
+        let crash = |st: &mut State, env: &Env, lived: u64| -> u64 {
+            *env.1.lock().unwrap() += Duration::from_secs(lived);
+            let end = Instant::now() + Duration::from_secs(2);
+            while st.oma.child.is_some() && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(20));
+                st.tick();
+            }
+            let wait = st.oma.retry_at.unwrap().saturating_duration_since(now(env)).as_secs();
+            *env.1.lock().unwrap() += Duration::from_secs(wait - 1);
+            st.tick();
+            assert!(st.oma.child.is_none(), "раньше срока ({wait} с)");
+            *env.1.lock().unwrap() += Duration::from_secs(1);
+            st.tick();
+            assert!(st.oma.child.is_some(), "в срок ({wait} с)");
+            wait
+        };
+        st.oma_spawn();
+        let waits: Vec<u64> = (0..5).map(|_| crash(&mut st, &env, 0)).collect();
+        assert_eq!(waits, [10, 30, 60, 300, 300]);
+        assert_eq!(crash(&mut st, &env, 60), 10); // прожила минуту — снова 10 с
+        assert_eq!(crash(&mut st, &env, 0), 30);
     }
 
     #[test]
@@ -1786,7 +1899,7 @@ mod tests {
 
     fn with_agents(st: &mut State, ids: &[&str]) {
         let live: Vec<Live> = ids.iter().map(|id| Live { id: id.to_string(), agent: "claude", pid: 1, title: format!("T-{id}"),
-            cwd: format!("/p/{id}"), transcript: PathBuf::new(), busy: true }).collect();
+            cwd: format!("/p/{id}"), transcript: PathBuf::new(), state: crate::agents::State::Working, status_at: 0 }).collect();
         st.scan = Box::new(move || live.clone());
         st.rescan();
     }

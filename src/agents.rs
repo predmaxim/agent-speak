@@ -40,7 +40,7 @@ pub struct Entry {
     pub focused: bool,
     pub feed: VecDeque<Line>,
     #[serde(skip)]
-    pub heard: bool, // хук уже говорил об этом агенте — файл сессии состояние не трогает
+    pub heard: bool, // хук уже говорил об этом агенте — файл сессии меняет состояние, только если он новее
 }
 
 /// Живая сессия, найденная на диске / в /proc.
@@ -52,10 +52,12 @@ pub struct Live {
     pub title: String,
     pub cwd: String,
     pub transcript: PathBuf,
-    pub busy: bool,
+    pub state: State,   // по файлу сессии: busy → работает, waiting → ждёт ответа, прочее → простаивает
+    pub status_at: u64, // statusUpdatedAt файла сессии, с; 0 — неизвестно
 }
 
-pub fn scan_claude(sessions: &Path, projects: &Path, alive: impl Fn(u32) -> bool) -> Vec<Live> {
+/// start_of(pid): время старта живого процесса (см. proc_start), None — процесса нет.
+pub fn scan_claude(sessions: &Path, projects: &Path, start_of: impl Fn(u32) -> Option<String>) -> Vec<Live> {
     let Ok(dir) = std::fs::read_dir(sessions) else { return vec![] };
     let dirs: Vec<PathBuf> = std::fs::read_dir(projects).into_iter().flatten().flatten().map(|d| d.path()).collect();
     dir.flatten()
@@ -64,7 +66,13 @@ pub fn scan_claude(sessions: &Path, projects: &Path, alive: impl Fn(u32) -> bool
             let v: Value = serde_json::from_str(&std::fs::read_to_string(f.path()).ok()?).ok()?;
             let pid = u32::try_from(v["pid"].as_u64()?).ok()?;
             let id = v["sessionId"].as_str()?.to_string();
-            if !matches!(v["kind"].as_str(), Some("interactive" | "bg")) || v["entrypoint"] != "cli" || !alive(pid) {
+            if !matches!(v["kind"].as_str(), Some("interactive" | "bg")) || v["entrypoint"] != "cli" {
+                return None;
+            }
+            let started = start_of(pid)?;
+            // pid переиспользован: под тем же номером живёт другой, позже запущенный процесс
+            let ps = &v["procStart"];
+            if !ps.is_null() && ps.as_str().map_or_else(|| ps.to_string(), str::to_string) != started {
                 return None;
             }
             let cwd = v["cwd"].as_str().unwrap_or_default().to_string();
@@ -72,7 +80,13 @@ pub fn scan_claude(sessions: &Path, projects: &Path, alive: impl Fn(u32) -> bool
             let title = if v["nameSource"] != "derived" && !name.is_empty() { name.to_string() } else { folder(&cwd) };
             let file = format!("{id}.jsonl");
             let transcript = dirs.iter().map(|d| d.join(&file)).find(|p| p.exists()).unwrap_or_default();
-            Some(Live { id, agent: "claude", pid, title, cwd, transcript, busy: v["status"] == "busy" })
+            let state = match v["status"].as_str() {
+                Some("busy") => State::Working,
+                Some("waiting") => State::Waiting,
+                _ => State::Idle,
+            };
+            let status_at = v["statusUpdatedAt"].as_u64().unwrap_or(0) / 1000;
+            Some(Live { id, agent: "claude", pid, title, cwd, transcript, state, status_at })
         })
         .collect()
 }
@@ -88,26 +102,36 @@ pub fn scan_codex() -> Vec<Live> {
         }
         let Some((id, transcript)) = focus::codex_rollout(pid) else { continue };
         let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-        out.push(Live { id, agent: "codex", pid, title: focus::project_of(pid), cwd, transcript, busy: false });
+        out.push(Live { id, agent: "codex", pid, title: focus::project_of(pid), cwd, transcript, state: State::Idle, status_at: 0 });
     }
     out
 }
 
 pub fn scan_all() -> Vec<Live> {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude");
-    let mut v = scan_claude(&home.join("sessions"), &home.join("projects"), |pid| Path::new(&format!("/proc/{pid}")).exists());
+    let mut v = scan_claude(&home.join("sessions"), &home.join("projects"), proc_start);
     v.extend(scan_codex());
     v
+}
+
+/// Время старта процесса — поле 22 /proc/<pid>/stat (такты с загрузки); None — процесса нет.
+/// Имя процесса в скобках бывает с пробелами — поля считаются после последней «)».
+pub fn proc_start(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?.1.split_whitespace().nth(19).map(str::to_string)
 }
 
 fn folder(cwd: &str) -> String {
     Path::new(cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-/// Первое предложение (до . ! ? …), не длиннее STATUS_MAX символов.
+/// Первое предложение (до . ! ? … перед пробелом или концом: «1.2», «main.rs» — не конец), не длиннее STATUS_MAX символов.
 fn first_sentence(text: &str) -> String {
     let t = text.trim();
-    let end = t.char_indices().find(|(_, c)| ".!?…".contains(*c)).map_or(t.len(), |(i, c)| i + c.len_utf8());
+    let end = t
+        .char_indices()
+        .find(|&(i, c)| ".!?…".contains(c) && t[i + c.len_utf8()..].chars().next().is_none_or(char::is_whitespace))
+        .map_or(t.len(), |(i, c)| i + c.len_utf8());
     t[..end].chars().take(STATUS_MAX).collect()
 }
 
@@ -127,18 +151,20 @@ impl Registry {
         self.entries.retain(|e| live.iter().any(|l| l.id == e.id));
         let mut changed = self.entries.len() != before;
         for l in live {
-            let state = if l.busy { State::Working } else { State::Idle };
             let transcript = l.transcript.to_string_lossy().into_owned();
             if let Some(e) = self.entries.iter_mut().find(|e| e.id == l.id) {
                 (e.title, e.project, e.cwd, e.transcript) = (l.title, folder(&l.cwd), l.cwd, transcript);
-                if !e.heard && e.state != state {
+                // после хуков файл главнее, только если обновлён позже последнего события: разрешение одобрено
+                // в терминале и Esc хуков не шлют; «простаивает» не стирает «готово»
+                let state = if l.state == State::Idle && e.state == State::Done { State::Done } else { l.state };
+                if (!e.heard || l.status_at > e.since) && e.state != state {
                     (e.state, e.since) = (state, now);
                 }
             } else {
                 changed = true;
                 self.entries.push(Entry {
                     id: l.id, agent: l.agent, title: l.title, project: folder(&l.cwd), cwd: l.cwd, transcript,
-                    state, status: String::new(), since: now, focused: false, feed: VecDeque::new(), heard: false,
+                    state: l.state, status: String::new(), since: now, focused: false, feed: VecDeque::new(), heard: false,
                 });
             }
         }
@@ -221,7 +247,44 @@ impl Registry {
 mod tests {
     use super::*;
     fn live(id: &str, busy: bool) -> Live {
-        Live { id: id.into(), agent: "claude", pid: 1, title: id.into(), cwd: format!("/p/{id}"), transcript: PathBuf::new(), busy }
+        let state = if busy { State::Working } else { State::Idle };
+        Live { id: id.into(), agent: "claude", pid: 1, title: id.into(), cwd: format!("/p/{id}"), transcript: PathBuf::new(), state, status_at: 0 }
+    }
+
+    #[test]
+    fn first_sentence_ends_only_before_space_or_end() {
+        assert_eq!(first_sentence("Версия 1.2 готова. Дальше"), "Версия 1.2 готова.");
+        assert_eq!(first_sentence("Готово... Дальше"), "Готово...");
+        assert_eq!(first_sentence("Правлю main.rs"), "Правлю main.rs");
+    }
+
+    #[test]
+    fn session_file_status_followed_when_newer_than_hooks() {
+        let f = |id: &str, state, at| Live { state, status_at: at, ..live(id, false) };
+        let state = |r: &Registry, id| r.get(id).unwrap().state;
+        let mut r = Registry::new();
+        // демон перезапущен: хуков ещё не было — состояние из файла
+        r.sync(vec![f("a", State::Waiting, 90), f("b", State::Working, 90), f("c", State::Idle, 90)], 100);
+        assert_eq!([state(&r, "a"), state(&r, "b"), state(&r, "c")], [State::Waiting, State::Working, State::Idle]);
+        r.sync(vec![f("a", State::Idle, 95)], 101);
+        assert_eq!(state(&r, "a"), State::Idle);
+        r.question("a", "Клоду нужно разрешение на команду", 110);
+        r.sync(vec![f("a", State::Working, 105)], 111); // файл старше хука — хук главнее
+        assert_eq!(state(&r, "a"), State::Waiting);
+        r.sync(vec![f("a", State::Working, 120)], 121); // разрешение одобрено в терминале: хука нет
+        assert_eq!((state(&r, "a"), r.get("a").unwrap().since), (State::Working, 121));
+        r.sync(vec![f("a", State::Waiting, 125)], 126); // снова спросил
+        assert_eq!(state(&r, "a"), State::Waiting);
+        r.sync(vec![f("a", State::Idle, 130)], 131); // Esc: ни Stop, ни ответа
+        assert_eq!(state(&r, "a"), State::Idle);
+        r.prompt("a", "дальше", 140);
+        r.sync(vec![f("a", State::Idle, 150)], 151); // Esc посреди работы
+        assert_eq!(state(&r, "a"), State::Idle);
+        r.finished("a", "Готово.", 160);
+        r.sync(vec![f("a", State::Idle, 161)], 162); // «готово» остаётся «готово»
+        assert_eq!(state(&r, "a"), State::Done);
+        r.sync(vec![f("a", State::Working, 170)], 171);
+        assert_eq!(state(&r, "a"), State::Working);
     }
 
     #[test]
@@ -237,11 +300,15 @@ mod tests {
         std::fs::write(ss.join("3.json"), s(3, "c", "interactive", "sdk-cli", "tmp-1", "derived")).unwrap();
         std::fs::write(ss.join("4.json"), s(4, "d", "interactive", "cli", "x", "derived")).unwrap();
         std::fs::write(ss.join("1.abc.key"), "мусор").unwrap();
+        // pid переиспользован: у процесса с этим номером другое время старта
+        std::fs::write(ss.join("5.json"), r#"{"pid":5,"sessionId":"e","cwd":"/w","kind":"interactive","entrypoint":"cli","procStart":"999"}"#).unwrap();
+        std::fs::write(ss.join("6.json"), r#"{"pid":6,"sessionId":"f","cwd":"/w","kind":"interactive","entrypoint":"cli","procStart":"100"}"#).unwrap();
         std::fs::write(pp.join("-home-u-Work/a.jsonl"), "").unwrap();
-        let got = scan_claude(&ss, &pp, |pid| pid != 4);
+        let got = scan_claude(&ss, &pp, |pid| (pid != 4).then(|| "100".to_string()));
         let mut ids: Vec<(String, String)> = got.iter().map(|l| (l.id.clone(), l.title.clone())).collect();
         ids.sort();
-        assert_eq!(ids, [("a".into(), "Work".into()), ("b".into(), "Почтовый клиент".into())]);
+        assert_eq!(ids, [("a".into(), "Work".into()), ("b".into(), "Почтовый клиент".into()), ("f".into(), "w".into())]);
+        assert!(proc_start(std::process::id()).is_some_and(|s| s.parse::<u64>().is_ok()));
         assert!(got.iter().find(|l| l.id == "a").unwrap().transcript.ends_with("-home-u-Work/a.jsonl"));
         let _ = std::fs::remove_dir_all(root);
     }

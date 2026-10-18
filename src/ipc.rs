@@ -11,6 +11,8 @@ pub enum Msg {
     Hook { kind: String, payload: serde_json::Value },
     Read,
     Stop,
+    /// Ому перебили: оборвать звучащее, выбросить её ответ и статусы; финалы и срочное остаются.
+    Hush,
     Pause,
     /// Соединение остаётся открытым: сервис пишет строку состояния сразу и при каждом изменении.
     Subscribe,
@@ -48,6 +50,7 @@ mod tests {
         assert!(s.contains("\"cmd\":\"hook\""));
         assert!(matches!(serde_json::from_str::<Msg>(&s).unwrap(), Msg::Hook { .. }));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"pause\"}").unwrap(), Msg::Pause));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"hush\"}").unwrap(), Msg::Hush));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"subscribe\"}").unwrap(), Msg::Subscribe));
         let set = serde_json::from_str::<Msg>("{\"cmd\":\"set\",\"key\":\"read_intermediate\",\"value\":false}").unwrap();
         assert!(matches!(set, Msg::Set { ref key, ref value } if key == "read_intermediate" && *value == serde_json::json!(false)));

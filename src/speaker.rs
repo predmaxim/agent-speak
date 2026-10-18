@@ -99,6 +99,11 @@ impl Shared {
         }
     }
 
+    /// Перебивание Омы: оборвать звучащую фразу; очередь — см. Queue::hush. Паузу не снимает.
+    pub fn hush(&self) {
+        self.bump(&mut self.queue.lock().unwrap(), Queue::hush);
+    }
+
     pub fn stop(&self) {
         self.bump(&mut self.queue.lock().unwrap(), |q| {
             q.clear_active();

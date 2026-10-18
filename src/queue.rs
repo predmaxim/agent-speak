@@ -35,7 +35,7 @@ pub struct Queue {
     active: String,                 // активная сессия; пусто — ещё не выбрана, играют все
     popped: Option<(String, Kind)>,     // последняя отданная фраза — «что сейчас звучит»
     started: HashSet<(String, String)>, // (сессия, сообщение) начаты и не дочитаны — не устаревают
-    hold: bool,                         // Ома думает или говорит: фразы агентов ждут
+    hold: bool,                         // Ома думает или говорит: фразы агентов (и срочное) ждут
 }
 
 impl Queue {
@@ -76,9 +76,9 @@ impl Queue {
         self.hold
     }
 
-    /// Играет ли фраза сейчас: активная сессия, срочное, образец, чтение, Ома; на удержании — не агенты.
+    /// Играет ли фраза сейчас: активная сессия, срочное, образец, чтение, Ома; на удержании — не агенты (и не срочное).
     fn playable(&self, i: &Item) -> bool {
-        !(self.hold && matches!(i.kind, Kind::Status | Kind::Manual))
+        !(self.hold && matches!(i.kind, Kind::Status | Kind::Manual | Kind::Urgent))
             && (self.active.is_empty() || i.session == self.active || matches!(i.kind, Kind::Urgent | Kind::Preview | Kind::Read | Kind::Voice))
     }
 
@@ -200,6 +200,13 @@ impl Queue {
         self.started.retain(|(s, _)| !active.is_empty() && *s != active);
     }
 
+    /// Ому перебили: её ответ и живые статусы не нужны; финалы, срочное, чтение и образец ждут своей очереди.
+    pub fn hush(&mut self) {
+        self.items.retain(|i| !matches!(i.kind, Kind::Voice | Kind::Status));
+        let items = &self.items;
+        self.started.retain(|(s, m)| items.iter().any(|i| i.session == *s && i.msg == *m));
+    }
+
     pub fn clear_session(&mut self, session: &str) {
         self.items.retain(|i| i.session != session);
         if self.popped.as_ref().is_some_and(|(s, _)| s == session) {
@@ -236,12 +243,30 @@ mod tests {
         let t = Instant::now();
         let mut q = Queue::new(Duration::from_secs(30));
         q.push(it("статус", Kind::Status, t));
+        q.push(it("срочно", Kind::Urgent, t));
         q.push(Item { session: "oma".into(), text: "ответ".into(), kind: Kind::Voice, born: t, msg: "o".into(), speaker: String::new() });
         q.set_hold(true);
         assert_eq!(q.pop(t).unwrap().text, "ответ");
         assert!(q.pop(t).is_none());
         q.set_hold(false);
+        assert_eq!(q.pop(t).unwrap().text, "срочно");
         assert_eq!(q.pop(t).unwrap().text, "статус");
+    }
+
+    #[test]
+    fn hush_drops_oma_and_statuses_keeps_finals_and_urgent() {
+        let t = Instant::now();
+        let mut q = Queue::new(Duration::from_secs(30));
+        q.set_active("s");
+        q.set_hold(true); // Ома говорит: финал агента в фокусе ждёт
+        q.push(it("финал", Kind::Manual, t));
+        q.push(msg("s", "статус", Kind::Status, t, "st"));
+        q.push(it("срочно", Kind::Urgent, t));
+        q.push(Item { session: "voice".into(), text: "ответ дальше".into(), kind: Kind::Voice, born: t, msg: "o".into(), speaker: String::new() });
+        q.hush();
+        q.set_hold(false);
+        let got: Vec<String> = std::iter::from_fn(|| q.pop(t)).map(|i| i.text).collect();
+        assert_eq!(got, vec!["срочно", "финал"]);
     }
 
     #[test]
