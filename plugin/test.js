@@ -149,13 +149,11 @@ assert.deepStrictEqual([1, 2, 5, 11, 12, 21, 22, 25, 111, 0].map(n => ru("%1 age
 
 // Every tr("…") in the QML files and Model.js has a Russian line, and no ru line is dead
 const files = fs.readdirSync(__dirname).filter(f => f.endsWith(".qml"))
-// Until Tasks 6/7 rewrite the QML: its old keys lose their line, the new lines have no user yet
-const DROPPED = ["Continuous dialog"]
-const used = new Set(keys.add("Read agents aloud").add("End conversation"))
+const used = new Set(keys)
 for (const f of files.concat("Model.js"))
   for (const m of fs.readFileSync(__dirname + "/" + f, "utf8").matchAll(/\btr\("((?:[^"\\]|\\.)*)"/g)) {
     const k = JSON.parse(`"${m[1]}"`)
-    assert.ok(Object.prototype.hasOwnProperty.call(I.TABLES.ru, k) || DROPPED.includes(k), f + ": no ru for " + k)
+    assert.ok(Object.prototype.hasOwnProperty.call(I.TABLES.ru, k), f + ": no ru for " + k)
     used.add(k)
   }
 for (const k of Object.keys(I.TABLES.ru)) assert.ok(used.has(k), "unused ru line: " + k)

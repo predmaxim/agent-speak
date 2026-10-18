@@ -17,6 +17,7 @@ Item {
   id: root
 
   property var link
+  property var draft: null           // Oma's draft bubble, shown at the chat's end
   property bool shown: false
   // The window opens on the focused screen and stays there while open.
   function toggle() {
@@ -54,7 +55,7 @@ Item {
     return null
   }
   readonly property int rowCount: page === "main" ? agents.length : page === "history" ? chatList.length : Model.SETTINGS_ROWS.length
-  // Main page: talk, new chat, history, settings, the dialog switch; a page: Back.
+  // Main page: talk, new chat, history, settings, the agents-voice switch; a page: Back.
   readonly property int headCount: page === "main" ? 5 : 1
 
   function focusedScreen() {
@@ -131,7 +132,7 @@ Item {
     else if (col === 1) root.newChat()
     else if (col === 2) root.showPage("history")
     else if (col === 3) root.showPage("settings")
-    else root.send({ do: "dialog" })
+    else root.choose("agents_voice", !root.speech.agents_voice, false)
   }
 
   // ↑/↓ the rows, ↑ from the first one onto the header; ←/→ its buttons,
@@ -177,7 +178,13 @@ Item {
     else root.ask()
   }
 
-  function scrollDown() { Qt.callLater(function() { chatView.positionViewAtEnd() }) }
+  // To the chat's end, and kept there (chatView.follow) while the layer
+  // window gets its size and long lines wrap. Every new messages array comes
+  // here too: it resets the view to its top.
+  function scrollDown() {
+    chatView.follow = true
+    Qt.callLater(function() { chatView.positionViewAtEnd() })
+  }
 
   // Shown: ask Oma for her current chat (a keyless `open` switches nothing;
   // her answer, `was` "*", is adopted), so after a shell restart the window
@@ -196,6 +203,8 @@ Item {
     }
   }
   onMessagesChanged: root.scrollDown()
+  // The draft is the footer, not the model: it keeps the end only while the chat follows.
+  onDraftChanged: if (chatView.follow) root.scrollDown()
   onRowCountChanged: if (root.cursor >= root.rowCount) root.cursor = root.rowCount - 1
 
   Connections {
@@ -279,7 +288,7 @@ Item {
             size: Style.font.display
             line: Math.max(1, Style.space(2))
           }
-          // Right to left: the dialog switch at the edge, the buttons, the
+          // Right to left: the agents-voice switch at the edge, the buttons, the
           // count of agents waiting for an answer. A page has only Back.
           trailingControl: Row {
             spacing: Style.space(10)
@@ -313,7 +322,9 @@ Item {
                 verticalPadding: Style.space(2)
                 width: Math.max(implicitWidth, implicitHeight)   // square, like an icon button
                 height: width
-                tooltipText: modelData.tip
+                // The mic is lit while a conversation runs; a click then ends it.
+                selected: root.page === "main" && index === 0 && root.speech.talking === true
+                tooltipText: selected ? root.tr("End conversation") : modelData.tip
                 foreground: root.fg
                 fontFamily: root.font
                 hasCursor: root.onHead && root.headCol === index
@@ -322,14 +333,14 @@ Item {
             }
 
             ToggleSwitch {
-              id: dialogSwitch
+              id: agentsSwitch
               visible: root.page === "main"
               anchors.verticalCenter: parent.verticalCenter
-              checked: root.speech.dialog === true
+              checked: root.speech.agents_voice === true
               hasCursor: root.onHead && root.headCol === 4
               foreground: root.fg
               onToggled: root.press(4)
-              PanelToolTip { visible: dialogSwitch.containsMouse; text: root.tr("Continuous dialog") }
+              PanelToolTip { visible: agentsSwitch.containsMouse; text: root.tr("Read agents aloud") }
             }
           }
         }
@@ -490,30 +501,46 @@ Item {
               boundsBehavior: Flickable.StopAtBounds
               model: root.messages
               header: root.agent ? feedHeader : null
+              footer: root.draft ? draftFooter : null
 
-              delegate: Column {
+              // Holds the end until the user scrolls (a scroll also re-estimates
+              // contentHeight, which must not pull the view back); back at the
+              // end, it holds again.
+              property bool follow: true
+              onContentHeightChanged: if (follow) root.scrollDown()
+              onHeightChanged: if (follow) root.scrollDown()
+              onMovementStarted: follow = false
+              onMovementEnded: follow = atYEnd
+
+              delegate: ChatLine {
                 required property var modelData
                 width: ListView.view.width
-                spacing: Style.space(4)
+                role: modelData.role
+                body: modelData.text
+              }
+            }
 
-                Text {
-                  textFormat: Text.PlainText
-                  text: (parent.modelData.role === "me" ? root.tr("You") : root.tr("Oma")).toUpperCase()
-                  color: root.dim
-                  font.family: root.font
-                  font.pixelSize: Style.font.body
-                  font.bold: true
-                  font.letterSpacing: 1.2
-                }
+            // The phrase being spoken, after the last line; as in the orb's
+            // bubble, "…" while Oma still hears it.
+            Component {
+              id: draftFooter
 
-                Text {
+              Item {
+                width: chatView.width
+                height: draftLine.y + draftLine.height
+
+                ChatLine {
+                  id: draftLine
+                  y: chatView.count > 0 ? chatView.spacing : 0
                   width: parent.width
-                  textFormat: Text.PlainText
-                  text: parent.modelData.text
-                  color: root.fg
-                  font.family: root.font
-                  font.pixelSize: Style.font.title
-                  wrapMode: Text.Wrap
+                  role: "me"
+                  body: {
+                    var d = root.draft
+                    if (!d) return ""
+                    var t = d.text || ""
+                    return !d.hearing ? t : t ? t + " …" : "…"
+                  }
+                  bodyColor: root.dim
                 }
               }
             }
@@ -785,6 +812,47 @@ Item {
             }
           }
         }
+      }
+    }
+  }
+
+  // A chat line: a card tinted like the orb's bubbles, ТЫ/ОМА above the text.
+  component ChatLine: Rectangle {
+    id: chatLine
+    property string role: "me"
+    property string body: ""
+    property color bodyColor: root.fg
+    readonly property string tone: Model.tone(role)
+    readonly property color base: tone === "me" ? Color.accent : Color.foreground
+    implicitHeight: lineText.implicitHeight + Style.space(10) * 2
+    color: Qt.tint(Color.popups.background, Qt.rgba(base.r, base.g, base.b, Model.TONE_ALPHA[tone]))
+    radius: Style.cornerRadius
+
+    Column {
+      id: lineText
+      x: Style.space(10)
+      y: Style.space(10)
+      width: parent.width - Style.space(10) * 2
+      spacing: Style.space(4)
+
+      Text {
+        textFormat: Text.PlainText
+        text: (chatLine.role === "me" ? root.tr("You") : root.tr("Oma")).toUpperCase()
+        color: root.dim
+        font.family: root.font
+        font.pixelSize: Style.font.body
+        font.bold: true
+        font.letterSpacing: 1.2
+      }
+
+      Text {
+        width: parent.width
+        textFormat: Text.PlainText
+        text: chatLine.body
+        color: chatLine.bodyColor
+        font.family: root.font
+        font.pixelSize: Style.font.title
+        wrapMode: Text.Wrap
       }
     }
   }
