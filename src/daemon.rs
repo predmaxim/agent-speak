@@ -1276,6 +1276,8 @@ mod tests {
         let mut r = reader(live);
         st.subscribe(a);
         st.subscribe(b);
+        // одного drop мало: соседний тест запускает процесс, и до exec копия дескриптора живёт в его fork
+        dead.shutdown(std::net::Shutdown::Both).unwrap();
         drop(dead);
         st.on_msg(Msg::Stop);
         assert_eq!(st.subs.len(), 1);
