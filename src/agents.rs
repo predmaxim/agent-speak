@@ -120,8 +120,6 @@ pub fn scan_all() -> Vec<Live> {
     v
 }
 
-/// Время старта процесса — поле 22 /proc/<pid>/stat (такты с загрузки); None — процесса нет.
-/// Имя процесса в скобках бывает с пробелами — поля считаются после последней «)».
 /// Последний заголовок сессии (`custom-title` или `ai-title`) из хвоста транскрипта: читаем с конца кусками по 64 КиБ, не больше 1 МиБ.
 // ponytail: кэш по размеру файла, если скан раз в 2 с станет заметен.
 fn session_title(transcript: &Path) -> Option<String> {
@@ -163,6 +161,8 @@ fn line_title(line: &[u8]) -> Option<String> {
     v[key].as_str().filter(|t| !t.trim().is_empty()).map(str::to_string)
 }
 
+/// Время старта процесса — поле 22 /proc/<pid>/stat (такты с загрузки); None — процесса нет.
+/// Имя процесса в скобках бывает с пробелами — поля считаются после последней «)».
 pub fn proc_start(pid: u32) -> Option<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     stat.rsplit_once(')')?.1.split_whitespace().nth(19).map(str::to_string)

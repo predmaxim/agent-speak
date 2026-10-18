@@ -22,7 +22,7 @@ pub enum Msg {
     Say { text: String },
     /// Ответ Омы голосом.
     Voice { text: String },
-    /// Состояние Омы (idle | loading | listening | thinking | speaking | paused) и постоянный диалог.
+    /// Состояние Омы (idle | loading | listening | thinking | speaking | paused) и talking — идёт ли разговор.
     VoiceState { state: String, #[serde(default)] talking: bool },
     /// Команда Оме от плагина и CLI: action уходит строкой в её stdin.
     Oma { action: serde_json::Value },

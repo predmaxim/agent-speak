@@ -701,7 +701,7 @@ impl State {
         }
     }
 
-    /// Ома упала: выключена, диалога и удержания нет; поднять через OMA_BACKOFF.
+    /// Ома упала: выключена, разговора (talking) и удержания нет; поднять через OMA_BACKOFF.
     fn oma_down(&mut self) {
         let now = (self.clock)();
         if self.oma.started.take().is_some_and(|t| now.saturating_duration_since(t) >= OMA_STABLE) {

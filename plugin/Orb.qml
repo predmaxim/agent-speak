@@ -8,7 +8,7 @@ import qs.Ui
 import "Model.js" as Model
 import "I18n.js" as I18n
 
-// Oma's orb: a circle in a corner of the focused screen with up to three
+// Oma's orb: a circle anywhere on the focused screen with up to three
 // bubbles beside it. It lives on the Top layer, so a fullscreen window covers
 // it, and clicks pass through everything but the circle and the bubbles. The
 // window is only as big as its content, so the circle's animations repaint a

@@ -9,7 +9,7 @@ pub struct Config {
     pub speaker: String,
     pub rate: String,
     pub max_age_secs: u64,
-    /// false — в диалоге только финальный ответ хода, без промежуточных статусов
+    /// false — при agents_voice звучит только финальный ответ хода, без промежуточных статусов
     pub read_intermediate: bool,
     /// тихий режим по расписанию (окно quiet_from..quiet_to, ЧЧ:ММ)
     pub quiet_schedule: bool,
