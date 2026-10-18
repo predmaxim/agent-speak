@@ -24,7 +24,7 @@
 
 - **Рабочее место.** Работа идёт в worktree `~/Projects/agent-speak-talk`, ветка `oma-talk` от `main`.
   - Почему не в `~/Projects/agent-speak`: оттуда живыми ссылками работают плагин и `agent_voice`.
-  - В `main` ветка вливается только в Task 7, с пользователем.
+  - В `main` ветка вливается только в Task 8, с пользователем.
   - Создать worktree: `git -C ~/Projects/agent-speak worktree add ~/Projects/agent-speak-talk -b oma-talk`.
 - **Коммиты.** Без ИИ-соавторов, по-русски, в форме `область: что сделано`. Ничего личного в коде и тестах.
 - **Язык.** В Rust и Python комментарии по-русски. В QML комментарии по-английски, как сейчас; каждая новая строка интерфейса — английский ключ плюс русский перевод в `plugin/I18n.js`.
@@ -62,11 +62,11 @@
 
 ## Review Focus
 
-1. **Esc остаётся включённым после сбоя.** Сценарии: падает Ома, рестартует демон или оболочка посреди фразы. Ожидание: Esc снова доходит до программ. Сторожит `Model.escWanted`: тест в Task 4 и строка в Task 6 — при старте плагина бинд выключается.
-2. **Фраза приходит после конца разговора.** whisper ещё распознавал, когда пользователь кликнул «закончить». Ожидание: фраза выброшена, черновик не появляется. Тест `test_phrase_after_end_dropped` в Task 2.
-3. **Речь началась, а фраза так и не пришла.** Микрофон занял voxtype или созвон, и сегментатор сброшен. Ожидание: «слышу» не залипает, отправка и счёт тишины не встают навсегда. Тест `test_mic_busy_clears_hearing` в Task 2.
-4. **Орб на мониторе меньше того, где его поставили.** Ожидание: орб на экране, отступ урезан. Тест `parsePos` с обрезкой в Task 4.
-5. **Ома упала с недосказанной фразой.** Ожидание: «…» не висит у орба и в чате вечно. Строка в Task 6: при `oma: off` черновик сбрасывается.
+1. **Esc остаётся включённым после сбоя.** Сценарии: падает Ома, рестартует демон или оболочка посреди фразы. Ожидание: Esc снова доходит до программ. Сторожит `Model.escWanted`: тест в Task 5 и строка в Task 7 — при старте плагина бинд выключается.
+2. **Фраза приходит после конца разговора.** whisper ещё распознавал, когда пользователь кликнул «закончить». Ожидание: фраза выброшена, черновик не появляется. Тест `test_phrase_after_end_dropped` в Task 3.
+3. **Речь началась, а фраза так и не пришла.** Микрофон занял voxtype или созвон, и сегментатор сброшен. Ожидание: «слышу» не залипает, отправка и счёт тишины не встают навсегда. Тест `test_mic_busy_clears_hearing` в Task 3.
+4. **Орб на мониторе меньше того, где его поставили.** Ожидание: орб на экране, отступ урезан. Тест `parsePos` с обрезкой в Task 5.
+5. **Ома упала с недосказанной фразой.** Ожидание: «…» не висит у орба и в чате вечно. Строка в Task 7: при `oma: off` черновик сбрасывается.
 
 ---
 
@@ -148,7 +148,52 @@
 
 ---
 
-### Task 2: Машина разговора — один режим
+### Task 2: Демон — агенты названы как их окна
+
+**Files:**
+- Modify: `src/agents.rs` (`scan_claude`, новая `fn session_title(transcript: &Path) -> Option<String>`, тесты)
+
+**Interfaces:**
+- Produces: `Live.title` и строка агентов `title`. Порядок выбора названия:
+  1. имя сессии, если `nameSource != "derived"`;
+  2. иначе последняя `customTitle` или `aiTitle` из транскрипта;
+  3. иначе папка.
+
+  Плагин и мозг Омы берут `title` как есть, менять их не нужно.
+
+- [ ] **Step 1: Write the failing test**
+
+  В `agents.rs`, тест `title_from_transcript`. Транскрипт во временной папке:
+  - строки `{"type":"ai-title","aiTitle":"Старое"}`, затем 300 КиБ строк `{"type":"assistant","x":"…"}`, затем `{"type":"ai-title","aiTitle":"Скилл GitGuardian"}` и ещё 100 КиБ мусора → `session_title(&p) == Some("Скилл GitGuardian")`;
+  - добавить в конец `{"type":"custom-title","customTitle":"мой"}` → `Some("мой")` (что записано позже, то и главнее);
+  - файл без заголовков → `None`; нет файла → `None`.
+
+  В `scan_keeps_only_live_user_sessions` для сессии с `nameSource: "derived"` положить транскрипт с `ai-title` и ждать название из него, а не папку.
+
+- [ ] **Step 2: Run test to verify it fails**
+
+  Run: `cargo test title_from_transcript`
+  Expected: ошибка компиляции — нет `session_title`.
+
+- [ ] **Step 3: Implement**
+
+  `session_title` читает файл с конца кусками по 64 КиБ, не больше 1 МиБ, и берёт последнюю строку с `"type":"custom-title"` или `"type":"ai-title"` (парсить JSON строки, `customTitle`/`aiTitle`, пустую пропускать).
+  - Строка на стыке кусков — склеить с началом следующего куска.
+  - Лимит: заголовок повторяется в транскрипте примерно каждые 15 строк (50–230 КиБ), и мегабайта хватает с запасом. Цена: при скане раз в 2 с читается не больше 1 МиБ на сессию из page cache.
+  - Отметить `// ponytail: …`: кэш по размеру файла — если скан станет заметен.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+  Run: `cargo test`
+  Expected: всё зелёное.
+
+- [ ] **Step 5: Commit**
+
+  `git commit -am "agents: название агента — как у его окна (ai-title из транскрипта), а не папка"`
+
+---
+
+### Task 3: Машина разговора — один режим
 
 **Files:**
 - Modify: `python/agent_voice/conversation.py` (переписать класс)
@@ -291,7 +336,7 @@
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-  Run: тот же pytest. Expected: тесты машины зелёные. Тест `test_oma_routes_…` падает до Task 3 — это допустимо, отметить в отчёте.
+  Run: тот же pytest. Expected: тесты машины зелёные. Тест `test_oma_routes_…` падает до Task 4 — это допустимо, отметить в отчёте.
 
 - [ ] **Step 5: Commit**
 
@@ -299,7 +344,7 @@
 
 ---
 
-### Task 3: Процесс Омы — нумерация речи, тики, блокировка, пузыри
+### Task 4: Процесс Омы — нумерация речи, тики, блокировка, пузыри
 
 **Files:**
 - Modify: `python/agent_voice/ear.py` (`Ear._read`, `Ear._recognize`)
@@ -308,7 +353,7 @@
 - Test: `python/test_agent_voice.py`
 
 **Interfaces:**
-- Consumes: `Conversation` из Task 2.
+- Consumes: `Conversation` из Task 3.
 - Produces — события слуха:
   - `("start", n)` и `("phrase", text, n)`;
   - `n` — `Ear.seq`, растёт на каждое начало речи и не сбрасывается при перезапуске слуха.
@@ -382,14 +427,14 @@
 
 ---
 
-### Task 4: Плагин — модель
+### Task 5: Плагин — модель
 
 **Files:**
 - Modify: `plugin/Model.js`, `plugin/I18n.js`
 - Test: `plugin/test.js`
 
 **Interfaces:**
-- Consumes: поля строки состояния из Task 1; пузыри из Task 3.
+- Consumes: поля строки состояния из Task 1; пузыри из Task 4.
 - Produces (в `Model.js`):
 
   | Функция / значение | Что делает |
@@ -451,14 +496,14 @@
 
 ---
 
-### Task 5: Плагин — орб: свободное место, оттенки, без «Отправить»
+### Task 6: Плагин — орб: свободное место, оттенки, без «Отправить»
 
 **Files:**
 - Modify: `plugin/Orb.qml`
 
 **Interfaces:**
-- Consumes: `Model.parsePos`, `Model.place`, `Model.tone`, `Model.TONE_ALPHA` (Task 4); `link.speech.orb_pos` (Task 1).
-- Produces: те же `property var bubbles` (уже с черновиком — его подставит Task 6), `signal dismissed(key)`, `signal windowToggled()`.
+- Consumes: `Model.parsePos`, `Model.place`, `Model.tone`, `Model.TONE_ALPHA` (Task 5); `link.speech.orb_pos` (Task 1).
+- Produces: те же `property var bubbles` (уже с черновиком — его подставит Task 7), `signal dismissed(key)`, `signal windowToggled()`.
 
 - [ ] **Step 1: Position**
   - `saved` = `link.speech.orb_pos || "bottom-right,0,0"`; `dropped` — как сейчас, только строка `orb_pos`.
@@ -476,7 +521,7 @@
 
 - [ ] **Step 3: Verify**
   - Run: `node plugin/test.js`. Expected: зелёное.
-  - Run: `qmllint` по `Orb.qml`, если он доступен в системе (`which qmllint6 qmllint`). Иначе проверка — в Task 7 (журнал оболочки после перезапуска).
+  - Run: `qmllint` по `Orb.qml`, если он доступен в системе (`which qmllint6 qmllint`). Иначе проверка — в Task 8 (журнал оболочки после перезапуска).
 
 - [ ] **Step 4: Commit**
 
@@ -484,13 +529,13 @@
 
 ---
 
-### Task 6: Плагин — черновик и пузыри по месту, Esc, шапка и чат окна
+### Task 7: Плагин — черновик и пузыри по месту, Esc, шапка и чат окна
 
 **Files:**
 - Modify: `plugin/Oma.qml`, `plugin/Window.qml`
 
 **Interfaces:**
-- Consumes: `Model.withDraft`, `Model.escWanted`, `Model.tone`, `Model.TONE_ALPHA` (Task 4); `speech.talking`, `speech.agents_voice` (Task 1); пузыри `draft` с `hearing` и `me` (Task 3).
+- Consumes: `Model.withDraft`, `Model.escWanted`, `Model.tone`, `Model.TONE_ALPHA` (Task 5); `speech.talking`, `speech.agents_voice` (Task 1); пузыри `draft` с `hearing` и `me` (Task 4).
 - Produces:
   - IPC `predmaxim.oma`: `toggle()`, `talk()`, `cancel()`; `dialog()` удаляется;
   - `Window`: `property var draft` (null или пузырь черновика), `readonly property bool shown`.
@@ -526,17 +571,30 @@
   - При смене `draft` — `root.scrollDown()`.
   - `back()` не меняется: пока фраза идёт, Esc ловит бинд Hyprland, до окна он не доходит.
 
-- [ ] **Step 5: Verify**
+- [ ] **Step 5: `Window.qml` — чат держит низ**
+
+  **Гипотеза причины** (подтвердить в живой проверке Task 8): `scrollDown()` зовёт `positionViewAtEnd()` один раз через `Qt.callLater`, сразу после `shown` или `messages`. В этот момент окно слоя ещё не получило размер, переносимые строки не разложены, и рост высоты потом оставляет вид выше конца.
+
+  Исправление:
+  - у `chatView` `property bool follow: true`;
+  - `onContentHeightChanged` и `onHeightChanged` при `follow` зовут `positionViewAtEnd()`;
+  - `onMovementEnded: follow = atYEnd`;
+  - `scrollDown()` ставит `follow = true` и прокручивает;
+  - `scrollDown()` зовут прежние места плюс смена `draft`.
+
+  Если в живой проверке окно всё равно открывается не внизу — вернуться к диагностике (лог `height`, `contentHeight`, `contentY` при открытии), а не наращивать исправления.
+
+- [ ] **Step 6: Verify**
   - Run: `node plugin/test.js`. Expected: зелёное.
   - Run: `grep -rn '"send"\|do: "dialog"\|dialogSwitch\|orb_corner\|"Send"\|Continuous dialog' plugin/`. Expected: пусто.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
-  `git commit -am "plugin: черновик и разговор — в чате открытого окна или в пузырях, Esc отменяет фразу, тумблер «Озвучивать агентов»"`
+  `git commit -am "plugin: черновик и разговор — в чате открытого окна или в пузырях, Esc отменяет фразу, тумблер «Озвучивать агентов», чат держит низ"`
 
 ---
 
-### Task 7: Документация, система, слияние, живая проверка (с пользователем)
+### Task 8: Документация, система, слияние, живая проверка (с пользователем)
 
 **Files:**
 - Modify: `README.md` — разделы «Ома» (орб, пузыри, окно), «Как звучат агенты», «Управление», «Настройки»:
@@ -572,7 +630,7 @@
 
 - [ ] **Step 4: Живая проверка — после «руки убрал?»**
 
-  Пункты 1–9 из «Как понять, что готово» в дизайне. Снимки — `grim`, окно — `omarchy-shell predmaxim.oma toggle`, состояние — строка из сокета. Голосовые пункты (1–4) проходит пользователь, ты смотришь журнал и снимки.
+  Пункты 1–10 из «Как понять, что готово» в дизайне. Снимки — `grim`, окно — `omarchy-shell predmaxim.oma toggle`, состояние — строка из сокета. Голосовые пункты (1–4) проходит пользователь, ты смотришь журнал и снимки.
   - **Esc (пункт 3).** `hyprctl binds -j | jq '[.[]|select(.key=="ESCAPE" and .submap=="")]'` — бинд есть.
   - **Esc не задел Alt+Tab.** В сабмапе `switcher` `ESCAPE` на месте.
   - **Ома упала (пункт 9).** `pkill -f 'python -m agent_voice'` посреди фразы → `hyprctl repl 'return tostring(_G.predmaxim_oma_esc.enabled)'` → `false`.
