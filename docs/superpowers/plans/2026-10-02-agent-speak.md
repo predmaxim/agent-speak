@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Репозиторий: `~/Projects/agent-speak`; бинарник ставится ссылкой в `~/.local/bin/agent-speak`.
+- Репозиторий: `~/Projects/omarchy/own/agent-speak`; бинарник ставится ссылкой в `~/.local/bin/agent-speak`.
 - Сокет сервиса: `$XDG_RUNTIME_DIR/agent-speak.sock`; сокет синтеза: `$XDG_RUNTIME_DIR/agent-speak-tts.sock`.
 - Данные: `~/.local/share/agent-speak/` (`venv/`, `v5_ru.pt`, `silero_tts.py`, `terms.tsv`); настройки: `~/.config/agent-speak/config.toml`.
 - Звук: PCM s16le, 48000 Гц, моно; `pw-cat --playback --raw --format s16 --rate 48000 --channels 1 -`.
@@ -110,7 +110,7 @@ fn main() {
 /target
 ```
 
-Run: `cd ~/Projects/agent-speak && cargo build`
+Run: `cd ~/Projects/omarchy/own/agent-speak && cargo build`
 Expected: `Finished`.
 
 - [ ] **Step 2: Временный хук-логгер**
@@ -135,7 +135,7 @@ wc -l /tmp/md-probe.jsonl
 ```bash
 jq -c 'del(.transcript_path)' /tmp/md-probe.jsonl | head -20
 jq -s '[.[]|keys]|unique' /tmp/md-probe.jsonl
-grep -v '^$' /tmp/md-probe.jsonl | head -30 > ~/Projects/agent-speak/tests/fixtures/message_display.jsonl
+grep -v '^$' /tmp/md-probe.jsonl | head -30 > ~/Projects/omarchy/own/agent-speak/tests/fixtures/message_display.jsonl
 ```
 Записать в конец этого плана (раздел «Факты из Task 1») реальные имена полей: идентификатор сообщения, кусок текста, признак конца, `session_id`. **Если имена отличаются от `message_id` / `delta` / `final` — заменить их в Task 9 (`MdEvent`) до начала Task 9.** Если хук не даёт текста вообще — в Task 9 оставить только транскрипт (удалить шаги про `Assembler`), отметить в спецификации.
 
@@ -143,7 +143,7 @@ grep -v '^$' /tmp/md-probe.jsonl | head -30 > ~/Projects/agent-speak/tests/fixtu
 
 ```bash
 mv ~/.claude/settings.json.bak.md-probe ~/.claude/settings.json
-cd ~/Projects/agent-speak && git add -A && git commit -m "chore: crate skeleton, MessageDisplay fixture"
+cd ~/Projects/omarchy/own/agent-speak && git add -A && git commit -m "chore: crate skeleton, MessageDisplay fixture"
 ```
 
 ---
@@ -1120,7 +1120,7 @@ git add -A && git commit -m "feat: term dictionary, transliteration, prepare pip
 - [ ] **Step 1: Фикстуры из настоящих файлов**
 
 ```bash
-cd ~/Projects/agent-speak
+cd ~/Projects/omarchy/own/agent-speak
 T=~/.claude/projects/-home-user-Work/00000000-0000-0000-0000-000000000001.jsonl
 # реальное сообщение пользователя, ход с text, thinking-narration и tool_use/tool_result, финальный text
 python3 - "$T" > tests/fixtures/claude.jsonl <<'EOF'
@@ -2391,7 +2391,7 @@ Expected: ok.
 
 Ручная проверка промпта (одноразово):
 ```bash
-cd /tmp && printf '%s' "$(sed -n '/^const PROMPT/,/;$/p' ~/Projects/agent-speak/src/learn.rs | sed 's/^const PROMPT: &str = "//; s/\\$//; s/";$//; s/\\n/\n/g')
+cd /tmp && printf '%s' "$(sed -n '/^const PROMPT/,/;$/p' ~/Projects/omarchy/own/agent-speak/src/learn.rs | sed 's/^const PROMPT: &str = "//; s/\\$//; s/";$//; s/\\n/\n/g')
 tokio
 serde
 ssh" | MAX_THINKING_TOKENS=0 claude -p --model haiku --no-session-persistence --setting-sources "" --strict-mcp-config --tools ""
@@ -2993,11 +2993,11 @@ systemctl --user restart agent-speakd.service
 ```bash
 cd ~/omarchy-dotfiles && git rm -q home/.local/bin/agent-speak home/.local/bin/agent-speak-tts
 rm -f ~/.local/bin/agent-speak-tts
-cd ~/Projects/agent-speak && chmod +x install.sh && ./install.sh
+cd ~/Projects/omarchy/own/agent-speak && chmod +x install.sh && ./install.sh
 systemctl --user status agent-speakd --no-pager | head -5
 readlink ~/.local/bin/agent-speak
 ```
-Expected: служба `active (running)`; ссылка указывает в `~/Projects/agent-speak/target/release/agent-speak`.
+Expected: служба `active (running)`; ссылка указывает в `~/Projects/omarchy/own/agent-speak/target/release/agent-speak`.
 
 Проверить, что служба видит Hyprland: `systemctl --user show-environment | grep HYPRLAND_INSTANCE_SIGNATURE`. Если пусто — добавить в unit `PassEnvironment=HYPRLAND_INSTANCE_SIGNATURE WAYLAND_DISPLAY` не поможет (служба берёт окружение менеджера); тогда выполнить `systemctl --user import-environment HYPRLAND_INSTANCE_SIGNATURE WAYLAND_DISPLAY` и проверить, делает ли это uwsm при входе (`uwsm` обычно экспортирует) — после перезагрузки повторить проверку.
 
@@ -3036,7 +3036,7 @@ o.bind("SUPER + ALT + P", "Pause agent reading", "agent-speak pause")
 ```
 и обновить комментарий над блоком:
 ```lua
--- AI agent reading aloud (agent-speak, ~/Projects/agent-speak): read focused agent's last turn (again = stop),
+-- AI agent reading aloud (agent-speak, ~/Projects/omarchy/own/agent-speak): read focused agent's last turn (again = stop),
 -- toggle live auto-reading, pause/resume.
 ```
 Run: `hyprctl reload && hyprctl configerrors` → пусто.
@@ -3081,17 +3081,17 @@ Run: `hyprctl reload && hyprctl configerrors` → пусто.
 
 В `~/omarchy-dotfiles/README.md` заменить строку таблицы про `.local/bin/agent-speak`, `agent-speak-tts` на:
 ```
-| (внешний) `~/Projects/agent-speak` | Озвучка ИИ-агентов по ходу работы — свой сервис на Rust + Silero (`agent-speakd`, ставится его `install.sh`). Здесь только хоткеи в `hyprland.lua`: `Super+Alt+R` — прочитать ход окна в фокусе (повтор — стоп), `Super+Alt+Shift+R` — авто/вручную, `Super+Alt+P` — пауза, `Home` (диктовка) останавливает чтение |
+| (внешний) `~/Projects/omarchy/own/agent-speak` | Озвучка ИИ-агентов по ходу работы — свой сервис на Rust + Silero (`agent-speakd`, ставится его `install.sh`). Здесь только хоткеи в `hyprland.lua`: `Super+Alt+R` — прочитать ход окна в фокусе (повтор — стоп), `Super+Alt+Shift+R` — авто/вручную, `Super+Alt+P` — пауза, `Home` (диктовка) останавливает чтение |
 ```
 В `docs/changelog.md` под `## 2026-10-02` первой записью — что заменено, что проверено вживую (по результатам Step 7–8), что нет.
 
 ```bash
-cd ~/Projects/agent-speak && git add -A && git commit -m "feat: install script, systemd unit, README"
+cd ~/Projects/omarchy/own/agent-speak && git add -A && git commit -m "feat: install script, systemd unit, README"
 cd ~/omarchy-dotfiles && git add -A && git commit -m "agent-speak: replace bash script with Rust service, pause hotkey
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" && git push
 ```
-Публикацию `~/Projects/agent-speak` на GitHub (`gh repo create predmaxim/agent-speak`) — только после явного согласия пользователя.
+Публикацию `~/Projects/omarchy/own/agent-speak` на GitHub (`gh repo create predmaxim/agent-speak`) — только после явного согласия пользователя.
 
 ---
 

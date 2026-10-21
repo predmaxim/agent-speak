@@ -36,7 +36,7 @@
 2. **`silero-tts`** — Python, ~60 строк. Модель в памяти; по unix-сокету принимает `{text, speaker, rate}` и отдаёт PCM s16 48 кГц моно. Venv и модель — `~/.local/share/agent-speak/` (уже установлены).
 3. **`agent-speak`** — тот же бинарник как команда: `hook <kind>` (JSON хука из stdin), `read`, `stop`, `pause`, `mode`. Шлёт одно сообщение в сокет сервиса (`$XDG_RUNTIME_DIR/agent-speak.sock`) и выходит.
 
-Репозиторий — `~/Projects/agent-speak` (`predmaxim/agent-speak`). В `omarchy-dotfiles` остаются хоткеи и ссылка на бинарник; нынешний bash-скрипт удаляется, когда новый сервис заработает.
+Репозиторий — `~/Projects/omarchy/own/agent-speak` (`predmaxim/agent-speak`). В `omarchy-dotfiles` остаются хоткеи и ссылка на бинарник; нынешний bash-скрипт удаляется, когда новый сервис заработает.
 
 ## Источники текста
 

@@ -22,10 +22,10 @@
 
 ## Global Constraints
 
-- **Рабочее место.** Работа идёт в worktree `~/Projects/agent-speak-talk`, ветка `oma-talk` от `main`.
-  - Почему не в `~/Projects/agent-speak`: оттуда живыми ссылками работают плагин и `agent_voice`.
+- **Рабочее место.** Работа идёт в worktree `~/Projects/omarchy/own/agent-speak-talk`, ветка `oma-talk` от `main`.
+  - Почему не в `~/Projects/omarchy/own/agent-speak`: оттуда живыми ссылками работают плагин и `agent_voice`.
   - В `main` ветка вливается только в Task 8, с пользователем.
-  - Создать worktree: `git -C ~/Projects/agent-speak worktree add ~/Projects/agent-speak-talk -b oma-talk`.
+  - Создать worktree: `git -C ~/Projects/omarchy/own/agent-speak worktree add ~/Projects/omarchy/own/agent-speak-talk -b oma-talk`.
 - **Коммиты.** Без ИИ-соавторов, по-русски, в форме `область: что сделано`. Ничего личного в коде и тестах.
 - **Язык.** В Rust и Python комментарии по-русски. В QML комментарии по-английски, как сейчас; каждая новая строка интерфейса — английский ключ плюс русский перевод в `plugin/I18n.js`.
 - **Цвета** только из темы (`Color.*`), без захардкоженных.
@@ -618,8 +618,8 @@
 - [ ] **Step 3: Спросить пользователя, можно ли деплой (обрывает звук). Затем слить и поставить**
 
   ```bash
-  git -C ~/Projects/agent-speak merge --ff-only oma-talk
-  cd ~/Projects/agent-speak && ./install.sh
+  git -C ~/Projects/omarchy/own/agent-speak merge --ff-only oma-talk
+  cd ~/Projects/omarchy/own/agent-speak && ./install.sh
   omarchy restart shell
   ```
 
@@ -637,4 +637,4 @@
 
 - [ ] **Step 5: Push**
 
-  Только с согласия пользователя: `git -C ~/Projects/agent-speak push` и `git -C ~/omarchy-dotfiles push`. После этого убрать worktree: `git worktree remove ~/Projects/agent-speak-talk`.
+  Только с согласия пользователя: `git -C ~/Projects/omarchy/own/agent-speak push` и `git -C ~/omarchy-dotfiles push`. После этого убрать worktree: `git worktree remove ~/Projects/omarchy/own/agent-speak-talk`.

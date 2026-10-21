@@ -153,7 +153,7 @@
 
 - [ ] **Step 2: Запустить — падают**
 
-Run: `cd ~/Projects/agent-speak && cargo test 2>&1 | tail -20`
+Run: `cd ~/Projects/omarchy/own/agent-speak && cargo test 2>&1 | tail -20`
 Expected: ошибки компиляции (`Kind::Voice`, `Msg::Voice`, `VoiceSession`, `last_cwd` не определены).
 
 - [ ] **Step 3: Реализация**
@@ -600,7 +600,7 @@ def test_barge_in_after_turn_done_only_stops_audio():
 
 - [ ] **Step 2: Падают**
 
-Run: `cd ~/Projects/agent-speak && python3 -m pytest python/test_agent_voice.py -q 2>&1 | tail -5`
+Run: `cd ~/Projects/omarchy/own/agent-speak && python3 -m pytest python/test_agent_voice.py -q 2>&1 | tail -5`
 Expected: `ModuleNotFoundError: No module named 'agent_voice'` (если нет pytest: `uv run --with pytest python -m pytest …`).
 
 - [ ] **Step 3: Реализация**
@@ -1051,7 +1051,7 @@ fi
 
 Поставить окружение без перезапуска демона (деплой — с разрешения пользователя):
 
-Run: `cd ~/Projects/agent-speak && DATA=~/.local/share/agent-speak && ln -sfn "$PWD/python/agent_voice" "$DATA/agent_voice" && uv venv -q --python 3.12 "$DATA/voice-venv" && uv pip install -q --python "$DATA/voice-venv/bin/python" torch --index-url https://download.pytorch.org/whl/cpu && uv pip install -q --python "$DATA/voice-venv/bin/python" faster-whisper silero-vad claude-agent-sdk nvidia-cublas-cu12 'nvidia-cudnn-cu12==9.*' pytest`
+Run: `cd ~/Projects/omarchy/own/agent-speak && DATA=~/.local/share/agent-speak && ln -sfn "$PWD/python/agent_voice" "$DATA/agent_voice" && uv venv -q --python 3.12 "$DATA/voice-venv" && uv pip install -q --python "$DATA/voice-venv/bin/python" torch --index-url https://download.pytorch.org/whl/cpu && uv pip install -q --python "$DATA/voice-venv/bin/python" faster-whisper silero-vad claude-agent-sdk nvidia-cublas-cu12 'nvidia-cudnn-cu12==9.*' pytest`
 Expected: без ошибок. Затем тесты в нём: `~/.local/share/agent-speak/voice-venv/bin/python -m pytest python/test_agent_voice.py -q` → `13 passed`.
 
 - [ ] **Step 2: ear.py**
@@ -1221,7 +1221,7 @@ if __name__ == "__main__":
 
 Демон ещё старый (без `voice`), поэтому проверяется только слух и агент: запустить с выводом в терминал и сказать фразу.
 
-Run: `cd ~/.local/share/agent-speak && ./voice-venv/bin/python -m agent_voice --agent claude --cwd ~/Projects/agent-speak < /dev/tty`
+Run: `cd ~/.local/share/agent-speak && ./voice-venv/bin/python -m agent_voice --agent claude --cwd ~/Projects/omarchy/own/agent-speak < /dev/tty`
 Expected: в выводе `agent_voice: > <твоя фраза>` в течение ~1 с после паузы; Ctrl+C завершает. Попросить пользователя сказать фразу (микрофон — только с его участием).
 
 - [ ] **Step 5: Commit**
@@ -1267,7 +1267,7 @@ assert.strictEqual(M2.OFFLINE.voice, "off")
 
 - [ ] **Step 2: Падают**
 
-Run: `cd ~/Projects/agent-speak/plugin && node test.js`
+Run: `cd ~/Projects/omarchy/own/agent-speak/plugin && node test.js`
 Expected: `TypeError: M2.voiceSection is not a function` (или AssertionError).
 
 - [ ] **Step 3: Реализация**
@@ -1366,7 +1366,7 @@ git add plugin/ && git commit -m "plugin: voice chat row (pick agent / finish), 
 - Create: `~/omarchy-dotfiles/home/.config/pipewire/pipewire.conf.d/echo-cancel.conf`
 - Modify: `~/omarchy-dotfiles/home/.config/hypr/hyprland.lua` (блок agent-speak, ~строка 99)
 - Modify: `~/omarchy-dotfiles/watch.tsv`, `docs/changelog.md`, `docs/rules.md` (§ про agent-speak), `README.md` (таблица)
-- Modify: `~/Projects/agent-speak/README.md` (раздел «Голосовой разговор»)
+- Modify: `~/Projects/omarchy/own/agent-speak/README.md` (раздел «Голосовой разговор»)
 
 **Interfaces:**
 - Consumes: всё выше.
@@ -1426,13 +1426,13 @@ agent-speak	ours	~/.local/share/agent-speak/voice-venv
 agent-speak	ours	~/omarchy-dotfiles/home/.config/hypr/hyprland.lua#agent-speak-voice
 ```
 
-`changelog.md` — запись за 2026-10-05: голосовой разговор, хоткей, echo-cancel. `rules.md` — в абзац про `predmaxim.agent-speak` одно предложение: строка «Разговор» в окне, хоткей, эхоподавление только в голосовом режиме. README репозитория dotfiles — строка таблицы. `~/Projects/agent-speak/README.md` — раздел «Голосовой разговор» (как включить, что нужно: GPU желательно, наушники или echo-cancel; права — только чтение).
+`changelog.md` — запись за 2026-10-05: голосовой разговор, хоткей, echo-cancel. `rules.md` — в абзац про `predmaxim.agent-speak` одно предложение: строка «Разговор» в окне, хоткей, эхоподавление только в голосовом режиме. README репозитория dotfiles — строка таблицы. `~/Projects/omarchy/own/agent-speak/README.md` — раздел «Голосовой разговор» (как включить, что нужно: GPU желательно, наушники или echo-cancel; права — только чтение).
 
 - [ ] **Step 5: Деплой и живая проверка**
 
 Спросить пользователя (деплой обрывает озвучку). Затем:
 
-Run: `cd ~/Projects/agent-speak && ./install.sh && cargo test 2>&1 | tail -2 && node plugin/test.js && ~/.local/share/agent-speak/voice-venv/bin/python -m pytest python/test_agent_voice.py -q | tail -1`
+Run: `cd ~/Projects/omarchy/own/agent-speak && ./install.sh && cargo test 2>&1 | tail -2 && node plugin/test.js && ~/.local/share/agent-speak/voice-venv/bin/python -m pytest python/test_agent_voice.py -q | tail -1`
 Expected: всё зелёное, `systemctl --user is-active agent-speakd` → `active`.
 
 Живая проверка — вместе с пользователем (он говорит):
@@ -1448,6 +1448,6 @@ Expected: всё зелёное, `systemctl --user is-active agent-speakd` → `
 - [ ] **Step 6: Commit**
 
 ```bash
-cd ~/Projects/agent-speak && git add README.md && git commit -m "README: voice chat"
+cd ~/Projects/omarchy/own/agent-speak && git add README.md && git commit -m "README: voice chat"
 cd ~/omarchy-dotfiles && git add -A home/.config/pipewire home/.config/hypr/hyprland.lua watch.tsv docs README.md && git commit -m "agent-speak voice chat: echo-cancel, Super+Alt+S" && git push origin main
 ```

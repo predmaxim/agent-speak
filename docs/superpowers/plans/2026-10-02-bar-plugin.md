@@ -769,7 +769,7 @@ Expected: `0 failed`.
 
 - [ ] **Step 6: Выложить сервис и проверить вживую**
 
-Run: `cd ~/Projects/agent-speak && cp ~/.config/agent-speak/config.toml /tmp/agent-speak-config.bak 2>/dev/null; ./install.sh && sleep 2 && systemctl --user is-active agent-speakd`
+Run: `cd ~/Projects/omarchy/own/agent-speak && cp ~/.config/agent-speak/config.toml /tmp/agent-speak-config.bak 2>/dev/null; ./install.sh && sleep 2 && systemctl --user is-active agent-speakd`
 Expected: `active`.
 
 Run:
@@ -1152,7 +1152,7 @@ ShellRoot {
 
 Run:
 ```bash
-cd ~/Projects/agent-speak
+cd ~/Projects/omarchy/own/agent-speak
 timeout 20 qs -p plugin/probe/shell.qml >/tmp/agent-speak-probe.log 2>&1 &
 sleep 4; systemctl --user restart agent-speakd; sleep 14
 grep -E 'PROBE|ERROR|error|WARN' /tmp/agent-speak-probe.log
@@ -1419,7 +1419,7 @@ ln -sfn "$PWD/plugin" ~/.config/omarchy/plugins/predmaxim.agent-speak
 
 Run:
 ```bash
-cd ~/Projects/agent-speak && ./install.sh
+cd ~/Projects/omarchy/own/agent-speak && ./install.sh
 omarchy-shell shell rescanPlugins
 omarchy-plugin-list --json | jq '.[] | select(.id == "predmaxim.agent-speak") | {id, enabled}'
 omarchy bar put predmaxim.agent-speak --section right --after predmaxim.todo
@@ -1507,7 +1507,7 @@ BarIndicator {
 
 - [ ] **Step 2: Тесты плагина**
 
-Run: `node ~/Projects/agent-speak/plugin/test.js`
+Run: `node ~/Projects/omarchy/own/agent-speak/plugin/test.js`
 Expected: `ok`.
 
 - [ ] **Step 3: Хук**
@@ -1612,7 +1612,7 @@ Expected: `as-manual`, `as-off` — значок не горит (виден т�
 - [ ] **Step 7: Коммиты**
 
 ```bash
-cd ~/Projects/agent-speak
+cd ~/Projects/omarchy/own/agent-speak
 git add plugin/Indicator.qml
 git commit -m "plugin: bar indicator for the central indicators group
 
@@ -1700,7 +1700,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 - [ ] **Step 6: Итоговая проверка**
 
-Run: `cd ~/Projects/agent-speak && cargo test 2>&1 | tail -2 && node plugin/test.js && git status --short`
+Run: `cd ~/Projects/omarchy/own/agent-speak && cargo test 2>&1 | tail -2 && node plugin/test.js && git status --short`
 Expected: `0 failed`, `ok`, рабочее дерево чистое (нет `plugin/probe`, `.superpowers/` не в индексе).
 
 ---
