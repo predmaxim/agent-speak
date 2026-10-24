@@ -109,6 +109,9 @@ impl Presence {
             // голос двигает last_input вперёд, простой клавиатуры его не откатывает
             self.last_input = self.last_input.max(f.idle_since);
         }
+        if (old.video || old.mic || old.camera) && !(f.video || f.mic || f.camera || f.locked) {
+            self.last_input = now; // видео или звонок смолкли сами, экран не заблокирован — он тут: новости без приветствия
+        }
         if was_in && f.buds == Buds::Out {
             self.buds_dropped = true;
         }

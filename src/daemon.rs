@@ -2430,6 +2430,22 @@ mod tests {
     }
 
     #[test]
+    fn video_ends_after_long_idle_speaks_without_greeting() {
+        let (mut st, now) = presence_state(1000);
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 990, "video": true}));
+        final_s(&mut st);
+        st.tick();
+        *now.lock().unwrap() = 1900;
+        snap(&mut st, serde_json::json!({"at": 1900, "idle_since": 990, "video": true}));
+        st.tick();
+        assert!(texts(&st).is_empty());
+        snap(&mut st, serde_json::json!({"at": 1900, "idle_since": 990})); // видео смолкло само, мышь не шевелилась
+        assert_eq!(st.presence.mode(1900), Mode::Here);
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
+    }
+
+    #[test]
     fn not_now_after_question_requeues_it() {
         let (mut st, now) = presence_state(1000);
         snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 0}));
