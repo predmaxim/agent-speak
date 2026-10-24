@@ -22,7 +22,6 @@ pub const ANSWER_WAIT: u64 = 120;
 /// Сессия сводки возвращения: не агент, поэтому retain_sessions её не снимает.
 pub const SUMMARY: &str = "summary";
 /// Сказанное позже last_input + столько секунд считается неуслышанным.
-#[allow(dead_code)] // daemon подключит в следующих задачах
 pub const UNHEARD_AFTER: u64 = 60;
 
 #[derive(Default)]
@@ -117,7 +116,6 @@ impl Board {
     }
 
     /// Пользователь вернулся: при долгом отсутствии неуслышанное из журнала снова на доске.
-    #[allow(dead_code)] // daemon подключит в следующих задачах
     pub fn returned(&mut self, last_input: u64, long: bool) {
         for (n, at) in std::mem::take(&mut self.spoken) {
             if !long || at < last_input + UNHEARD_AFTER || self.items.iter().any(|i| i.session == n.session && i.class == n.class) {
@@ -131,7 +129,6 @@ impl Board {
     }
 
     /// Озвученный вопрос не услышан: снова на доску, итоги его не ждут.
-    #[allow(dead_code)] // daemon подключит в следующих задачах
     pub fn unask(&mut self) {
         if let Some((q, _)) = self.asked.take() {
             self.items.push(q);
@@ -165,7 +162,6 @@ impl Board {
         self.drain(Class::Final)
     }
 
-    #[allow(dead_code)] // daemon подключит в следующих задачах
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }

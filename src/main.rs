@@ -8,9 +8,8 @@ mod focus;
 mod ipc;
 mod learn;
 mod news;
-#[allow(dead_code)] // потребители — в следующих задачах плана
-mod presence;
 mod notice;
+mod presence;
 mod queue;
 mod source;
 mod speaker;
