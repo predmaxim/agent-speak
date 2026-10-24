@@ -61,6 +61,10 @@ pub fn parse(out: &str) -> Option<(bool, String)> {
 pub fn digest(job: Job, ask: impl Fn(&str) -> Option<String>) -> Option<Digest> {
     // пустой текст пересказывать нечего — модель не зовём
     let said = if job.text.trim().is_empty() { None } else { ask(&prompt(&job)).and_then(|o| parse(&o)) };
+    // сломанный claude (вход, PATH, лимит) иначе виден только по запасным фразам
+    if said.is_none() && !job.text.trim().is_empty() {
+        eprintln!("agent-speak: пересказ не удался ({}): {}", job.session, if job.fallback.is_some() { "запасная фраза" } else { "молчу" });
+    }
     // вопрос важен и без модели: пользователя ждут
     let (important, say) = said.or_else(|| job.fallback.map(|f| (job.ask == Ask::Question, f)))?;
     Some(Digest { session: job.session, project: job.project, ask: job.ask, important, say })

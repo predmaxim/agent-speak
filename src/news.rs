@@ -28,8 +28,10 @@ pub struct Board {
 
 impl Board {
     /// Новость той же сессии и класса заменяет прежнюю: старое уже неактуально.
+    /// Итог заменяет и промежуточное своей сессии: иначе оно прозвучало бы после итога.
     pub fn push(&mut self, n: News) {
-        self.items.retain(|i| !(i.session == n.session && i.class == n.class));
+        let superseded = |c: Class| c == n.class || (n.class == Class::Final && c == Class::Progress);
+        self.items.retain(|i| !(i.session == n.session && superseded(i.class)));
         self.items.push(n);
     }
 
@@ -178,6 +180,17 @@ mod tests {
         assert_eq!(b.take(10).unwrap(), "Q?");
         b.answered("q");
         assert_eq!(b.take(11), None);
+    }
+
+    #[test]
+    fn final_drops_its_own_progress() {
+        let mut b = Board::default();
+        b.push(n("a", Class::Progress, "A: шаг закрыт.", 1));
+        b.push(n("b", Class::Progress, "B: нашла утечку.", 1));
+        b.push(n("a", Class::Final, "A: готово.", 2));
+        assert_eq!(b.take(10).unwrap(), "A: готово.");
+        assert_eq!(b.take(11).unwrap(), "B: нашла утечку."); // чужое промежуточное остаётся
+        assert_eq!(b.take(12), None);
     }
 
     #[test]

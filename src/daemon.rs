@@ -533,12 +533,17 @@ impl State {
     /// Пересказ пришёл: строка «что сейчас», пузырь, а вне тишины — на доску новостей.
     fn on_digest(&mut self, d: Digest) {
         let Some(e) = self.registry.get(&d.session) else { return };
-        // ход кончился, пока шёл пересказ: промежуточное звучало бы поверх итога
-        if d.ask == Ask::Progress && e.state != agents::State::Working {
+        // устарел, пока шёл пересказ: ход кончился (промежуточное звучало бы поверх итога)
+        // или на вопрос уже ответили (промпт, разрешение в терминале, конец хода)
+        let stale = match d.ask {
+            Ask::Progress => e.state != agents::State::Working,
+            Ask::Question => e.state != agents::State::Waiting,
+            Ask::Final => false,
+        };
+        if stale {
             return;
         }
-        // ответили, пока шёл пересказ (промпт, разрешение в терминале, конец хода): вопрос не звучит
-        let (who, waiting) = (e.title.clone(), e.state == agents::State::Waiting);
+        let who = e.title.clone();
         self.registry.summary(&d.session, &d.say);
         let kind = match d.ask {
             Ask::Final => Some("final"),
@@ -549,7 +554,7 @@ impl State {
             self.bubble(&d.session, &format!("{kind}-{}", d.session), &who, &d.say, kind);
         }
         let class = match d.ask {
-            Ask::Question => waiting.then_some(Class::Question),
+            Ask::Question => Some(Class::Question),
             Ask::Final => self.cfg.agents_voice.then_some(Class::Final),
             Ask::Progress => (self.cfg.agents_voice && d.important).then_some(Class::Progress),
         };
@@ -565,7 +570,8 @@ impl State {
 
     /// Новости — когда Ома молчит и ничего не звучит; слух греется заранее, чтобы ответ услышать сразу.
     fn speak_news(&mut self) {
-        if self.quiet() || !self.silent() || self.shared.queue.lock().unwrap().held() {
+        // идёт разговор или окно ответа: микрофон открыт — Ома услышала бы себя
+        if self.quiet() || self.oma.talking || !self.silent() || self.shared.queue.lock().unwrap().held() {
             return;
         }
         let Some(text) = self.board.take((self.now_secs)()) else { return };
@@ -854,7 +860,8 @@ impl State {
                     let question = claude::last_question(&tail);
                     let text = question.as_ref().map_or(msg.clone(), |q| format!("вопрос: {q}"));
                     self.registry.question(&session, &text, now);
-                    self.ask(&session, Ask::Question, question.as_deref().unwrap_or(&msg), Some(msg.clone()));
+                    // модели — суть и совет агента: его текст и ввод вызова; перевод уведомления — запасная фраза
+                    self.ask(&session, Ask::Question, &claude::question_context(&tail), Some(msg));
                 }
             }
             "message-display" => {
@@ -1853,11 +1860,60 @@ mod tests {
         st.on_hook("notification", &serde_json::json!({"session_id": "s", "message": "Claude needs your permission to use Bash", "transcript_path": "/nonexistent", "cwd": "/p/s"}));
         approve(&mut st, &["s", "t"], "s"); // одобрили раньше, чем вернулся пересказ
         assert_eq!(st.registry.get("s").unwrap().state, crate::agents::State::Working);
+        let status = st.registry.get("s").unwrap().status.clone();
+        let mut r = sub(&mut st);
         st.on_digest(dg("s", Ask::Question, true, "Можно запустить команду?"));
         assert!(st.board.question_sessions().is_empty());
+        assert!(bubbles(&mut r).is_empty(), "устаревший вопрос не висит пузырём");
+        assert_eq!(st.registry.get("s").unwrap().status, status);
         st.on_digest(dg("t", Ask::Final, false, "Фича готова."));
         st.tick();
         assert_eq!(texts(&st), ["плуг: Фича готова."]);
+    }
+
+    #[test]
+    fn news_waits_for_conversation_and_listen_window() {
+        let mut st = test_state();
+        st.cfg.agents_voice = true;
+        with_agents(&mut st, &["s"]);
+        st.on_msg(Msg::VoiceState { state: "listening".into(), talking: true }); // окно ответа или разговор: микрофон открыт
+        st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
+        st.tick();
+        assert!(texts(&st).is_empty());
+        st.on_msg(Msg::VoiceState { state: "idle".into(), talking: false });
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
+    }
+
+    #[test]
+    fn question_job_carries_agent_text_and_call() {
+        let dir = std::env::temp_dir().join(format!("agent-speak-qjob-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        let said = serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "Сборка устарела."}]}});
+        let call = serde_json::json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "rm -rf build", "description": "Чищу сборку"}}]}});
+        std::fs::write(&path, format!("{said}\n{call}\n")).unwrap();
+        let mut st = test_state();
+        with_agents(&mut st, &["s"]);
+        let rx = jobs(&mut st);
+        st.on_hook("notification", &serde_json::json!({"session_id": "s", "message": "Claude needs your permission", "transcript_path": path, "cwd": "/p/s"}));
+        let job = rx.try_recv().unwrap();
+        assert_eq!(job.text, "Сборка устарела.\n\nЖдёт ответа на Bash: Чищу сборку: rm -rf build");
+        assert_eq!(job.fallback.as_deref(), Some("Клоду нужно разрешение на команду"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn codex_notify_asks_final_digest() {
+        let mut st = test_state();
+        let codex = vec![Live { agent: "codex", ..live("th") }];
+        st.scan = Box::new(move || codex.clone());
+        st.rescan();
+        let rx = jobs(&mut st);
+        st.on_hook("codex-notify", &serde_json::json!({"thread-id": "th", "last-assistant-message": "Сделал экран настроек."}));
+        let job = rx.try_recv().unwrap();
+        assert_eq!((job.session.as_str(), job.ask, job.text.as_str(), job.fallback.as_deref()), ("th", Ask::Final, "Сделал экран настроек.", Some("готово")));
+        assert_eq!(st.registry.get("th").unwrap().state, crate::agents::State::Done);
     }
 
     #[test]
@@ -1904,7 +1960,7 @@ mod tests {
         with_agents(&mut st, &["s1"]);
         *env.0.lock().unwrap() = Some(sref("s1"));
         let mut r = sub(&mut st);
-        let ask = |st: &mut State| st.on_digest(dg("s1", Ask::Question, true, "Удалить старый код?"));
+        let ask = |st: &mut State| question(st, "s1", true, "Удалить старый код?");
         ask(&mut st);
         assert!(bubbles(&mut r).is_empty());
         *env.0.lock().unwrap() = None; // фокус ушёл на не-агента
