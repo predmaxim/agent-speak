@@ -16,6 +16,9 @@ from .context import foreign_capture, locked, mic_outputs, on_ac
 from .conversation import Conversation
 
 
+# Хвост звука после конца речи демона — speaker::TAIL: pw-cat ещё доигрывает свой буфер.
+TAIL = 1.0
+
 def cuda_env():
     """CUDA-библиотеки из pip (nvidia-*) видны ctranslate2 только через LD_LIBRARY_PATH при старте."""
     libs = glob.glob(os.path.join(sys.prefix, "lib/python3*/site-packages/nvidia/*/lib"))
@@ -131,6 +134,11 @@ class Oma:
         self.history = await self.brain.open(key)
         self.emit({"chat": {"key": key, "messages": self.history}})
 
+    async def _cut_later(self):
+        await asyncio.sleep(TAIL)
+        if self.conv.hearing:
+            self.ear.cut()
+
     async def event(self, ev):
         kind, c = ev[0], self.conv
         if kind == "start":
@@ -148,6 +156,8 @@ class Oma:
             self.emit({"chat": {"key": self.brain.key, "messages": self.history}})
             self.emit({"chats": await asyncio.to_thread(self.brain.chats)})
         elif kind == "audio":
+            if not ev[1] and c.hearing:  # её перебили: в начале фразы — её голос; срезать, когда доиграет хвост pw-cat
+                self.bg(self._cut_later())
             await self.act(c.audio(ev[1]))
         elif kind == "quiet":
             await self.act(c.set_quiet(ev[1]))

@@ -27,6 +27,19 @@ def test_phrase_after_pause_with_preroll():
     assert len(ev) == 2
 
 
+def test_cut_drops_heard_audio_and_silence_after_it_is_empty():
+    seg = Segmenter()
+    assert feed(seg, [0.9] * 10) == [("start",)]
+    seg.cut()  # Ома смолкла: всё услышанное до этого — вперемешку с её голосом
+    ev = feed(seg, [0.9] * 5 + [0.1] * 22)
+    assert [e[0] for e in ev] == ["phrase"] and len(ev[0][1]) == (5 + 22) * 1024
+    feed(seg, [0.9] * 10)
+    seg.cut()
+    assert feed(seg, [0.1] * 22) == [("phrase", b"")]  # после обрыва одна тишина — распознавать нечего
+    seg.cut()  # вне фразы — ничего не делает
+    assert feed(seg, [0.1] * 5) == []
+
+
 def test_short_pause_keeps_one_phrase():
     ev = feed(Segmenter(), [0.9] * 10 + [0.1] * 10 + [0.9] * 10 + [0.1] * 22)
     assert [e[0] for e in ev] == ["start", "phrase"]
@@ -635,9 +648,10 @@ from agent_voice.link import watch
 
 def _oma(sent, emitted):
     class FakeEar:
-        open, pid = False, 1
+        open, pid, cuts = False, 1, 0
         async def start(self): self.open = True
         async def stop(self): self.open = False
+        def cut(self): self.cuts += 1
 
     class FakeBrain:
         key, texts = "new", []
@@ -673,6 +687,28 @@ def test_oma_routes_talk_draft_tick_and_quiet_answer():
         await oma.event(("delta", "Почта ждёт твоего ответа сейчас. "))
         assert not any(c["cmd"] == "voice" for c in sent)
         assert any(e["line"].get("bubble", {}).get("kind") == "oma" for e in emitted)
+
+    asyncio.run(run())
+
+
+def test_oma_barge_in_cuts_the_mixed_start_once_her_voice_is_gone(monkeypatch):
+    import agent_voice.__main__ as m
+    monkeypatch.setattr(m, "TAIL", 0.01)
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+
+    async def run():
+        await oma.command({"do": "talk"})
+        await oma.event(("audio", True))   # Ома говорит
+        await oma.event(("start", 1))      # «Стоп» поверх неё
+        await oma.event(("audio", False))  # смолкла, а фраза ещё идёт
+        await asyncio.sleep(0.05)
+        assert oma.ear.cuts == 1
+        await oma.event(("phrase", "расскажи только про первого", 1))
+        await oma.event(("audio", True))
+        await oma.event(("audio", False))  # смолкла, когда никто не говорит, — резать нечего
+        await asyncio.sleep(0.05)
+        assert oma.ear.cuts == 1
 
     asyncio.run(run())
 

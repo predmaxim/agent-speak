@@ -89,6 +89,7 @@ class Ear:
         self.out, self.whisper, self.cmd = out, whisper, list(cmd)
         self._vad_load, self._lock = vad_load, asyncio.Lock()  # lock: start/stop идут по очереди, побеждает последний вызов
         self.paused = False
+        self._cut = False
         self.seq = 0
         self._proc = self._vad = self._tasks = None
 
@@ -133,9 +134,16 @@ class Ear:
             proc.kill()
         await asyncio.gather(*tasks, proc.wait(), return_exceptions=True)
 
+    def cut(self):
+        """Ома смолкла, а речь ещё идёт: начало фразы — без её голоса (Segmenter.cut)."""
+        self._cut = True
+
     async def _recognize(self, phrases):  # отдельно: распознавание не задерживает чтение микрофона (перебивание)
         while True:
             n, pcm = await phrases.get()
+            if not pcm:  # после обрыва одна тишина: речь закрыта, распознавать нечего
+                await self.out.put(("phrase", "", n))
+                continue
             try:
                 model = await self.whisper.get()
                 await self.out.put(("phrase", await asyncio.to_thread(transcribe, model, pcm), n))
@@ -152,6 +160,9 @@ class Ear:
                 if self.paused:
                     seg = Segmenter()
                     continue
+                if self._cut:
+                    self._cut = False
+                    seg.cut()
                 x = torch.from_numpy(np.frombuffer(b, np.int16).astype(np.float32) / 32768)
                 for ev in seg.feed(self._vad(x, RATE).item(), b):
                     if ev[0] == "start":

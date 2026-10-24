@@ -10,6 +10,7 @@ class Segmenter:
         self.run = []                      # кадры кандидата в речь
         self.buf = None                    # идущая фраза
         self.silence = 0
+        self.voiced = False                # в идущей фразе после обрыва (cut) была речь
 
     def feed(self, prob, frame):
         speech = prob >= self.threshold
@@ -23,11 +24,18 @@ class Segmenter:
                 return []
             self.buf = list(self.pre) + self.run
             self.pre.clear()
-            self.run, self.silence = [], 0
+            self.run, self.silence, self.voiced = [], 0, True
             return [("start",)]
         self.buf.append(frame)
         self.silence = 0 if speech else self.silence + 1
+        self.voiced = self.voiced or speech
         if self.silence < self.end_frames:
             return []
-        audio, self.buf = b"".join(self.buf), None
+        audio, self.buf = b"".join(self.buf) if self.voiced else b"", None
         return [("phrase", audio)]
+
+    def cut(self):
+        """Ома смолкла посреди фразы: услышанное до этого — вперемешку с её голосом, выбросить; фраза идёт дальше.
+        После обрыва одна тишина — фраза пустая (whisper в тишине «слышит» «Спасибо.»)."""
+        if self.buf is not None:
+            self.buf, self.voiced = [], False
