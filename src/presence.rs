@@ -103,11 +103,8 @@ impl Presence {
         let typed = (old.idle_since != 0 && f.idle_since == 0) || (old.locked && !f.locked);
         let absence = now.saturating_sub(self.last_input);
         if f.idle_since == 0 {
-            if typed {
-                self.input(now);
-            } else {
-                self.last_input = now;
-            }
+            // непрерывный ввод тоже снимает away и «наушники вынуты»; typed — только для возврата
+            self.input(now);
         } else {
             // голос двигает last_input вперёд, простой клавиатуры его не откатывает
             self.last_input = self.last_input.max(f.idle_since);
@@ -279,12 +276,22 @@ mod tests {
         let mut p = Presence::default();
         p.apply(facts(1000, 1000), 1000);
         p.unanswered();
-        assert_eq!(p.mode(1010), Mode::Away);
-        p.apply(facts(1100, 0), 1100);
-        p.apply(facts(1100, 1050), 1100);
-        p.apply(facts(1130, 1050), 1130);
-        p.apply(facts(1140, 0), 1140);
-        assert_eq!(p.mode(1140), Mode::Here);
+        p.apply(facts(1030, 1000), 1030);
+        p.apply(facts(1100, 1000), 1100);
+        assert_eq!(p.mode(1100), Mode::Away);
+        p.apply(facts(1130, 0), 1130);
+        assert_eq!(p.mode(1130), Mode::Here);
+    }
+
+    #[test]
+    fn continuous_input_clears_away_after_grace() {
+        let mut p = Presence::default();
+        p.apply(facts(1000, 0), 1000);
+        p.said(Mode::Away, 1000);
+        p.apply(facts(1030, 0), 1030);
+        assert_eq!(p.mode(1030), Mode::Away);
+        p.apply(facts(1090, 0), 1090);
+        assert_eq!(p.mode(1090), Mode::Here);
     }
 
     #[test]
