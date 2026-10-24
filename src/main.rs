@@ -8,6 +8,7 @@ mod digest;
 mod focus;
 mod ipc;
 mod learn;
+mod news;
 mod notice;
 mod queue;
 mod source;
