@@ -144,6 +144,7 @@ struct State {
     presence: Presence,         // слушает ли пользователь: снимки сервиса оболочки и его слова
     here_ask: Option<u64>,      // «Ты тут?» спрошен: ответа ждём HERE_WAIT с открытия окна ответа
     welcome: bool,              // вернулся после долгого отсутствия: следующие новости — с приветствием и обзором
+    night_keep: bool,           // тишина настала, пока пользователя нет: накопленное ждёт утра
     facts_src: Box<dyn Fn() -> Option<String>>, // снимок присутствия при старте; в тестах — подделка
 }
 
@@ -286,6 +287,7 @@ pub fn run() {
         presence: Presence::default(),
         here_ask: None,
         welcome: false,
+        night_keep: false,
         facts_src: Box::new(move || std::fs::read_to_string(&facts).ok()),
     };
     st.oma_spawn();
@@ -423,10 +425,13 @@ impl State {
             self.progress.clear(); // пересказ выключен — накопленное не нужно
         }
         let quiet = self.quiet();
+        self.night_keep &= quiet; // тишина кончилась (и вручную) — держать до утра нечего
         self.shared.queue.lock().unwrap().retain_audible(quiet);
-        // новости тишины не ждут утра; без «Озвучивать агентов» звучат только вопросы
+        // новости тишины не ждут утра — кроме накопленного, пока пользователя не было; без «Озвучивать агентов» звучат только вопросы
         if quiet {
-            self.board.retain_classes(&[]);
+            if !self.night_keep {
+                self.board.retain_classes(&[]);
+            }
             // новости выброшены — окно ответа по чужой речи не откроется
             (self.listen_after, self.listen_at) = (None, None);
         } else if !self.cfg.agents_voice {
@@ -826,6 +831,8 @@ impl State {
                     self.cfg.save();
                 }
                 if self.quiet() != before {
+                    // слушал — тишина стирает доску; не было на месте — не услышанное ждёт его возвращения
+                    self.night_keep = self.quiet() && matches!(self.presence.mode(secs), Mode::Unsure | Mode::Away);
                     self.purge();
                     self.broadcast();
                 }
@@ -1120,6 +1127,7 @@ mod tests {
             presence: Presence::default(),
             here_ask: None,
             welcome: false,
+            night_keep: false,
             facts_src: Box::new(|| None), // снимка нет — как без сервиса присутствия
         }
     }
@@ -2594,5 +2602,71 @@ mod tests {
         st.on_digest(d);
         st.tick();
         assert_eq!(texts(&st), ["плуг: Фича готова.", "плуг: Тесты зелёные.", "плуг: Баг найден.", "плуг: Сборка прошла."]);
+    }
+
+    /// Минуты местного времени под рукой теста: граница тихого расписания.
+    fn mins_at(st: &mut State, hm: &str) -> Arc<Mutex<u32>> {
+        let m = Arc::new(Mutex::new(crate::config::hhmm(hm).unwrap()));
+        let mm = m.clone();
+        st.minutes = Box::new(move || *mm.lock().unwrap());
+        m
+    }
+
+    #[test]
+    fn night_keeps_board_when_away_until_morning() {
+        let (mut st, now) = presence_state(1700);
+        let min = mins_at(&mut st, "22:59");
+        snap(&mut st, serde_json::json!({"at": 1700, "idle_since": 1000}));
+        final_s(&mut st);
+        st.tick();
+        *min.lock().unwrap() = crate::config::hhmm("23:00").unwrap();
+        *now.lock().unwrap() = 1701;
+        st.tick();
+        assert!(st.quiet() && !st.board.is_empty(), "тишина, пока пользователя нет, доску не стирает");
+        *min.lock().unwrap() = crate::config::hhmm("08:00").unwrap();
+        *now.lock().unwrap() = 1701 + 9 * 3600;
+        snap(&mut st, serde_json::json!({"at": 1701 + 9 * 3600, "idle_since": 1000}));
+        st.tick();
+        assert!(texts(&st).is_empty(), "утро, но пользователя нет");
+        snap(&mut st, serde_json::json!({"at": 1701 + 9 * 3600, "idle_since": 0}));
+        st.tick();
+        assert_eq!(texts(&st), GREETING);
+    }
+
+    #[test]
+    fn night_clears_board_when_here() {
+        let (mut st, now) = presence_state(1000);
+        let min = mins_at(&mut st, "22:59");
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 0}));
+        st.tick();
+        final_s(&mut st); // после tick: на месте — прозвучал бы до тишины
+        *min.lock().unwrap() = crate::config::hhmm("23:00").unwrap();
+        *now.lock().unwrap() = 1001;
+        st.tick();
+        assert!(st.board.is_empty());
+        *min.lock().unwrap() = crate::config::hhmm("08:00").unwrap();
+        *now.lock().unwrap() = 1002;
+        snap(&mut st, serde_json::json!({"at": 1002, "idle_since": 0}));
+        st.tick();
+        assert!(texts(&st).is_empty());
+    }
+
+    #[test]
+    fn night_keep_ends_when_quiet_switched_off_by_hand() {
+        let (mut st, now) = presence_state(1700);
+        let min = mins_at(&mut st, "22:59");
+        snap(&mut st, serde_json::json!({"at": 1700, "idle_since": 1000}));
+        st.tick();
+        *min.lock().unwrap() = crate::config::hhmm("23:00").unwrap();
+        st.tick();
+        assert!(st.night_keep);
+        st.cfg.quiet_override = "off".into();
+        st.apply();
+        *now.lock().unwrap() = 1710;
+        snap(&mut st, serde_json::json!({"at": 1710, "idle_since": 0}));
+        final_s(&mut st);
+        st.cfg.quiet_override = "on".into(); // включил тишину сам, на месте — доска стирается
+        st.apply();
+        assert!(st.board.is_empty());
     }
 }
