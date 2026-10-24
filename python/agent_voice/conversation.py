@@ -88,6 +88,15 @@ class Conversation:
             acts.append(("ear", True))
         return acts + self._to(self._rest())
 
+    def listen(self, secs):
+        """Окно ответа после новостей: слух на secs секунд; заговорил пользователь — обычный разговор."""
+        if self.state != "idle" or self.quiet or self.mic:  # не мешаем ходу, звуку и чужому микрофону
+            return []
+        self.active = True
+        acts = [("ear", True)] + self._to("listening")
+        self.quiet_at = self.clock() + secs  # после _to: он ставит SILENCE_END
+        return acts
+
     def end(self):
         """Конец разговора: оборвать ход, выбросить черновик, закрыть слух."""
         acts = self._stop_turn() + self._drop()

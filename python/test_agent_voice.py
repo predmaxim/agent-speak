@@ -209,6 +209,28 @@ def test_silence_ends_after_cancel():
     assert cv.tick() == [("ear", False), ("state", "idle")]
 
 
+def test_listen_window_ends_without_speech():
+    clk, cv = _conv()
+    assert cv.listen(5) == [("ear", True), ("state", "listening")] and cv.active
+    clk.t += 4.9; assert cv.tick() == []
+    clk.t += 0.2; assert cv.tick() == [("ear", False), ("state", "idle")]
+
+
+def test_listen_window_speech_becomes_conversation():
+    clk, cv = _conv()
+    cv.listen(5); clk.t += 3
+    cv.speech_start(1); cv.phrase("да, удаляй", 1)
+    clk.t += SEND_PAUSE
+    assert ("send", "да, удаляй") in cv.tick()
+
+
+def test_listen_noop_when_quiet_mic_busy_or_talking():
+    clk, cv = _conv()
+    cv.set_quiet(True); assert cv.listen(5) == []
+    cv.set_quiet(False); cv.mic_busy(True); assert cv.listen(5) == []
+    cv.mic_busy(False); cv.talk(); assert cv.listen(5) == []
+
+
 def test_cancel_outside_conversation_returns_to_idle():
     clk, cv = _conv()
     cv.ask("вопрос тут")
@@ -647,6 +669,43 @@ def test_oma_locked_ends_conversation():
         await oma.command({"do": "talk"})
         await oma.event(("locked",))
         assert not oma.ear.open and sent[-1]["talking"] is False
+
+    asyncio.run(run())
+
+
+def test_oma_listen_command_opens_window_unless_locked(monkeypatch):
+    import agent_voice.__main__ as m
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+
+    async def run():
+        monkeypatch.setattr(m, "mic_outputs", lambda: [])
+        monkeypatch.setattr(m, "locked", lambda: True)
+        await oma.command({"do": "listen", "secs": 5})
+        assert not oma.ear.open  # экран заблокирован: чужие уши не включаем
+        monkeypatch.setattr(m, "locked", lambda: False)
+        await oma.command({"do": "listen", "secs": 5})
+        assert oma.ear.open and sent[-1] == {"cmd": "voice_state", "state": "listening", "talking": True}
+        clk.t += 5.1
+        await oma.event(("tick",))
+        assert not oma.ear.open and sent[-1]["talking"] is False
+
+    asyncio.run(run())
+
+
+def test_oma_listen_command_skips_when_foreign_mic_capture(monkeypatch):
+    import agent_voice.__main__ as m
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    monkeypatch.setattr(m, "locked", lambda: False)
+    monkeypatch.setattr(m, "mic_outputs", lambda: [{"properties": {"application.process.id": "7"}}])  # voxtype пишет
+
+    async def run():
+        await oma.command({"do": "listen", "secs": 5})
+        assert not oma.ear.open and not oma.conv.active and sent == []  # слух закрыт — conv.mic ещё не знает о чужой записи
+        monkeypatch.setattr(m, "mic_outputs", lambda: [{"corked": True, "properties": {"application.process.id": "7"}}])
+        await oma.command({"do": "listen", "secs": 5})
+        assert oma.ear.open  # поток на паузе — не помеха
 
     asyncio.run(run())
 

@@ -101,6 +101,12 @@ class Oma:
             await self.act(c.talk())
         elif do == "cancel":
             await self.act(c.cancel())
+        elif do == "warm":  # демон прогревает слух до окна ответа: whisper не грузится при открытом микрофоне
+            self.warm()
+        elif do == "listen":
+            # экран заблокирован или микрофон держит чужой (conv.mic при закрытом слухе не знает: pid нет) — не открываем
+            if not await asyncio.to_thread(locked) and not foreign_capture(await asyncio.to_thread(mic_outputs), set()):
+                await self.act(c.listen(float(cmd.get("secs", 5))))
         elif do == "chats":
             self.emit({"chats": await asyncio.to_thread(self.brain.chats)})
         elif do == "open" and not cmd.get("key"):  # окно спрашивает текущий чат: без переключения, was "*" — принять его ключ
