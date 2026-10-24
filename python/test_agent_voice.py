@@ -3,7 +3,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 from agent_voice.segment import Segmenter
 from agent_voice.chunker import Chunker
-from agent_voice.conversation import Conversation, SEND_PAUSE, SILENCE_END
+from agent_voice.conversation import Conversation, SEND_PAUSE, SILENCE_END, WINDOW_END, is_ack, is_yes
 
 
 def feed(seg, probs):
@@ -88,7 +88,7 @@ def test_talk_listens_and_pause_sends():
     clk.t += 5; assert cv.tick() == []                      # пока слышит — не отправляет
     assert cv.phrase("в Москве", 2) == [("draft", "какая погода в Москве", False)]
     clk.t += SEND_PAUSE
-    assert cv.tick() == [("drop_draft",), ("send", "какая погода в Москве"), ("state", "thinking")]
+    assert cv.tick() == [("drop_draft",), ("send", "какая погода в Москве", ""), ("state", "thinking")]
 
 
 def test_answer_then_listens_again():
@@ -180,7 +180,7 @@ def test_mic_busy_clears_hearing():
 def test_ask_in_conversation_keeps_listening():
     clk, cv = _conv()
     cv.talk(); cv.speech_start(1); cv.phrase("черновик тут", 1)
-    assert cv.ask("который час") == [("drop_draft",), ("send", "который час"), ("state", "thinking")]
+    assert cv.ask("который час") == [("drop_draft",), ("send", "который час", ""), ("state", "thinking")]
     cv.delta("Сейчас ровно три часа дня. "); cv.audio(True); cv.done(); cv.audio(False)
     assert cv.state == "listening" and cv.active
 
@@ -212,7 +212,7 @@ def test_short_phrase_after_draft_still_sends():
     cv.talk(); cv.speech_start(1); cv.phrase("какая погода", 1); cv.speech_start(2); cv.phrase(".", 2)
     cv.tick()
     clk.t += SEND_PAUSE
-    assert cv.tick() == [("drop_draft",), ("send", "какая погода"), ("state", "thinking")]
+    assert cv.tick() == [("drop_draft",), ("send", "какая погода", ""), ("state", "thinking")]
 
 
 def test_silence_ends_after_cancel():
@@ -231,10 +231,80 @@ def test_listen_window_ends_without_speech():
 
 def test_listen_window_speech_becomes_conversation():
     clk, cv = _conv()
-    cv.listen(5); clk.t += 3
+    cv.listen(5, "question", "плуг: готово"); clk.t += 3
     cv.speech_start(1); cv.phrase("да, удаляй", 1)
     clk.t += SEND_PAUSE
-    assert ("send", "да, удаляй") in cv.tick()
+    assert ("send", "да, удаляй", "Ома только что сказала: «плуг: готово». ") in cv.tick()
+
+
+def _say(clk, cv, text, n=1):
+    cv.speech_start(n); cv.phrase(text, n)
+    clk.t += SEND_PAUSE
+    return cv.tick()
+
+
+def test_ack_after_news_closes_without_send():
+    clk, cv = _conv()
+    cv.listen(5, "news", "плуг: готово")
+    acts = _say(clk, cv, "Ок.")
+    assert ("presence", "here") in acts and ("ear", False) in acts and not any(a[0] == "send" for a in acts)
+    assert cv.state == "idle" and not cv.active
+
+
+def test_ack_after_question_sent_then_closes():
+    clk, cv = _conv()
+    cv.listen(5, "question", "плуг: удалить?")
+    ctx = "Ома только что сказала: «плуг: удалить?». "
+    assert ("send", "Ок", ctx) in _say(clk, cv, "Ок")
+    cv.delta("Принято. "); cv.audio(True)
+    cv.done()
+    assert cv.audio(False)[-2:] == [("ear", False), ("state", "idle")]
+
+
+def test_ack_reply_silent_in_quiet_mode_closes_on_done():
+    clk, cv = _conv()
+    cv.listen(5, "question", "плуг: удалить?")
+    _say(clk, cv, "Ок"); cv.set_quiet(True)
+    cv.delta("Принято. ")
+    assert ("ear", False) in cv.done()
+
+
+def test_window_silence_after_reply_is_five_seconds():
+    clk, cv = _conv()
+    cv.listen(5, "question", "плуг: баг")
+    _say(clk, cv, "расскажи подробнее")
+    cv.delta("А что за баг? "); cv.audio(True); cv.done(); cv.audio(False)
+    clk.t += WINDOW_END - 0.1; assert cv.tick() == [] and cv.active
+    clk.t += 0.2; assert ("ear", False) in cv.tick()
+
+
+def test_are_you_there_yes_closes():
+    clk, cv = _conv()
+    cv.listen(5, "here", "Ты тут?")
+    acts = _say(clk, cv, "да, я тут")
+    assert ("presence", "here") in acts and ("ear", False) in acts and not any(a[0] == "send" for a in acts)
+
+
+def test_are_you_there_other_goes_to_brain():
+    clk, cv = _conv()
+    cv.listen(5, "here", "Ты тут?")
+    assert ("send", "через минуту", "Ома спросила: «Ты тут? Есть новости». ") in _say(clk, cv, "через минуту")
+
+
+def test_click_conversation_ack_still_sent():
+    clk, cv = _conv()
+    cv.talk()
+    acts = _say(clk, cv, "ок")
+    assert ("send", "ок", "") in acts and not any(a[0] == "presence" for a in acts)
+    cv.delta("Хорошо. "); cv.audio(True); cv.done(); cv.audio(False)
+    clk.t += SILENCE_END - 0.1; assert cv.tick() == []
+    clk.t += 0.2; assert ("ear", False) in cv.tick()
+
+
+def test_is_ack_table():
+    assert is_ack("Ок, спасибо.") and is_ack("OK") and is_ack("Окей!") and is_ack("Принято")
+    assert not is_ack("ок давай пушь") and not is_ack("")
+    assert is_yes("да, я тут") and not is_yes("через минуту")
 
 
 def test_listen_noop_when_quiet_mic_busy_or_talking():

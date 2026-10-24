@@ -112,7 +112,7 @@ class Oma:
                 key = cmd.get("key")  # окно после вопроса — ответ в чат спросившего агента
                 if key and key != self.brain.key and c.state == "idle":
                     await self.switch(key)
-                await self.act(c.listen(float(cmd.get("secs", 5))))
+                await self.act(c.listen(float(cmd.get("secs", 5)), cmd.get("kind", "news"), cmd.get("said", "")))
         elif do == "chats":
             self.emit({"chats": await asyncio.to_thread(self.brain.chats)})
         elif do == "open" and not cmd.get("key"):  # окно спрашивает текущий чат: без переключения, was "*" — принять его ключ
@@ -187,7 +187,7 @@ class Oma:
             elif k == "send":
                 key = self.brain.key
                 try:
-                    await self.brain.send(a[1])
+                    await self.brain.send(a[2] + a[1])
                 except Exception as e:
                     failed = e
                 if key.startswith("chat:") and self.brain.key == "new":  # устаревший чат сменился новым: реплика — первая в нём
@@ -195,6 +195,8 @@ class Oma:
                 self.n += 1
                 self._chat("me", a[1])
                 self.emit({"bubble": {"id": f"me-{os.getpid()}-{self.n}", "who": "Ты", "text": a[1], "kind": "me", "append": False}})
+            elif k == "presence":
+                self.send({"cmd": "presence", "state": a[1]})
             elif k == "interrupt":
                 await self.brain.interrupt()
             elif k == "stop":  # перебивание: финалы агентов, удержанные за Омой, демон не выбрасывает
