@@ -68,6 +68,7 @@ struct Status<'a> {
     oma: &'a str,
     talking: bool,
     agents_voice: bool,
+    progress_digest: bool,
     quiet: bool,
     quiet_schedule: bool,
     quiet_from: &'a str,
@@ -382,6 +383,9 @@ impl State {
 
     /// Очередь и доска — только то, что слышно сейчас: настала тишина — лишнее выбросить. Звучащая фраза доигрывает.
     fn purge(&mut self) {
+        if !self.cfg.progress_digest {
+            self.progress.clear(); // пересказ выключен — накопленное не нужно
+        }
         let quiet = self.quiet();
         self.shared.queue.lock().unwrap().retain_audible(quiet);
         // новости тишины не ждут утра; без «Озвучивать агентов» звучат только вопросы
@@ -431,6 +435,7 @@ impl State {
             oma: &self.oma.state,
             talking: self.oma.talking,
             agents_voice: self.cfg.agents_voice,
+            progress_digest: self.cfg.progress_digest,
             quiet: self.quiet(),
             quiet_schedule: self.cfg.quiet_schedule,
             quiet_from: &self.cfg.quiet_from,
@@ -512,6 +517,9 @@ impl State {
 
     /// Текст хода — в накопленное для пересказа промежуточного; срок PROGRESS_EVERY — от первого предложения.
     fn note(&mut self, session: &str, text: &str) {
+        if !self.cfg.progress_digest {
+            return;
+        }
         let at = (self.clock)();
         let (acc, _) = self.progress.entry(session.to_string()).or_insert_with(|| (String::new(), at));
         if !acc.is_empty() {
@@ -1032,7 +1040,7 @@ mod tests {
         let st = test_state();
         assert_eq!(
             st.status_line(),
-            "{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0}\n"
+            "{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":false,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0}\n"
         );
     }
 
@@ -1691,6 +1699,7 @@ mod tests {
     #[test]
     fn progress_flushes_after_a_minute_and_stop_drops_it() {
         let (mut st, env) = env_state();
+        st.cfg.progress_digest = true;
         with_agents(&mut st, &["s"]);
         let rx = jobs(&mut st);
         let later = |st: &mut State, secs| {
@@ -1708,6 +1717,27 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap().ask, Ask::Final);
         later(&mut st, 61);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn progress_digest_off_keeps_raw_status_and_drops_accumulated() {
+        let (mut st, env) = env_state();
+        with_agents(&mut st, &["s"]);
+        let rx = jobs(&mut st);
+        let later = |st: &mut State, secs| {
+            *env.1.lock().unwrap() += Duration::from_secs(secs);
+            st.tick();
+        };
+        md(&mut st, "s", "Шаг один. ");
+        later(&mut st, 61);
+        assert!(rx.try_recv().is_err()); // по умолчанию промежуточное модели не уходит
+        assert_eq!(st.registry.get("s").unwrap().status, "Шаг один.");
+        st.cfg.progress_digest = true;
+        md(&mut st, "s", "Шаг два. ");
+        st.cfg.progress_digest = false;
+        st.apply();
+        later(&mut st, 61);
+        assert!(rx.try_recv().is_err()); // выключили — накопленное не пересказывается
     }
 
     #[test]

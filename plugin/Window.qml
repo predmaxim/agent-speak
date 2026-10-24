@@ -834,6 +834,27 @@ Item {
                 onToggled: root.step("orb_over_fullscreen", 1)
               }
             }
+
+            PanelSectionHeader {
+              leftPadding: Style.spacing.rowPaddingX
+              topPadding: Style.space(14)
+              bottomPadding: Style.space(4)
+              text: root.tr("Agents").toUpperCase()
+              foreground: root.fg
+              fontFamily: root.font
+              fontSize: Style.font.body
+              font.letterSpacing: 1.2
+            }
+
+            SettingRow {
+              row: 6
+              label: root.tr("Retell progress")
+              ToggleSwitch {
+                checked: root.speech.progress_digest === true
+                foreground: root.fg
+                onToggled: root.step("progress_digest", 1)
+              }
+            }
           }
         }
       }

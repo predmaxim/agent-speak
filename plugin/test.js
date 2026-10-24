@@ -134,7 +134,7 @@ assert.deepStrictEqual(M.chatFor("chat:2", { key: "agent:a", was: "*", messages:
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 6)
+assert.strictEqual(M.SETTINGS_ROWS.length, 7)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "eugene", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
@@ -143,6 +143,7 @@ assert.strictEqual(M.settingStep("quiet_now", Object.assign({}, cfg, { quiet: tr
 assert.deepStrictEqual(M.settingStep("quiet_schedule", cfg, 1), { key: "quiet_schedule", value: false, sample: false })
 assert.strictEqual(M.settingStep("quiet_hours", cfg, 1), null)
 assert.deepStrictEqual(M.settingStep("orb_over_fullscreen", Object.assign({}, cfg, { orb_over_fullscreen: true }), 1), { key: "orb_over_fullscreen", value: false, sample: false })
+assert.deepStrictEqual(M.settingStep("progress_digest", cfg, 1), { key: "progress_digest", value: true, sample: false })
 
 // Russian plural forms
 assert.deepStrictEqual([1, 2, 5, 11, 12, 21, 22, 25, 111, 0].map(n => ru("%1 agents", n)),

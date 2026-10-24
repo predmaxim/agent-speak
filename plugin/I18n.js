@@ -18,7 +18,8 @@ var TABLES = {
     "Chat history": "История чатов", "Settings": "Настройки", "Back": "Назад",
     "No agents": "Агентов нет", "You": "Ты", "Ask Oma…": "Спросить Ому…", "Untitled chat": "Без названия",
     "No chats yet": "Чатов пока нет", "Quiet now": "Сейчас тихо", "On schedule": "По расписанию", "From / to": "С / до",
-    "Orb": "Орб", "Over fullscreen windows": "Над полноэкранными окнами"
+    "Orb": "Орб", "Over fullscreen windows": "Над полноэкранными окнами",
+    "Agents": "Агенты", "Retell progress": "Пересказывать промежуточное"
   }
 }
 
