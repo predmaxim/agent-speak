@@ -136,7 +136,7 @@ struct State {
     listen_after: Option<(&'static str, String)>, // звучат новости: по их концу Ома слушает ответ — (kind, сказанное)
     listen_at: Option<Instant>, // новости смолкли: окно ответа — когда доиграет хвост pw-cat
     presence: Presence,         // слушает ли пользователь: снимки сервиса оболочки и его слова
-    here_ask: Option<u64>,      // когда спросили «Ты тут?» — ждём ответа HERE_WAIT
+    here_ask: Option<u64>,      // «Ты тут?» спрошен: ответа ждём HERE_WAIT с открытия окна ответа
     facts_src: Box<dyn Fn() -> Option<String>>, // снимок присутствия при старте; в тестах — подделка
 }
 
@@ -619,21 +619,21 @@ impl State {
             return;
         }
         let now = (self.now_secs)();
-        let (kind, text) = match self.presence.mode(now) {
-            Mode::Busy | Mode::Away => return,
-            Mode::Unsure => {
-                if self.board.is_empty() || self.here_ask.is_some() {
-                    return;
-                }
-                self.here_ask = Some(now);
-                ("here", ARE_YOU_THERE.to_string())
+        let mode = self.presence.mode(now);
+        if matches!(mode, Mode::Busy | Mode::Away) || (mode == Mode::Unsure && self.here_ask.is_some()) {
+            return;
+        }
+        // hyprctl — только когда есть что сказать
+        let focused = if self.board.is_empty() { None } else { self.focused().map(|f| f.id) };
+        let (kind, text) = if mode == Mode::Unsure {
+            if !self.board.sayable(now, focused.as_deref()) {
+                return; // «Есть новости» не врёт: после «да» прозвучит хоть что-то
             }
-            Mode::Here => {
-                // hyprctl — только когда есть что сказать
-                let focused = if self.board.is_empty() { None } else { self.focused().map(|f| f.id) };
-                let Some(text) = self.board.take(now, focused.as_deref(), self.presence.sure()) else { return };
-                (if self.board.asked().is_some() { "question" } else { "news" }, text)
-            }
+            self.here_ask = Some(now);
+            ("here", ARE_YOU_THERE.to_string())
+        } else {
+            let Some(text) = self.board.take(now, focused.as_deref(), self.presence.sure()) else { return };
+            (if self.board.asked().is_some() { "question" } else { "news" }, text)
         };
         if self.enqueue(Agent::Claude, "news", &text, Kind::News) > 0 {
             self.oma_send(&serde_json::json!({"do": "warm"}));
@@ -665,6 +665,10 @@ impl State {
                     cmd["key"] = format!("agent:{s}").into();
                 }
                 self.oma_send(&cmd);
+                // холодный TTS или удержанная речь не съедают время ответа; вернувшийся, пока звучало, ответ уже дал
+                if kind == "here" && self.here_ask.is_some() {
+                    self.here_ask = Some((self.now_secs)());
+                }
             }
         }
     }
@@ -812,9 +816,10 @@ impl State {
                 self.ask(&s, Ask::Progress, &text, None);
             }
         }
-        // на «Ты тут?» ни слова, ни ввода — пользователя нет на месте
-        if let Some(t) = self.here_ask.filter(|t| secs >= t + HERE_WAIT && !self.oma.talking) {
-            if self.presence.last_input(secs) < t {
+        // «Ты тут?» отзвучал (окно ответа открыто или фраза оборвана), а ни слова, ни ввода — пользователя нет на месте
+        if let Some(t) = self.here_ask.filter(|t| secs >= t + HERE_WAIT && !self.oma.talking && self.listen_after.is_none()) {
+            // вставил наушники или взял звонок — слушает и молча
+            if self.presence.mode(secs) == Mode::Unsure && self.presence.last_input(secs) < t {
                 self.presence.unanswered();
             }
             self.here_ask = None;
@@ -2022,21 +2027,16 @@ mod tests {
         with_agents(&mut st, &["s", "t"]);
         st.voice_cmd = vec!["sh".into(), "-c".into(), format!("cat > {}", out.display())];
         st.oma_spawn();
-        let heard = |st: &mut State| {
-            texts(st);
-            st.after_speech();
-            *env.1.lock().unwrap() += speaker::TAIL;
-            st.tick();
-        };
         question(&mut st, "s", true, "Удалить старый код?");
         st.tick();
-        heard(&mut st);
-        // вопрос ещё ждёт ответа, а пользователь затих: ответ на «Ты тут?» — Оме, не спросившему агенту
-        *now.lock().unwrap() = 1100;
-        snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000}));
+        heard(&mut st, &env);
+        // ответа на вопрос уже не ждём, но он ещё числится озвученным, а пользователь затих: ответ на «Ты тут?» — Оме, не спросившему агенту
+        let t = 1000 + crate::news::ANSWER_WAIT;
+        *now.lock().unwrap() = t;
+        snap(&mut st, serde_json::json!({"at": t, "idle_since": 1000}));
         st.on_digest(dg("t", Ask::Final, false, "Фича готова."));
         st.tick();
-        heard(&mut st);
+        heard(&mut st, &env);
         drop(st);
         let end = Instant::now() + Duration::from_secs(2);
         let listens = || -> Vec<serde_json::Value> {
@@ -2302,31 +2302,71 @@ mod tests {
         assert!(texts(&st).is_empty());
     }
 
-    /// Пользователь простаивает 100 с, итог на доске: Ома спросила «Ты тут?».
-    fn asked_are_you_there() -> (State, Arc<Mutex<u64>>) {
-        let (mut st, now) = presence_state(1100);
+    /// Сказанное отзвучало: хвост pw-cat доиграл, окно ответа открыто.
+    fn heard(st: &mut State, env: &Env) {
+        texts(st);
+        st.after_speech();
+        *env.1.lock().unwrap() += speaker::TAIL;
+        st.tick();
+    }
+
+    /// Пользователь простаивает 100 с, итог на доске: Ома спросила «Ты тут?» (фраза ещё звучит).
+    fn asked_are_you_there() -> (State, Env, Arc<Mutex<u64>>) {
+        let (mut st, env) = env_state();
+        with_agents(&mut st, &["s", "t"]);
+        let now = secs_at(&mut st, 1100);
         snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000}));
         final_s(&mut st);
         st.tick();
         assert_eq!(texts(&st).join(" "), ARE_YOU_THERE);
-        (st, now)
+        (st, env, now)
     }
 
     #[test]
     fn are_you_there_unanswered_is_away() {
-        let (mut st, now) = asked_are_you_there();
+        let (mut st, env, now) = asked_are_you_there();
+        *now.lock().unwrap() += HERE_WAIT;
+        st.tick();
+        assert_eq!(st.presence.mode(1100 + HERE_WAIT), Mode::Unsure, "фраза ещё звучит — ответа не ждали");
+        heard(&mut st, &env); // окно ответа открылось: HERE_WAIT — с него
         *now.lock().unwrap() += HERE_WAIT - 1;
         st.tick();
-        assert_eq!(st.presence.mode(1100 + HERE_WAIT - 1), Mode::Unsure);
+        assert_eq!(st.presence.mode(1100 + 2 * HERE_WAIT - 1), Mode::Unsure);
         *now.lock().unwrap() += 1;
         st.tick();
-        assert_eq!(st.presence.mode(1100 + HERE_WAIT), Mode::Away);
+        assert_eq!(st.presence.mode(1100 + 2 * HERE_WAIT), Mode::Away);
         assert!(texts(&st).is_empty());
     }
 
     #[test]
+    fn buds_in_after_are_you_there_is_not_away() {
+        let (mut st, env, now) = asked_are_you_there();
+        heard(&mut st, &env);
+        *now.lock().unwrap() = 1110;
+        snap(&mut st, serde_json::json!({"at": 1110, "idle_since": 1000, "buds": "in"})); // вставил наушники молча
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
+        heard(&mut st, &env);
+        *now.lock().unwrap() = 1110 + HERE_WAIT;
+        st.tick();
+        assert_eq!(st.presence.mode(1110 + HERE_WAIT), Mode::Here);
+    }
+
+    #[test]
+    fn unsure_with_only_focused_final_asks_nothing() {
+        let (mut st, env) = env_state();
+        with_agents(&mut st, &["s", "t"]);
+        let _now = secs_at(&mut st, 1100);
+        *env.0.lock().unwrap() = Some(sref("s"));
+        snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000}));
+        final_s(&mut st);
+        st.tick();
+        assert!(texts(&st).is_empty() && st.here_ask.is_none(), "сказать нечего — и «Ты тут?» не звучит");
+    }
+
+    #[test]
     fn voice_here_after_are_you_there_speaks_news() {
-        let (mut st, _now) = asked_are_you_there();
+        let (mut st, _env, _now) = asked_are_you_there();
         st.on_msg(Msg::Presence { state: "here".into() });
         st.tick();
         assert_eq!(texts(&st), ["плуг: Фича готова."]);

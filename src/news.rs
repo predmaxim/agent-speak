@@ -72,10 +72,8 @@ impl Board {
     /// Фраза следующей пачки; взятое с доски снимается. skip — агент в фокусе: его итог и
     /// промежуточное снимаются без речи, вопрос остаётся. sure — пользователь точно слышит: журнал не ведём.
     pub fn take(&mut self, now: u64, skip: Option<&str>, sure: bool) -> Option<String> {
-        if let Some(f) = skip {
-            self.items.retain(|i| !(i.session == f && matches!(i.class, Class::Final | Class::Progress)));
-        }
-        let mut waiting = self.asked.as_ref().is_some_and(|(_, at)| now < at + ANSWER_WAIT);
+        self.drop_focused(skip);
+        let mut waiting = self.waiting(now);
         if !waiting {
             self.asked = None;
         }
@@ -113,6 +111,24 @@ impl Board {
             self.spoken.extend(taken.into_iter().map(|i| (i, now)));
         }
         Some(say)
+    }
+
+    /// Даст ли take(now, skip) фразу; итог и промежуточное агента в фокусе снимает, как take.
+    pub fn sayable(&mut self, now: u64, skip: Option<&str>) -> bool {
+        self.drop_focused(skip);
+        let waiting = self.waiting(now);
+        self.items.iter().any(|i| i.class == Class::Restore || (!waiting && !(i.class == Class::Question && Some(i.session.as_str()) == skip)))
+    }
+
+    fn drop_focused(&mut self, skip: Option<&str>) {
+        if let Some(f) = skip {
+            self.items.retain(|i| !(i.session == f && matches!(i.class, Class::Final | Class::Progress)));
+        }
+    }
+
+    /// Озвученный вопрос ещё ждёт ответа: итоги и новые вопросы молчат.
+    fn waiting(&self, now: u64) -> bool {
+        self.asked.as_ref().is_some_and(|(_, at)| now < at + ANSWER_WAIT)
     }
 
     /// Пользователь вернулся: при долгом отсутствии неуслышанное из журнала снова на доске.
@@ -310,6 +326,23 @@ mod tests {
         assert_eq!(b.take(10, Some("f"), true), None);
         assert_eq!(b.take(10, None, true).unwrap(), "F?");
         assert_eq!(b.take(11, None, true), None);
+    }
+
+    #[test]
+    fn sayable_follows_take() {
+        let mut b = Board::default();
+        b.push(n("f", Class::Final, "F готов.", 1));
+        b.push(n("f", Class::Question, "F?", 1));
+        assert!(!b.sayable(10, Some("f"))); // итог в фокусе снят, вопрос в фокусе ждёт
+        b.push(n("q", Class::Question, "Q?", 2));
+        b.push(n("d", Class::Final, "D готов.", 3));
+        assert!(b.sayable(10, Some("f")));
+        assert_eq!(b.take(10, Some("f"), true).unwrap(), "Q?");
+        assert!(!b.sayable(11, Some("f")), "итог ждёт ответа на вопрос");
+        b.push(n("r", Class::Restore, "R перезапущен.", 4));
+        assert!(b.sayable(11, Some("f")));
+        b.take(11, Some("f"), true);
+        assert!(b.sayable(10 + ANSWER_WAIT, Some("f")));
     }
 
     #[test]
