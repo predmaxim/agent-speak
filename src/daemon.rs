@@ -588,7 +588,7 @@ impl State {
         if self.quiet() || self.oma.talking || !self.silent() || self.shared.queue.lock().unwrap().held() {
             return;
         }
-        let Some(text) = self.board.take((self.now_secs)()) else { return };
+        let Some(text) = self.board.take((self.now_secs)(), None, true) else { return };
         if self.enqueue(Agent::Claude, "news", &text, Kind::News) > 0 {
             self.oma_send(&serde_json::json!({"do": "warm"}));
             self.listen_after = true;
