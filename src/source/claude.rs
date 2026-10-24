@@ -79,26 +79,23 @@ pub fn last_tool(content: &str) -> Option<String> {
 
 /// Сколько помощников агента запущено и ещё не отчиталось, по хвосту транскрипта; фоновые команды не считаются: сервер не отчитывается никогда.
 pub fn pending_background(content: &str) -> usize {
-    // id — буквы и цифры после маркера; в JSON-тексте перед ним то кавычки, то двоеточие
-    let id_after = |line: &str, marker: &str| -> Option<String> {
-        let rest = &line[line.find(marker)? + marker.len()..];
-        let id: String = rest.chars().skip_while(|c| !c.is_ascii_alphanumeric()).take_while(|c| c.is_ascii_alphanumeric()).collect();
-        (!id.is_empty()).then_some(id)
-    };
     let mut pending = std::collections::HashSet::new();
     for line in content.lines() {
         if line.contains("<task-notification>") {
-            // в одной строке бывает несколько отчётов: id и статус — из одного куска
+            // в одной строке бывает несколько отчётов, в отчёте после --resume — несколько id со статусом stopped
             for part in line.split("<task-notification>").skip(1) {
-                let done = ["completed", "failed", "killed"].iter().any(|s| part.contains(&format!("<status>{s}</status>")));
-                if let Some(id) = id_after(part, "<task-id>").filter(|_| done) {
-                    pending.remove(&id);
+                if ["completed", "failed", "killed", "stopped"].iter().any(|s| part.contains(&format!("<status>{s}</status>"))) {
+                    for id in part.split("<task-id>").skip(1) {
+                        pending.remove(&id.chars().take_while(char::is_ascii_alphanumeric).collect::<String>());
+                    }
                 }
             }
-        } else if line.contains("Async agent launched") {
-            pending.extend(id_after(line, "agentId:"));
-        } else if line.contains("resumedAgentId") {
-            pending.extend(id_after(line, "resumedAgentId"));
+        } else if line.contains("async_launched") || line.contains("resumedAgentId") {
+            // запуск — только из настоящего результата инструмента: цитата в тексте агента или выводе Read не считается
+            let Ok(e) = serde_json::from_str::<Value>(line) else { continue };
+            let r = &e["toolUseResult"];
+            let id = if r["status"] == "async_launched" { &r["agentId"] } else { &r["resumedAgentId"] };
+            pending.extend(id.as_str().filter(|id| !id.is_empty()).map(str::to_string));
         }
     }
     pending.len()
@@ -150,7 +147,12 @@ mod tests {
     fn tool_result(text: &str) -> String {
         serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": [{"type": "text", "text": text}]}]}}).to_string()
     }
-    fn launched(id: &str) -> String { tool_result(&format!("Async agent launched successfully.\nagentId: {id} (internal ID)")) }
+    /// Настоящий запуск помощника: результат инструмента с toolUseResult.status = async_launched, как в транскрипте.
+    fn launched(id: &str) -> String {
+        let mut e: serde_json::Value = serde_json::from_str(&tool_result(&format!("Async agent launched successfully.\nagentId: {id} (internal ID)"))).unwrap();
+        e["toolUseResult"] = serde_json::json!({"isAsync": true, "status": "async_launched", "agentId": id});
+        e.to_string()
+    }
     fn report(id: &str, status: &str) -> String {
         serde_json::json!({"type": "queue-operation", "content": format!("<task-notification>\n<task-id>{id}</task-id>\n<status>{status}</status>\n</task-notification>")}).to_string()
     }
@@ -169,8 +171,26 @@ mod tests {
     }
 
     #[test]
+    fn stopped_report_with_several_ids_is_terminal() {
+        // --resume: один отчёт на всех помощников прошлой сессии
+        let stopped = serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": "<task-notification>\n<task-id>a1d0aca83830798a1</task-id>\n<task-id>a9576ea011ca11eae</task-id>\n<task-id>aeec3f40d3b667aa7</task-id>\n<status>stopped</status>\n<summary>3 background agents didn't finish before the previous session ended</summary>\n</task-notification>"}).to_string();
+        let log = [launched("a1d0aca83830798a1"), launched("a9576ea011ca11eae"), launched("aeec3f40d3b667aa7"), stopped];
+        assert_eq!(pending_background(&log.join("\n")), 0);
+    }
+
+    #[test]
+    fn quoted_launch_is_not_counted() {
+        let quote = "Async agent launched successfully.\nagentId: abc123 (internal ID)";
+        let said = serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": quote}]}}).to_string();
+        let read = tool_result(&format!("{quote}\nresumedAgentId: def456"));
+        assert_eq!(pending_background(&[said, read].join("\n")), 0);
+    }
+
+    #[test]
     fn resumed_helper_pending_again() {
-        let resumed = tool_result(r#"{"success":true,"resumedAgentId":"aaa","pin":{"id":"aaa"}}"#);
+        let mut resumed: serde_json::Value = serde_json::from_str(&tool_result(r#"{"success":true,"resumedAgentId":"aaa","pin":{"id":"aaa"}}"#)).unwrap();
+        resumed["toolUseResult"] = serde_json::json!({"success": true, "resumedAgentId": "aaa", "pin": {"id": "aaa"}});
+        let resumed = resumed.to_string();
         assert_eq!(pending_background(&[launched("aaa"), report("aaa", "completed")].join("\n")), 0);
         assert_eq!(pending_background(&[launched("aaa"), report("aaa", "completed"), resumed].join("\n")), 1);
     }

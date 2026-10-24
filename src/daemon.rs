@@ -1763,7 +1763,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agent-speak-pending-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.jsonl");
-        let line = serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": [{"type": "text", "text": "Async agent launched successfully.\nagentId: aaa (internal ID)"}]}]}});
+        let line = serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": [{"type": "text", "text": "Async agent launched successfully.\nagentId: aaa (internal ID)"}]}]}, "toolUseResult": {"isAsync": true, "status": "async_launched", "agentId": "aaa"}});
         std::fs::write(&path, format!("{line}\n")).unwrap();
         let mut st = test_state();
         with_agents(&mut st, &["s"]);
