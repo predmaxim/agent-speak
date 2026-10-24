@@ -57,7 +57,7 @@ pub struct Presence {
     facts: Option<Facts>,
     last_input: u64,
     busy_until: u64,
-    away_since: Option<u64>, // «я отойду» / «Ты тут?» без ответа; до ввода после AWAY_GRACE
+    away: Option<u64>,       // «я отойду» / «Ты тут?» без ответа — до ввода позже этого срока
     buds_dropped: bool,      // наушники вынуты — «не уверена» до ввода
 }
 
@@ -68,7 +68,7 @@ impl Presence {
         if stale && now.saturating_sub(f.at) > STALE_AFTER {
             return Mode::Here;
         }
-        if f.locked || self.away_since.is_some() {
+        if f.locked || self.away.is_some() {
             return Mode::Away;
         }
         if f.mic || f.camera || f.video || self.busy_until > now {
@@ -91,8 +91,8 @@ impl Presence {
         self.last_input = now;
         self.buds_dropped = false;
         // ввод в отсрочке «я отойду» away не снимает
-        if self.away_since.is_some_and(|s| now > s + AWAY_GRACE) {
-            self.away_since = None;
+        if self.away.is_some_and(|until| now > until) {
+            self.away = None;
         }
     }
 
@@ -124,7 +124,7 @@ impl Presence {
                 self.last_input = now;
                 self.buds_dropped = false;
                 self.busy_until = 0;
-                self.away_since = None;
+                self.away = None;
                 back.then_some(absence)
             }
             Mode::Busy => {
@@ -134,14 +134,15 @@ impl Presence {
             }
             _ => {
                 self.last_input = now;
-                self.away_since = Some(now);
+                self.away = Some(now + AWAY_GRACE);
                 None
             }
         }
     }
 
+    /// «Ты тут?» без ответа: отсрочки нет — первый же ввод и есть возвращение.
     pub fn unanswered(&mut self) {
-        self.away_since = Some(self.last_input.max(self.facts.as_ref().map_or(0, |f| f.at)));
+        self.away = Some(0);
     }
 
     pub fn mode(&self, now: u64) -> Mode {
@@ -280,6 +281,16 @@ mod tests {
         p.apply(facts(1100, 1000), 1100);
         assert_eq!(p.mode(1100), Mode::Away);
         p.apply(facts(1130, 0), 1130);
+        assert_eq!(p.mode(1130), Mode::Here);
+    }
+
+    #[test]
+    fn unanswered_has_no_grace() {
+        let mut p = Presence::default();
+        p.apply(facts(1100, 1000), 1100);
+        p.unanswered();
+        assert_eq!(p.mode(1100), Mode::Away);
+        assert_eq!(p.apply(facts(1130, 0), 1130), Some(130));
         assert_eq!(p.mode(1130), Mode::Here);
     }
 
