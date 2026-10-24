@@ -594,7 +594,7 @@ def test_format_agents_and_find():
 def test_tools_read_only_and_agent_by_id():
     from agent_voice import brain
     assert "WebSearch" in brain.TOOLS and "WebFetch" not in brain.TOOLS  # наружу — только поиск
-    tools = {t.name: t.description for t in brain.oma_tools(lambda: E)}
+    tools = {t.name: t.description for t in brain.oma_tools(lambda: E, None)}
     assert all("id из agents" in tools[n] for n in ("agent_feed", "agent_tail"))
     assert "id" in tools["agents"]
 
@@ -1058,3 +1058,25 @@ def test_foreign_capture_skips_own_named_stream():
     assert not foreign_capture([{"properties": {"node.name": OWN_NODE}}], {42})
     assert foreign_capture([{"properties": {"node.name": "pw-record"}}], {42})
     assert OWN_NODE in " ".join(REC_CMD)
+
+
+def _presence(state):
+    from agent_voice import brain
+    sent = []
+    t = next(t for t in brain.oma_tools(lambda: E, sent.append) if t.name == "presence")
+    asyncio.run(t.handler({"state": state}))
+    return sent
+
+
+def test_presence_tool_sends_state():
+    assert _presence("busy") == [{"cmd": "presence", "state": "busy"}]
+
+
+def test_presence_tool_rejects_unknown():
+    assert _presence("sleep") == []
+
+
+def test_prompt_mentions_presence_and_stress():
+    from agent_voice import brain
+    assert "presence" in brain.OMA_PROMPT and "U+0301" in brain.OMA_PROMPT
+    assert "mcp__oma__presence" in brain.OMA_TOOLS

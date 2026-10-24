@@ -13,7 +13,8 @@ from .context import _blocks, selection, transcript_tail
 OMA_DIR = os.path.expanduser("~/.local/share/agent-speak/oma")
 MODEL = "claude-sonnet-5-5"
 TOOLS = ["Read", "Glob", "Grep", "WebSearch"]  # без WebFetch: наружу Ома ничего не отправляет
-OMA_TOOLS = ["mcp__oma__agents", "mcp__oma__agent_feed", "mcp__oma__agent_tail", "mcp__oma__selection"]
+OMA_TOOLS = ["mcp__oma__agents", "mcp__oma__agent_feed", "mcp__oma__agent_tail", "mcp__oma__selection",
+             "mcp__oma__presence"]
 STALE_HOURS = 2
 OMA_PROMPT = ("Ты — Ома, голосовой заместитель пользователя. Следишь за его ИИ-агентами (Claude Code, Codex) в терминалах "
               "и отвечаешь на его вопросы. Отвечай по-русски, одной-тремя короткими фразами, без вступлений, без markdown, "
@@ -21,7 +22,13 @@ OMA_PROMPT = ("Ты — Ома, голосовой заместитель пол
               "Состояние агентов — инструментами agents и agent_feed; конец переписки агента — agent_tail (пустой аргумент — "
               "агент в фокусе); «это», «тут», «эта ошибка» — сначала selection, затем agent_tail. Ты только читаешь: ничего "
               "не меняешь и не передаёшь агентам; если просят передать или сделать — скажи, что пока не умеешь. Не понятно, "
-              "о чём речь, — коротко переспроси.")
+              "о чём речь, — коротко переспроси. "
+              "Если пользователь просит сейчас не говорить или отложить («не сейчас», «давай потом», «замолчи» и т. п.) — "
+              "вызови presence с busy; говорит, что уходит, — away; просит новости или говорит, что вернулся, — here. "
+              "После presence ответь одним-двумя словами или ничего. Реплика может начинаться с пометки «Ома только что "
+              "сказала: …» или «Ома спросила: …» — это твои же слова вслух; «потом» и «не сейчас» после вопроса агента — "
+              "presence busy, а не ответ агенту. В словах, где ударение легко прочесть неверно, — омографы, редкие слова, "
+              "имена — ставь знак ударения U+0301 сразу после ударной гласной.")
 STATES = {"working": "работает", "waiting": "ждёт ответа", "done": "готово", "idle": "простаивает"}
 
 
@@ -101,7 +108,7 @@ def _text(t: str) -> dict:
     return {"content": [{"type": "text", "text": t}]}
 
 
-def oma_tools(snapshot) -> list:
+def oma_tools(snapshot, send) -> list:
     """Инструменты Омы поверх снимка агентов демона."""
     @tool("agents", "Агенты пользователя: название, проект, id, в фокусе ли, состояние, давность, последний статус.", {})
     async def agents(args):
@@ -130,15 +137,23 @@ def oma_tools(snapshot) -> list:
     async def sel(args):
         return _text(await asyncio.to_thread(selection) or "Ничего не выделено")
 
-    return [agents, agent_feed, agent_tail, sel]
+    @tool("presence", "Слушает ли пользователь Ому сейчас: here — слушает, busy — не сейчас, away — ушёл.", {"state": str})
+    async def presence(args):
+        state = args.get("state")
+        if state not in ("here", "busy", "away"):
+            return _text("state: here | busy | away")
+        send({"cmd": "presence", "state": state})
+        return _text("ок")
+
+    return [agents, agent_feed, agent_tail, sel, presence]
 
 
 class Brain:
     """Текущий чат Омы: key — "new", "chat:<id сессии>" или "agent:<id агента>"."""
 
-    def __init__(self, events: asyncio.Queue, snapshot):
+    def __init__(self, events: asyncio.Queue, snapshot, send=None):
         os.makedirs(OMA_DIR, exist_ok=True)
-        self.events, self.snapshot, self.tools = events, snapshot, oma_tools(snapshot)
+        self.events, self.snapshot, self.tools = events, snapshot, oma_tools(snapshot, send)
         self.key, self.sid, self.client, self.reader = "new", None, None, None
         self.st, self.used, self.turns = {"skip": False}, time.time(), 0  # turns: запросов без ResultMessage
 

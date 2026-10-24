@@ -264,7 +264,7 @@ async def main():
 
         loop = asyncio.get_running_loop()
         whisper = Whisper()
-        oma = Oma(Conversation(), Ear(events, whisper), Brain(events, lambda: agents), whisper)
+        oma = Oma(Conversation(), Ear(events, whisper), Brain(events, lambda: agents, send=link.send), whisper)
 
         def on_agents(lst):
             agents[:] = lst  # снимок для инструментов мозга
