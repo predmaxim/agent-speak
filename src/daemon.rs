@@ -2417,7 +2417,7 @@ mod tests {
     #[test]
     fn busy_holds_news_and_releases_without_greeting() {
         let (mut st, _now) = presence_state(1000);
-        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 990, "media": true}));
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 990, "video": true}));
         final_s(&mut st);
         st.tick();
         assert!(texts(&st).is_empty());

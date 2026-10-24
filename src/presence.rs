@@ -43,7 +43,7 @@ pub struct Facts {
     pub locked: bool,
     pub mic: bool,
     pub camera: bool,
-    pub media: bool,
+    pub video: bool,
     #[serde(deserialize_with = "buds_from")]
     pub buds: Buds,
 }
@@ -71,7 +71,7 @@ impl Presence {
         if f.locked || self.away_since.is_some() {
             return Mode::Away;
         }
-        if f.mic || f.camera || f.media || self.busy_until > now {
+        if f.mic || f.camera || f.video || self.busy_until > now {
             return Mode::Busy;
         }
         if f.buds == Buds::In {
@@ -196,7 +196,7 @@ mod tests {
     fn busy_beats_idle_but_not_lock() {
         let mut p = Presence::default();
         let mut f = facts(1700, 1000);
-        f.media = true;
+        f.video = true;
         p.apply(f.clone(), 1700);
         assert_eq!(p.mode(1700), Mode::Busy);
         f.locked = true;
