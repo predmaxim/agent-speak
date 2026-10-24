@@ -145,6 +145,13 @@ impl Presence {
         self.away = Some(0);
     }
 
+    /// Ноутбук проснулся (slept — последний tick до сна): снимок, свежий до сна, держится ещё STALE_AFTER — пока сервис не написал новый, блокировка и простой в силе.
+    pub fn woke(&mut self, slept: u64, now: u64) {
+        if let Some(f) = self.facts.as_mut().filter(|f| slept.saturating_sub(f.at) <= STALE_AFTER) {
+            f.at = now;
+        }
+    }
+
     pub fn mode(&self, now: u64) -> Mode {
         self.mode_at(now, true)
     }
@@ -316,6 +323,20 @@ mod tests {
         let mut p = Presence::default();
         p.apply(facts(1005, 1000), 1005);
         assert_eq!(p.mode(1005 + STALE_AFTER + 1), Mode::Here);
+    }
+
+    #[test]
+    fn woke_keeps_only_fresh_snapshot() {
+        let mut f = facts(1000, 990);
+        f.locked = true;
+        let mut p = Presence::default();
+        p.apply(f.clone(), 1000);
+        p.woke(1010, 4600);
+        assert_eq!(p.mode(4600 + STALE_AFTER), Mode::Away);
+        let mut p = Presence::default();
+        p.apply(f, 1000);
+        p.woke(1000 + STALE_AFTER + 1, 4600); // сервис замолк ещё до сна — фактов нет
+        assert_eq!(p.mode(4600), Mode::Here);
     }
 
     #[test]

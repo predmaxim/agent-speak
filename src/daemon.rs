@@ -815,6 +815,9 @@ impl State {
         if let Some((was, pmin, psecs)) = self.sched {
             // ноутбук спал: tick не шёл, граница могла пройти и дважды — значение то же
             let gap = secs.saturating_sub(psecs);
+            if gap > presence::STALE_AFTER {
+                self.presence.woke(psecs, secs); // таймеры сервиса монотонны: после сна снимок придёт не сразу
+            }
             let slept_over = self.cfg.quiet_schedule
                 && gap > 60
                 && (gap >= 24 * 3600 || [&self.cfg.quiet_from, &self.cfg.quiet_to].into_iter().filter_map(|b| hhmm(b)).any(|b| in_window(pmin, min, b)));
@@ -2488,7 +2491,9 @@ mod tests {
         st.tick();
         assert_eq!(texts(&st), ["плуг: Фича готова."]);
         snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 300})); // сервис замолк на «нет на месте»
-        *now.lock().unwrap() += presence::STALE_AFTER + 1;
+        *now.lock().unwrap() += presence::STALE_AFTER / 2;
+        st.tick(); // демон тикает, а не спит: разрыв без tick — сон, снимок бы продлился
+        *now.lock().unwrap() += presence::STALE_AFTER / 2 + 1;
         st.on_digest(dg("t", Ask::Final, false, "Тесты зелёные."));
         st.tick();
         assert_eq!(texts(&st), ["плуг: Тесты зелёные."]);
@@ -2556,6 +2561,20 @@ mod tests {
         assert!(texts(&st).is_empty());
         *now.lock().unwrap() = 1400;
         snap(&mut st, serde_json::json!({"at": 1400, "idle_since": 0}));
+        st.tick();
+        assert_eq!(texts(&st), GREETING);
+    }
+
+    #[test]
+    fn wake_from_sleep_keeps_lock_until_fresh_snapshot() {
+        let (mut st, now) = presence_state(1000);
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 990, "locked": true}));
+        final_s(&mut st);
+        st.tick();
+        *now.lock().unwrap() = 1000 + 3600; // ноутбук спал: сервис ещё не написал снимок
+        st.tick();
+        assert!(texts(&st).is_empty(), "до свежего снимка экран всё ещё заблокирован");
+        snap(&mut st, serde_json::json!({"at": 1000 + 3600, "idle_since": 0}));
         st.tick();
         assert_eq!(texts(&st), GREETING);
     }
