@@ -521,7 +521,7 @@ def _ear(cmd):
     from agent_voice.ear import Ear
     out = asyncio.Queue()
     # VAD подменён заглушкой, кадры не подаются; микрофон и модель не трогаем
-    return out, Ear(out, Whisper(load=lambda: "m"), cmd=cmd, vad_load=lambda: None)
+    return out, Ear(out, Whisper(load=lambda: "m"), cmd=cmd, vad_load=lambda: None, mic=lambda: "")
 
 
 def test_ear_start_stop_single_process_and_interleave():
@@ -984,7 +984,7 @@ def _numbered_ear(monkeypatch, whisper):
     vad = lambda x, rate: SimpleNamespace(item=lambda: next(probs))
     monkeypatch.setattr(earmod, "transcribe", lambda m, pcm: "слово")
     out = asyncio.Queue()
-    return out, Ear(out, whisper, cmd=["sh", "-c", f"head -c {64 * 1024} /dev/zero; sleep 60"], vad_load=lambda: vad)
+    return out, Ear(out, whisper, cmd=["sh", "-c", f"head -c {64 * 1024} /dev/zero; sleep 60"], vad_load=lambda: vad, mic=lambda: "")
 
 
 def _drain(out, kinds):
@@ -1041,7 +1041,7 @@ def test_ear_warm_loads_vad_once():
     loads = []
 
     async def run():
-        e = Ear(asyncio.Queue(), Whisper(load=lambda: "m"), cmd=["sleep", "60"], vad_load=lambda: loads.append(1) or "vad")
+        e = Ear(asyncio.Queue(), Whisper(load=lambda: "m"), cmd=["sleep", "60"], vad_load=lambda: loads.append(1) or "vad", mic=lambda: "")
         await e.warm()
         await e.start()
         await e.stop()
@@ -1080,3 +1080,22 @@ def test_prompt_mentions_presence_and_stress():
     from agent_voice import brain
     assert "presence" in brain.OMA_PROMPT and "U+0301" in brain.OMA_PROMPT
     assert "mcp__oma__presence" in brain.OMA_TOOLS
+
+
+def test_mic_while_buds_out_is_the_laptops():
+    from agent_voice.context import pick_mic, buds_out
+    srcs = "43\tmic_aec\tPipeWire\n46\tmic_denoise\tPipeWire\n67\talsa_input.pci-0000_00_1f.3.analog-stereo\tPipeWire\n80\tbluez_input.00_11_22_33_44_55.0\tPipeWire\n"
+    assert pick_mic("mic_denoise", srcs) == ""  # вход по умолчанию и так ноутбука — без --target
+    assert pick_mic("bluez_input.00_11_22_33_44_55.0", srcs) == "mic_denoise"  # гарнитура на столе — шумодав ноутбука
+    assert pick_mic("bluez_input.x", "1\talsa_input.pci-x\tPipeWire\n2\tbluez_input.x\tPipeWire\n") == "alsa_input.pci-x"
+    assert pick_mic("bluez_input.x", "") == ""
+    assert buds_out('{"at": 1000, "buds": "out"}', 1050)
+    assert not buds_out('{"at": 1000, "buds": "out"}', 1091)  # снимок устарел — сервиса нет
+    assert not buds_out('{"at": 1000, "buds": "in"}', 1010)
+    assert not buds_out("{", 1010)
+
+
+def test_rec_cmd_targets_mic_before_stdout():
+    from agent_voice.ear import REC_CMD, rec_cmd
+    assert rec_cmd(REC_CMD, "") == REC_CMD
+    assert rec_cmd(REC_CMD, "mic_denoise")[-3:] == ["--target", "mic_denoise", "-"]

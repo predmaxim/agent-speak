@@ -8,12 +8,17 @@ import time
 
 import numpy as np
 
-from .context import OWN_NODE
+from .context import OWN_NODE, mic_target
 from .segment import Segmenter
 
 RATE, FRAME = 16000, 512  # 512 отсчётов = 32 мс
 # Вход по умолчанию: эхоподавление живёт в цепочке микрофона (omarchy-mic-denoise).
 REC_CMD = ["pw-record", "-P", "{ node.name = " + OWN_NODE + " }", "--rate", str(RATE), "--channels", "1", "--format", "s16", "-"]
+
+
+def rec_cmd(cmd: list, target: str) -> list:
+    """pw-record с --target перед "-" (stdout); пустой target — вход по умолчанию."""
+    return cmd[:-1] + ["--target", target, cmd[-1]] if target else list(cmd)
 
 
 def load_whisper():
@@ -85,8 +90,8 @@ def load_vad():
 class Ear:
     """pw-record → VAD → Segmenter → whisper; микрофон включается по start()/stop()."""
 
-    def __init__(self, out, whisper, cmd=REC_CMD, vad_load=load_vad):
-        self.out, self.whisper, self.cmd = out, whisper, list(cmd)
+    def __init__(self, out, whisper, cmd=REC_CMD, vad_load=load_vad, mic=mic_target):
+        self.out, self.whisper, self.cmd, self._mic = out, whisper, list(cmd), mic
         self._vad_load, self._lock = vad_load, asyncio.Lock()  # lock: start/stop идут по очереди, побеждает последний вызов
         self.paused = False
         self._cut = False
@@ -115,7 +120,9 @@ class Ear:
             if self.open:
                 return
             await self._load_vad()
-            proc = self._proc = await asyncio.create_subprocess_exec(*self.cmd, stdout=asyncio.subprocess.PIPE)
+            # shortcut: микрофон выбирается при включении слуха; наушники вынули посреди разговора — слух на прежнем до следующего включения
+            cmd = rec_cmd(self.cmd, await asyncio.to_thread(self._mic))
+            proc = self._proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
             phrases = asyncio.Queue()
             self._tasks = [asyncio.create_task(self._recognize(phrases)),
                            asyncio.create_task(self._read(proc, phrases))]

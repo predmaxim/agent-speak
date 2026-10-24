@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import time
 
 
 INJECTED = ("<system-reminder>", "<command-", "<local-command")  # вставки Claude Code в реплики пользователя
@@ -85,6 +86,46 @@ def foreign_capture(outputs: list, own: set) -> bool:
         if p.get("node.virtual") != "true" and p.get("application.process.id") not in own:
             return True
     return False
+
+
+PRESENCE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "predmaxim-presence.json")
+STALE_AFTER = 90  # с: снимок старше — сервиса присутствия нет (как presence::STALE_AFTER демона)
+
+
+def buds_out(snapshot: str, now: float) -> bool:
+    """По свежему снимку сервиса присутствия оба наушника вынуты."""
+    try:
+        d = json.loads(snapshot)
+        return d.get("buds") == "out" and now - float(d.get("at", 0)) <= STALE_AFTER
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def pick_mic(default: str, sources: str) -> str:
+    """Микрофон ноутбука, пока наушники лежат на столе: "" — вход по умолчанию и так не Bluetooth;
+    иначе (гарнитура) — цепочка шумодава ноутбука, встроенный микрофон, любой не Bluetooth."""
+    if default and not default.startswith("bluez_"):
+        return ""
+    names = [p[1] for p in (l.split("\t") for l in sources.splitlines()) if len(p) > 1]
+    names = [n for n in names if not n.startswith("bluez_") and not n.endswith(".monitor")]
+    for prefix in ("mic_denoise", "alsa_input."):
+        for n in names:
+            if n.startswith(prefix):
+                return n
+    return names[0] if names else ""
+
+
+def mic_target(run=subprocess.run) -> str:
+    """Куда слушать: наушники вынуты — микрофон ноутбука, иначе "" (вход по умолчанию — у гарнитуры её микрофон)."""
+    try:
+        with open(PRESENCE) as f:
+            if not buds_out(f.read(), time.time()):
+                return ""
+        default = run(["pactl", "get-default-source"], capture_output=True, text=True, timeout=2).stdout.strip()
+        sources = run(["pactl", "list", "short", "sources"], capture_output=True, text=True, timeout=2).stdout
+        return pick_mic(default, sources)
+    except Exception:
+        return ""
 
 
 def locked() -> bool:
