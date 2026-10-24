@@ -30,9 +30,16 @@ function orbMode(st) {
   if (!st || !st.running) return "off"
   if (["loading", "listening", "thinking", "speaking", "paused"].indexOf(st.oma) >= 0) return st.oma
   if (st.speaking) return "speaking"   // news or manual reading: the service speaks, Oma is idle
-  if (st.waiting > 0) return "waiting"
+  if (st.waiting > 0 && st.agents_voice !== false) return "waiting"   // not watching: no red
   if (st.oma === "off") return "off"
   return st.quiet ? "quiet" : "idle"
+}
+
+// The window header's items, left to right; the power switch is at the edge.
+// Oma off: nothing but the switch works; a page has only Back.
+function headItems(page, running) {
+  if (page !== "main") return ["back"]
+  return running ? ["talk", "new", "history", "sound", "settings", "power"] : ["power"]
 }
 
 // Tooltip: a key for tr(key, arg).
@@ -192,7 +199,7 @@ function sections(tr) {
 }
 
 // The settings page's rows, top to bottom: the two sections, quiet mode, the orb, agents.
-var SETTINGS_ROWS = ["speaker", "rate", "quiet_now", "quiet_schedule", "quiet_hours", "orb_over_fullscreen", "progress_digest"]
+var SETTINGS_ROWS = ["speaker", "rate", "quiet_now", "quiet_schedule", "quiet_hours", "orb_over_fullscreen", "agents_voice", "progress_digest"]
 
 // ←/→ (dx) or Enter (dx 1) on a settings row: the `set` to send ({key,
 // value, sample}) or null. Choices go round, switches flip; the hours row
@@ -202,6 +209,7 @@ function settingStep(row, st, dx) {
   if (row === "quiet_schedule") return { key: "quiet_schedule", value: !st.quiet_schedule, sample: false }
   if (row === "orb_over_fullscreen") return { key: row, value: !st.orb_over_fullscreen, sample: false }
   if (row === "progress_digest") return { key: row, value: !st.progress_digest, sample: false }
+  if (row === "agents_voice") return { key: row, value: !st.agents_voice, sample: false }
   var sec = sections(function(t) { return t }).filter(function(x) { return x.key === row })[0]
   if (!sec) return null
   var values = sec.options.map(function(o) { return o.value })

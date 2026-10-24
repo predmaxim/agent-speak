@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Hyprland
+import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
@@ -69,8 +70,31 @@ Item {
     return null
   }
   readonly property int rowCount: page === "main" ? agents.length : page === "history" ? chatList.length : Model.SETTINGS_ROWS.length
-  // Main page: talk, new chat, history, settings, the agents-voice switch; a page: Back.
-  readonly property int headCount: page === "main" ? 5 : 1
+  // Main page: talk, new chat, history, sound, settings, the power switch; Oma off: the switch; a page: Back.
+  readonly property var headItems: Model.headItems(page, speech.running === true)
+  readonly property int headCount: headItems.length
+
+  // A header button's look: the sound button shows what a click will do.
+  function headButton(id) {
+    var quiet = root.speech.quiet === true
+    return { id: id, icon: { talk: "\u{F036C}", "new": "\u{F0415}", history: "\u{F02DA}", sound: quiet ? "\u{F0581}" : "\u{F057E}",
+                             settings: "\u{F0493}", back: "\u{F004D}" }[id],
+             tip: { talk: root.tr("Talk"), "new": root.tr("New chat"), history: root.tr("Chat history"),
+                    sound: quiet ? root.tr("Turn sound on") : root.tr("Turn sound off"), settings: root.tr("Settings"), back: root.tr("Back") }[id] }
+  }
+
+  // Oma as a whole (the service): on, the link reconnects at once instead of in up to 5 s.
+  function power(on) {
+    powerProc.on = on
+    powerProc.running = true
+  }
+
+  Process {
+    id: powerProc
+    property bool on: false
+    command: [Quickshell.env("HOME") + "/.local/bin/agent-speak", on ? "on" : "off"]
+    onExited: if (on && root.link) root.link.retry()
+  }
 
   function focusedScreen() {
     var name = Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : ""
@@ -144,12 +168,14 @@ Item {
   }
 
   function press(col) {
-    if (root.page !== "main") root.back()
-    else if (col === 0) root.send({ do: "talk" })
-    else if (col === 1) root.newChat()
-    else if (col === 2) root.showPage("history")
-    else if (col === 3) root.showPage("settings")
-    else root.choose("agents_voice", !root.speech.agents_voice, false)
+    var id = root.headItems[col]
+    if (id === "back") root.back()
+    else if (id === "talk") root.send({ do: "talk" })
+    else if (id === "new") root.newChat()
+    else if (id === "history") root.showPage("history")
+    else if (id === "sound") root.step("quiet_now", 1)
+    else if (id === "settings") root.showPage("settings")
+    else if (id === "power") root.power(root.speech.running !== true)
   }
 
   // ↑/↓ the rows, ↑ from the first one onto the header; ←/→ its buttons,
@@ -322,13 +348,13 @@ Item {
             size: Style.font.display
             line: Math.max(1, Style.space(2))
           }
-          // Right to left: the agents-voice switch at the edge, the buttons, the
+          // Right to left: the power switch at the edge, the buttons, the
           // count of agents waiting for an answer. A page has only Back.
           trailingControl: Row {
             spacing: Style.space(10)
 
             Text {
-              visible: root.page === "main" && root.speech.waiting > 0
+              visible: root.page === "main" && root.speech.waiting > 0 && root.speech.agents_voice !== false
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
               text: root.speech.waiting
@@ -341,10 +367,7 @@ Item {
             }
 
             Repeater {
-              model: root.page === "main"
-                ? [{ icon: "\u{F036C}", tip: root.tr("Talk") }, { icon: "\u{F0415}", tip: root.tr("New chat") },
-                   { icon: "\u{F02DA}", tip: root.tr("Chat history") }, { icon: "\u{F0493}", tip: root.tr("Settings") }]
-                : [{ icon: "\u{F004D}", tip: root.tr("Back") }]
+              model: root.headItems.filter(function(id) { return id !== "power" }).map(root.headButton)
 
               Button {
                 required property var modelData
@@ -358,7 +381,7 @@ Item {
                 height: width
                 // The mic is lit while a conversation runs; a click ends it
                 // while Oma listens, and only cuts her answer short otherwise.
-                selected: root.page === "main" && index === 0 && root.speech.talking === true
+                selected: modelData.id === "talk" && root.speech.talking === true
                 tooltipText: selected && ["listening", "paused"].indexOf(root.speech.oma) >= 0
                   ? root.tr("End conversation") : modelData.tip
                 foreground: root.fg
@@ -369,14 +392,14 @@ Item {
             }
 
             ToggleSwitch {
-              id: agentsSwitch
+              id: powerSwitch
               visible: root.page === "main"
               anchors.verticalCenter: parent.verticalCenter
-              checked: root.speech.agents_voice === true
-              hasCursor: root.onHead && root.headCol === 4
+              checked: root.speech.running === true
+              hasCursor: root.onHead && root.headCol === root.headCount - 1
               foreground: root.fg
-              onToggled: root.press(4)
-              PanelToolTip { visible: agentsSwitch.containsMouse; text: root.tr("Read agents aloud") }
+              onToggled: root.press(root.headCount - 1)
+              PanelToolTip { visible: powerSwitch.containsMouse; text: root.speech.running ? root.tr("Turn Oma off") : root.tr("Turn Oma on") }
             }
           }
         }
@@ -397,10 +420,20 @@ Item {
           anchors.right: parent.right
           anchors.bottom: parent.bottom
 
+          Text {
+            visible: root.page === "main" && root.speech.running !== true
+            anchors.centerIn: parent
+            textFormat: Text.PlainText
+            text: root.tr("Oma is off")
+            color: root.dim
+            font.family: root.font
+            font.pixelSize: Style.font.heading
+          }
+
           // ---- Main page: the agents.
           ListView {
             id: agentList
-            visible: root.page === "main"
+            visible: root.page === "main" && root.speech.running === true
             anchors.left: parent.left
             anchors.top: parent.top
             anchors.bottom: parent.bottom
@@ -495,7 +528,7 @@ Item {
           }
 
           Text {
-            visible: root.page === "main" && root.agents.length === 0
+            visible: root.page === "main" && root.speech.running === true && root.agents.length === 0
             anchors.centerIn: agentList
             textFormat: Text.PlainText
             text: root.tr("No agents")
@@ -506,7 +539,7 @@ Item {
 
           PanelSeparator {
             id: divider
-            visible: root.page === "main"
+            visible: root.page === "main" && root.speech.running === true
             anchors.left: agentList.right
             anchors.leftMargin: Style.space(18)
             anchors.top: parent.top
@@ -518,7 +551,7 @@ Item {
           // ---- Main page: the chat and its field.
           Item {
             id: chatPane
-            visible: root.page === "main"
+            visible: root.page === "main" && root.speech.running === true
             anchors.left: divider.right
             anchors.leftMargin: Style.space(24)
             anchors.right: parent.right
@@ -848,6 +881,16 @@ Item {
 
             SettingRow {
               row: 6
+              label: root.tr("Watch agents")
+              ToggleSwitch {
+                checked: root.speech.agents_voice === true
+                foreground: root.fg
+                onToggled: root.step("agents_voice", 1)
+              }
+            }
+
+            SettingRow {
+              row: 7
               label: root.tr("Retell progress")
               ToggleSwitch {
                 checked: root.speech.progress_digest === true

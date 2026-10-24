@@ -9,7 +9,7 @@ var TABLES = {
   ru: {
     "Oma is not running": "Ома не запущена", "Oma is loading": "Ома загружается", "Oma is listening": "Ома слушает",
     "Oma is thinking": "Ома думает", "Oma is speaking": "Ома говорит", "Paused": "Пауза", "Quiet mode": "Тихий режим",
-    "Oma": "Ома", "%1 waiting": "Ждут ответа: %1", "Read agents aloud": "Озвучивать агентов", "End conversation": "Закончить разговор",
+    "Oma": "Ома", "%1 waiting": "Ждут ответа: %1", "End conversation": "Закончить разговор",
     "just now": "только что", "%1 min": "%1 мин", "%1 h": "%1 ч", "%1 d": "%1 д",
     "Working": "Работает", "Waiting": "Ждёт", "Done": "Готово", "Idle": "Свободен",
     "VOICE": "ГОЛОС", "SPEED": "СКОРОСТЬ",
@@ -19,7 +19,9 @@ var TABLES = {
     "No agents": "Агентов нет", "You": "Ты", "Ask Oma…": "Спросить Ому…", "Untitled chat": "Без названия",
     "No chats yet": "Чатов пока нет", "Quiet now": "Сейчас тихо", "On schedule": "По расписанию", "From / to": "С / до",
     "Orb": "Орб", "Over fullscreen windows": "Над полноэкранными окнами",
-    "Agents": "Агенты", "Retell progress": "Пересказывать промежуточное"
+    "Agents": "Агенты", "Retell progress": "Пересказывать промежуточное",
+    "Watch agents": "Следить за агентами", "Oma is off": "Ома выключена", "Turn Oma on": "Включить Ому", "Turn Oma off": "Выключить Ому",
+    "Turn sound off": "Выключить звук", "Turn sound on": "Включить звук", "Oma: sound off": "Ома: звук выключен"
   }
 }
 

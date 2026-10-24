@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -24,6 +24,12 @@ assert.strictEqual(M.orbMode(st), "idle")
 assert.strictEqual(M.orbMode(Object.assign({}, st, { waiting: 2, quiet: true })), "waiting")
 assert.strictEqual(M.orbMode(Object.assign({}, st, { quiet: true })), "quiet")
 assert.strictEqual(M.orbMode(Object.assign({}, st, { oma: "listening", waiting: 1 })), "listening")
+// Watch agents off: a waiting agent does not turn the orb red
+assert.strictEqual(M.orbMode(Object.assign({}, st, { waiting: 2, agents_voice: false })), "idle")
+// The header: off — only the power switch; a page — only Back
+assert.deepStrictEqual(M.headItems("main", true), ["talk", "new", "history", "sound", "settings", "power"])
+assert.deepStrictEqual(M.headItems("main", false), ["power"])
+assert.deepStrictEqual(M.headItems("settings", true), ["back"])
 // news and manual reading are the service's speech, Oma herself is idle: still "speaking", not the waiting red
 assert.strictEqual(M.orbMode(Object.assign({}, st, { speaking: true, waiting: 1 })), "speaking")
 // Oma is down: the orb says so, but a waiting agent still turns it yellow
@@ -136,7 +142,7 @@ assert.deepStrictEqual(M.chatFor("chat:2", { key: "agent:a", was: "*", messages:
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 7)
+assert.strictEqual(M.SETTINGS_ROWS.length, 8)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "eugene", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
@@ -146,6 +152,7 @@ assert.deepStrictEqual(M.settingStep("quiet_schedule", cfg, 1), { key: "quiet_sc
 assert.strictEqual(M.settingStep("quiet_hours", cfg, 1), null)
 assert.deepStrictEqual(M.settingStep("orb_over_fullscreen", Object.assign({}, cfg, { orb_over_fullscreen: true }), 1), { key: "orb_over_fullscreen", value: false, sample: false })
 assert.deepStrictEqual(M.settingStep("progress_digest", cfg, 1), { key: "progress_digest", value: true, sample: false })
+assert.deepStrictEqual(M.settingStep("agents_voice", Object.assign({}, cfg, { agents_voice: true }), 1), { key: "agents_voice", value: false, sample: false })
 
 // Russian plural forms
 assert.deepStrictEqual([1, 2, 5, 11, 12, 21, 22, 25, 111, 0].map(n => ru("%1 agents", n)),

@@ -68,10 +68,15 @@ Item {
     Component.onDestruction: Quickshell.execDetached(["hyprctl", "eval", luaOff])
   }
 
-  // omarchy-shell predmaxim.oma toggle | talk | cancel
+  // omarchy-shell predmaxim.oma toggle | show | talk | cancel
   IpcHandler {
     target: "predmaxim.oma"
     function toggle(): void { omaWindow.toggle() }
+    // The app menu's «Oma»: the service was just turned on — open, never close.
+    function show(): void {
+      link.retry()
+      if (!omaWindow.shown) omaWindow.open("")
+    }
     function talk(): void { link.send(Model.omaCmd({ do: "talk" })) }
     function cancel(): void {
       link.send(Model.omaCmd({ do: "cancel" }))
@@ -79,7 +84,9 @@ Item {
     }
   }
 
+  // Oma off (the service stopped): no orb on the desktop; the window and the indicator turn her on.
   Plugin.Orb {
+    visible: link.speech.running === true
     link: link
     covered: omaWindow.shown
     bubbles: omaWindow.shown ? [] : Model.withDraft(root.bubbles, root.draft)

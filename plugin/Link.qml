@@ -21,6 +21,9 @@ Item {
   property bool up: false      // the live socket is connected
   property int attempt: 0      // a failed Socket never reconnects, so each retry builds a new one
 
+  // Reconnect now (the service was just turned on), not at the next 5 s retry.
+  function retry() { if (!up) attempt++ }
+
   function send(line) {
     if (up && sockLoader.item) {
       sockLoader.item.write(line)
