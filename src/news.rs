@@ -113,14 +113,14 @@ impl Board {
         Some(say)
     }
 
-    /// Даст ли take(now, skip) фразу; итог и промежуточное агента в фокусе снимает, как take.
-    pub fn sayable(&mut self, now: u64, skip: Option<&str>) -> bool {
-        self.drop_focused(skip);
+    /// Даст ли take(now, skip) фразу; доску не меняет: пока неясно, слушает ли он, итог агента в фокусе не снимается.
+    pub fn sayable(&self, now: u64, skip: Option<&str>) -> bool {
         let waiting = self.waiting(now);
-        self.items.iter().any(|i| i.class == Class::Restore || (!waiting && !(i.class == Class::Question && Some(i.session.as_str()) == skip)))
+        self.items.iter().any(|i| i.class == Class::Restore || (!waiting && Some(i.session.as_str()) != skip))
     }
 
-    fn drop_focused(&mut self, skip: Option<&str>) {
+    /// Итог и промежуточное агента в фокусе снимаются без речи: он и так на них смотрит.
+    pub fn drop_focused(&mut self, skip: Option<&str>) {
         if let Some(f) = skip {
             self.items.retain(|i| !(i.session == f && matches!(i.class, Class::Final | Class::Progress)));
         }
@@ -330,7 +330,7 @@ mod tests {
         let mut b = Board::default();
         b.push(n("f", Class::Final, "F готов.", 1));
         b.push(n("f", Class::Question, "F?", 1));
-        assert!(!b.sayable(10, Some("f"))); // итог в фокусе снят, вопрос в фокусе ждёт
+        assert!(!b.sayable(10, Some("f"))); // итог в фокусе не звучит, вопрос в фокусе ждёт
         b.push(n("q", Class::Question, "Q?", 2));
         b.push(n("d", Class::Final, "D готов.", 3));
         assert!(b.sayable(10, Some("f")));
@@ -340,6 +340,14 @@ mod tests {
         assert!(b.sayable(11, Some("f")));
         b.take(11, Some("f"), true);
         assert!(b.sayable(10 + ANSWER_WAIT, Some("f")));
+    }
+
+    #[test]
+    fn sayable_keeps_focused_final() {
+        let mut b = Board::default();
+        b.push(n("f", Class::Final, "F готов.", 1));
+        assert!(!b.sayable(10, Some("f")));
+        assert_eq!(b.take(10, None, true).unwrap(), "F готов.", "проверка доску не меняет");
     }
 
     #[test]

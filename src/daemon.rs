@@ -653,9 +653,10 @@ impl State {
         } else {
             let mut parts = Vec::new();
             if std::mem::take(&mut self.welcome) {
-                if self.board.is_empty() {
+                if !self.board.sayable(now, focused.as_deref()) {
                     return; // вводить в курс нечем — приветствие без новостей не нужно
                 }
+                self.board.drop_focused(focused.as_deref()); // не в обзор и не в сводку
                 parts.push(WELCOME.to_string());
                 parts.extend(self.board.overview());
                 if self.board.finals() > SUMMARY_OVER {
@@ -2407,6 +2408,7 @@ mod tests {
         final_s(&mut st);
         st.tick();
         assert!(texts(&st).is_empty() && st.here_ask.is_none(), "сказать нечего — и «Ты тут?» не звучит");
+        assert!(!st.board.is_empty(), "его, может, нет на месте — итог агента в фокусе не снят");
     }
 
     #[test]
@@ -2593,6 +2595,43 @@ mod tests {
         snap(&mut st, serde_json::json!({"at": 1000 + 3600, "idle_since": 0}));
         st.tick();
         assert_eq!(texts(&st), GREETING);
+    }
+
+    /// Пользователя нет на месте с 1000, агент s в фокусе.
+    fn away_with_focus_on_s(ids: &[&str]) -> (State, Arc<Mutex<u64>>) {
+        let (mut st, env) = env_state();
+        with_agents(&mut st, ids);
+        let now = secs_at(&mut st, 1600);
+        *env.0.lock().unwrap() = Some(sref("s"));
+        snap(&mut st, serde_json::json!({"at": 1600, "idle_since": 1000}));
+        (st, now)
+    }
+
+    #[test]
+    fn return_with_only_focused_final_no_greeting() {
+        let (mut st, now) = away_with_focus_on_s(&["s", "t"]);
+        final_s(&mut st);
+        st.tick();
+        *now.lock().unwrap() = 1700;
+        snap(&mut st, serde_json::json!({"at": 1700, "idle_since": 0}));
+        st.tick();
+        assert!(texts(&st).is_empty(), "итог агента в фокусе не звучит — и вводить в курс нечем");
+    }
+
+    #[test]
+    fn return_overview_and_summary_skip_focused_agent() {
+        let ids = ["a", "b", "c", "d", "s"];
+        let (mut st, now) = away_with_focus_on_s(&ids);
+        let rx = jobs(&mut st);
+        for id in ids {
+            st.on_digest(dg(id, Ask::Final, false, "Готово."));
+        }
+        st.tick();
+        *now.lock().unwrap() = 1700;
+        snap(&mut st, serde_json::json!({"at": 1700, "idle_since": 0}));
+        st.tick();
+        assert_eq!(texts(&st), ["С возвращением.", "Пока тебя не было: четыре проекта закончили."]);
+        assert_eq!(rx.try_recv().unwrap().text.lines().count(), 4);
     }
 
     /// Четыре итога, пока пользователя не было, и он вернулся: приветствие с обзором, итоги ушли на сводку.
