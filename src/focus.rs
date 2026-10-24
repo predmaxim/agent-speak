@@ -123,23 +123,10 @@ fn codex_under(win: u32) -> Option<SessionRef> {
     None
 }
 
-/// Haiku ставит ударение комбинирующим знаком U+0301 после гласной; Silero ждёт «+» перед ней.
-fn plus_stress(p: &str) -> String {
-    let mut v: Vec<char> = Vec::new();
-    for c in p.chars() {
-        if c == '\u{301}' && !v.is_empty() {
-            v.insert(v.len() - 1, '+');
-        } else {
-            v.push(c);
-        }
-    }
-    v.into_iter().collect()
-}
-
 pub fn parse_learned(out: &str, asked: &[String]) -> Vec<(String, String)> {
     out.lines()
         .filter_map(|l| l.split_once('\t'))
-        .map(|(w, p)| (w.trim().to_lowercase(), plus_stress(p.trim())))
+        .map(|(w, p)| (w.trim().to_lowercase(), crate::text::plus_stress(p.trim())))
         .filter(|(w, p)| {
             asked.contains(w) && !p.is_empty() && p.chars().any(|c| ('а'..='я').contains(&c.to_lowercase().next().unwrap()))
                 && !p.chars().any(|c| c.is_alphabetic() && !('\u{400}'..='\u{4FF}').contains(&c)) // латиница (и é) — движок давится
