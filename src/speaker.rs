@@ -113,7 +113,7 @@ impl Shared {
 }
 
 const CHUNK: usize = 9600; // 0,1 с s16 48 кГц моно
-const TAIL: Duration = Duration::from_millis(1000); // ~0,7 с ещё играет из буфера pw-cat
+pub const TAIL: Duration = Duration::from_millis(1000); // ~0,7 с ещё играет из буфера pw-cat
 const RETRY: Duration = Duration::from_secs(10);
 
 /// Вернуть фразу в голову очереди, если её не отменили (стоп) — пауза не отменяет.

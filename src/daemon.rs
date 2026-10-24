@@ -125,6 +125,7 @@ struct State {
     board: Board,        // что Ома скажет следующим
     progress: HashMap<String, (String, Instant)>, // сессия → текст хода с прошлого пересказа, время первого предложения
     listen_after: bool,  // звучат новости: по их концу Ома слушает ответ
+    listen_at: Option<Instant>, // новости смолкли: окно ответа — когда доиграет хвост pw-cat
 }
 
 fn home() -> PathBuf {
@@ -252,6 +253,7 @@ pub fn run() {
         board: Board::default(),
         progress: HashMap::new(),
         listen_after: false,
+        listen_at: None,
     };
     st.oma_spawn();
     for ev in rx {
@@ -385,6 +387,8 @@ impl State {
         // новости тишины не ждут утра; без «Озвучивать агентов» звучат только вопросы
         if quiet {
             self.board.retain_classes(&[]);
+            // новости выброшены — окно ответа по чужой речи не откроется
+            (self.listen_after, self.listen_at) = (false, None);
         } else if !self.cfg.agents_voice {
             self.board.retain_classes(&[Class::Restore, Class::Question]);
         }
@@ -485,6 +489,12 @@ impl State {
         let reg = &self.registry;
         self.board.retain_sessions(|s| reg.get(s).is_some());
         self.progress.retain(|s, _| reg.get(s).is_some());
+        // разрешение дали в терминале (хука нет, файл сессии — «работает»): вопрос не звучит и итогов не держит
+        for s in self.board.question_sessions() {
+            if self.registry.get(&s).is_none_or(|e| e.state != agents::State::Waiting) {
+                self.board.answered(&s);
+            }
+        }
         self.push_agents();
     }
 
@@ -527,7 +537,8 @@ impl State {
         if d.ask == Ask::Progress && e.state != agents::State::Working {
             return;
         }
-        let who = e.title.clone();
+        // ответили, пока шёл пересказ (промпт, разрешение в терминале, конец хода): вопрос не звучит
+        let (who, waiting) = (e.title.clone(), e.state == agents::State::Waiting);
         self.registry.summary(&d.session, &d.say);
         let kind = match d.ask {
             Ask::Final => Some("final"),
@@ -538,7 +549,7 @@ impl State {
             self.bubble(&d.session, &format!("{kind}-{}", d.session), &who, &d.say, kind);
         }
         let class = match d.ask {
-            Ask::Question => Some(Class::Question),
+            Ask::Question => waiting.then_some(Class::Question),
             Ask::Final => self.cfg.agents_voice.then_some(Class::Final),
             Ask::Progress => (self.cfg.agents_voice && d.important).then_some(Class::Progress),
         };
@@ -554,14 +565,9 @@ impl State {
 
     /// Новости — когда Ома молчит и ничего не звучит; слух греется заранее, чтобы ответ услышать сразу.
     fn speak_news(&mut self) {
-        if self.quiet() || self.shared.busy.load(Ordering::SeqCst) {
+        if self.quiet() || !self.silent() || self.shared.queue.lock().unwrap().held() {
             return;
         }
-        let q = self.shared.queue.lock().unwrap();
-        if q.ready() || q.held() {
-            return;
-        }
-        drop(q);
         let Some(text) = self.board.take((self.now_secs)()) else { return };
         if self.enqueue(Agent::Claude, "news", &text, Kind::News) > 0 {
             self.oma_send(&serde_json::json!({"do": "warm"}));
@@ -569,14 +575,27 @@ impl State {
         }
     }
 
-    /// Новости отзвучали — Ома слушает ответ LISTEN_SECS (в тишине — нет: новости тогда выброшены).
+    /// Ничего не звучит и не ждёт очереди.
+    fn silent(&self) -> bool {
+        !self.shared.busy.load(Ordering::SeqCst) && !self.shared.queue.lock().unwrap().ready()
+    }
+
+    /// Новости смолкли: busy гаснет, пока pw-cat доигрывает хвост, — окно ответа через speaker::TAIL, чтобы Ома не слышала себя.
     fn after_speech(&mut self) {
-        if !self.listen_after || self.shared.busy.load(Ordering::SeqCst) || self.shared.queue.lock().unwrap().ready() {
+        self.listen_at = (self.listen_after && self.silent()).then(|| (self.clock)() + speaker::TAIL);
+    }
+
+    /// Из tick: хвост доиграл и всё ещё тихо — Ома слушает ответ LISTEN_SECS.
+    fn listen_if_due(&mut self, now: Instant) {
+        if !self.listen_at.is_some_and(|t| now >= t) {
             return;
         }
-        self.listen_after = false;
-        if !self.quiet() {
-            self.oma_send(&serde_json::json!({"do": "listen", "secs": LISTEN_SECS}));
+        self.listen_at = None;
+        if self.silent() {
+            self.listen_after = false;
+            if !self.quiet() {
+                self.oma_send(&serde_json::json!({"do": "listen", "secs": LISTEN_SECS}));
+            }
         }
     }
 
@@ -604,7 +623,7 @@ impl State {
 
     fn stop(&mut self) {
         self.shared.stop();
-        self.listen_after = false; // новости оборвали сами — ответа не ждём
+        (self.listen_after, self.listen_at) = (false, None); // новости оборвали сами — ответа не ждём
     }
 
     /// Запуск Омы: EOF её stdin (демон умер) — Ома выходит сама.
@@ -723,7 +742,8 @@ impl State {
                 self.ask(&s, Ask::Progress, &text, None);
             }
         }
-        self.speak_news();
+        self.speak_news(); // раньше окна ответа: новые новости встают перед ним, а не поверх
+        self.listen_if_due(now);
     }
 
     fn on_msg(&mut self, m: Msg) {
@@ -933,6 +953,7 @@ mod tests {
             board: Board::default(),
             progress: HashMap::new(),
             listen_after: false,
+            listen_at: None,
         }
     }
 
@@ -1467,9 +1488,13 @@ mod tests {
 
     // --- реестр агентов и пузыри ---
 
+    fn live(id: &str) -> Live {
+        Live { id: id.to_string(), agent: "claude", pid: 1, title: format!("T-{id}"),
+            cwd: format!("/p/{id}"), transcript: PathBuf::new(), state: crate::agents::State::Working, status_at: 0 }
+    }
+
     fn with_agents(st: &mut State, ids: &[&str]) {
-        let live: Vec<Live> = ids.iter().map(|id| Live { id: id.to_string(), agent: "claude", pid: 1, title: format!("T-{id}"),
-            cwd: format!("/p/{id}"), transcript: PathBuf::new(), state: crate::agents::State::Working, status_at: 0 }).collect();
+        let live: Vec<Live> = ids.iter().map(|id| live(id)).collect();
         st.scan = Box::new(move || live.clone());
         st.rescan();
     }
@@ -1533,6 +1558,12 @@ mod tests {
 
     fn dg(session: &str, ask: Ask, important: bool, say: &str) -> Digest {
         Digest { session: session.into(), project: "plug".into(), ask, important, say: say.into() }
+    }
+
+    /// Агент спросил (ждёт ответа, как после уведомления) — и пришёл пересказ вопроса.
+    fn question(st: &mut State, session: &str, important: bool, say: &str) {
+        st.registry.question(session, "Клоду нужно разрешение", 1000);
+        st.on_digest(dg(session, Ask::Question, important, say));
     }
 
     fn stop(st: &mut State, session: &str, last: &str) {
@@ -1599,7 +1630,7 @@ mod tests {
         let mut st = test_state();
         with_agents(&mut st, &["s", "t"]);
         st.on_digest(dg("s", Ask::Final, true, "Фича готова."));
-        st.on_digest(dg("t", Ask::Question, false, "Удалить старый код?")); // вопрос звучит, даже если модель сочла его неважным
+        question(&mut st, "t", false, "Удалить старый код?"); // вопрос звучит, даже если модель сочла его неважным
         st.tick();
         assert_eq!(texts(&st), ["плуг: Удалить старый код?"]);
     }
@@ -1612,7 +1643,7 @@ mod tests {
         let mut r = sub(&mut st);
         st.cfg.quiet_override = "on".into();
         st.on_digest(dg("s", Ask::Final, true, "Фича готова."));
-        st.on_digest(dg("t", Ask::Question, true, "Удалить старый код?"));
+        question(&mut st, "t", true, "Удалить старый код?");
         assert_eq!(bubbles(&mut r).len(), 2);
         st.cfg.quiet_override = String::new();
         st.tick();
@@ -1625,12 +1656,12 @@ mod tests {
         st.cfg.agents_voice = true;
         with_agents(&mut st, &["s", "t"]);
         st.on_digest(dg("s", Ask::Final, true, "Фича готова."));
-        st.on_digest(dg("t", Ask::Question, true, "Удалить старый код?"));
+        question(&mut st, "t", true, "Удалить старый код?");
         st.cfg.agents_voice = false;
         st.apply();
         st.tick();
         assert_eq!(texts(&st), ["плуг: Удалить старый код?"]);
-        st.on_digest(dg("t", Ask::Question, true, "Удалить и тесты?"));
+        question(&mut st, "t", true, "Удалить и тесты?");
         st.cfg.quiet_override = "on".into();
         st.apply();
         st.cfg.quiet_override = String::new();
@@ -1642,10 +1673,10 @@ mod tests {
     fn follow_up_question_not_held_by_the_first() {
         let mut st = test_state();
         with_agents(&mut st, &["s"]);
-        st.on_digest(dg("s", Ask::Question, true, "Удалить старый код?"));
+        question(&mut st, "s", true, "Удалить старый код?");
         st.tick();
         pop1(&st);
-        st.on_digest(dg("s", Ask::Question, true, "Удалить и тесты?")); // прежний вопрос уже решён
+        question(&mut st, "s", true, "Удалить и тесты?"); // прежний вопрос уже решён
         st.tick();
         assert_eq!(texts(&st), ["плуг: Удалить и тесты?"]);
     }
@@ -1711,7 +1742,7 @@ mod tests {
         let mut st = test_state();
         st.cfg.agents_voice = true;
         with_agents(&mut st, &["s", "t"]);
-        st.on_digest(dg("s", Ask::Question, true, "Удалить старый код?"));
+        question(&mut st, "s", true, "Удалить старый код?");
         st.on_digest(dg("t", Ask::Final, false, "Фича готова."));
         st.tick();
         assert_eq!(pop1(&st), "плуг: Удалить старый код?");
@@ -1727,7 +1758,7 @@ mod tests {
         let mut st = test_state();
         st.cfg.agents_voice = true;
         with_agents(&mut st, &["s", "t"]);
-        st.on_digest(dg("s", Ask::Question, true, "Можно запустить команду?"));
+        question(&mut st, "s", true, "Можно запустить команду?");
         st.on_digest(dg("t", Ask::Final, false, "Фича готова."));
         st.tick();
         pop1(&st);
@@ -1759,7 +1790,7 @@ mod tests {
         let h = TempHome::new("oma-listen");
         std::fs::create_dir_all(&h.dir).unwrap();
         let out = h.dir.join("in.txt");
-        let mut st = test_state();
+        let (mut st, env) = env_state();
         st.cfg.agents_voice = true;
         with_agents(&mut st, &["s"]);
         st.voice_cmd = vec!["sh".into(), "-c".into(), format!("cat > {}", out.display())];
@@ -1768,9 +1799,16 @@ mod tests {
         st.tick();
         st.after_speech(); // новость ещё в очереди — рано
         pop1(&st);
-        st.shared.set_busy(None);
+        st.shared.set_busy(None); // busy гаснет, а pw-cat ещё доигрывает хвост
         st.after_speech();
+        st.tick();
+        assert!(st.listen_after, "хвост не доиграл — окно не открываем");
+        *env.1.lock().unwrap() += speaker::TAIL;
+        st.tick();
+        assert!(!st.listen_after);
         st.after_speech(); // окно уже открыто — второй раз не открываем
+        *env.1.lock().unwrap() += speaker::TAIL;
+        st.tick();
         drop(st); // stdin закрыт → cat допишет и выйдет
         let want = "{\"do\":\"warm\"}\n{\"do\":\"listen\",\"secs\":5}\n";
         let end = Instant::now() + Duration::from_secs(2);
@@ -1779,15 +1817,76 @@ mod tests {
     }
 
     #[test]
-    fn stopped_news_opens_no_listen_window() {
+    fn stopped_or_muted_news_opens_no_listen_window() {
         let mut st = test_state();
         st.cfg.agents_voice = true;
         with_agents(&mut st, &["s"]);
-        st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
-        st.tick();
-        assert!(st.listen_after);
+        let news = |st: &mut State| {
+            st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
+            st.tick();
+            assert!(st.listen_after);
+        };
+        news(&mut st);
+        pop1(&st);
+        st.after_speech();
+        assert!(st.listen_at.is_some());
         st.on_msg(Msg::Stop);
-        assert!(!st.listen_after);
+        assert!(!st.listen_after && st.listen_at.is_none());
+        news(&mut st);
+        st.cfg.quiet_override = "on".into();
+        st.apply(); // тишина настала раньше, чем новость зазвучала: она выброшена
+        assert!(!st.listen_after && texts(&st).is_empty());
+    }
+
+    /// Разрешение агенту id дали в терминале: хука нет, файл сессии — «работает» и новее уведомления.
+    fn approve(st: &mut State, ids: &[&str], id: &str) {
+        let v: Vec<Live> = ids.iter().map(|i| Live { status_at: if *i == id { 2000 } else { 0 }, ..live(i) }).collect();
+        st.scan = Box::new(move || v.clone());
+        st.rescan();
+    }
+
+    #[test]
+    fn late_question_digest_after_answer_not_spoken() {
+        let mut st = test_state();
+        st.cfg.agents_voice = true;
+        with_agents(&mut st, &["s", "t"]);
+        st.on_hook("notification", &serde_json::json!({"session_id": "s", "message": "Claude needs your permission to use Bash", "transcript_path": "/nonexistent", "cwd": "/p/s"}));
+        approve(&mut st, &["s", "t"], "s"); // одобрили раньше, чем вернулся пересказ
+        assert_eq!(st.registry.get("s").unwrap().state, crate::agents::State::Working);
+        st.on_digest(dg("s", Ask::Question, true, "Можно запустить команду?"));
+        assert!(st.board.question_sessions().is_empty());
+        st.on_digest(dg("t", Ask::Final, false, "Фича готова."));
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
+    }
+
+    #[test]
+    fn rescan_drops_question_no_longer_waiting() {
+        let mut st = test_state();
+        st.cfg.agents_voice = true;
+        with_agents(&mut st, &["s", "t"]);
+        st.on_msg(Msg::VoiceState { state: "thinking".into(), talking: true });
+        question(&mut st, "s", true, "Можно запустить команду?"); // ждёт, пока Ома занята
+        st.on_digest(dg("t", Ask::Final, false, "Фича готова."));
+        st.tick();
+        approve(&mut st, &["s", "t"], "s");
+        st.on_msg(Msg::VoiceState { state: "idle".into(), talking: false });
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
+    }
+
+    #[test]
+    fn answer_in_terminal_frees_finals_waiting_on_asked_question() {
+        let mut st = test_state();
+        st.cfg.agents_voice = true;
+        with_agents(&mut st, &["s", "t"]);
+        question(&mut st, "s", true, "Можно запустить команду?");
+        st.on_digest(dg("t", Ask::Final, false, "Фича готова."));
+        st.tick();
+        assert_eq!(pop1(&st), "плуг: Можно запустить команду?");
+        approve(&mut st, &["s", "t"], "s");
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
     }
 
     #[test]

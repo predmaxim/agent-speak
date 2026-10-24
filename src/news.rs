@@ -49,6 +49,12 @@ impl Board {
         }
     }
 
+    /// Сессии, чей вопрос ждёт на доске или уже озвучен и ждёт ответа.
+    pub fn question_sessions(&self) -> Vec<String> {
+        let queued = self.items.iter().filter(|i| i.class == Class::Question).map(|i| i.session.clone());
+        queued.chain(self.asked.iter().map(|(s, _)| s.clone())).collect()
+    }
+
     pub fn retain_classes(&mut self, keep: &[Class]) {
         self.items.retain(|i| keep.contains(&i.class));
     }
