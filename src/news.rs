@@ -91,6 +91,11 @@ impl Board {
         if parts.is_empty() { None } else { Some(parts.join(" ")) }
     }
 
+    /// Сессия озвученного вопроса, ответа на который ждём.
+    pub fn asked(&self) -> Option<&str> {
+        self.asked.as_ref().map(|(s, _)| s.as_str())
+    }
+
     /// Снять с доски все новости класса, старые первыми.
     fn drain(&mut self, class: Class) -> Vec<News> {
         let (mut got, rest): (Vec<News>, Vec<News>) = std::mem::take(&mut self.items).into_iter().partition(|i| i.class == class);

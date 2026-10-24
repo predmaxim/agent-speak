@@ -608,7 +608,11 @@ impl State {
         if self.silent() {
             self.listen_after = false;
             if !self.quiet() {
-                self.oma_send(&serde_json::json!({"do": "listen", "secs": LISTEN_SECS}));
+                let mut cmd = serde_json::json!({"do": "listen", "secs": LISTEN_SECS});
+                if let Some(s) = self.board.asked() {
+                    cmd["key"] = format!("agent:{s}").into(); // ответ на вопрос — в чат спросившего агента
+                }
+                self.oma_send(&cmd);
             }
         }
     }
@@ -1851,6 +1855,29 @@ mod tests {
         let end = Instant::now() + Duration::from_secs(2);
         while std::fs::read_to_string(&out).unwrap_or_default() != want && Instant::now() < end { std::thread::sleep(Duration::from_millis(20)); }
         assert_eq!(std::fs::read_to_string(&out).unwrap(), want);
+    }
+
+    #[test]
+    fn listen_after_question_opens_asking_agents_chat() {
+        let h = TempHome::new("oma-listen-q");
+        std::fs::create_dir_all(&h.dir).unwrap();
+        let out = h.dir.join("in.txt");
+        let (mut st, env) = env_state();
+        with_agents(&mut st, &["s"]);
+        st.voice_cmd = vec!["sh".into(), "-c".into(), format!("cat > {}", out.display())];
+        st.oma_spawn();
+        question(&mut st, "s", true, "Удалить старый код?");
+        st.tick();
+        pop1(&st);
+        st.after_speech();
+        *env.1.lock().unwrap() += speaker::TAIL;
+        st.tick();
+        drop(st);
+        let end = Instant::now() + Duration::from_secs(2);
+        let listen = || std::fs::read_to_string(&out).unwrap_or_default().lines().find(|l| l.contains("listen")).map(String::from);
+        while listen().is_none() && Instant::now() < end { std::thread::sleep(Duration::from_millis(20)); }
+        let v: serde_json::Value = serde_json::from_str(&listen().unwrap()).unwrap();
+        assert_eq!(v, serde_json::json!({"do": "listen", "secs": 5, "key": "agent:s"}));
     }
 
     #[test]

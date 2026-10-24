@@ -709,6 +709,21 @@ def test_oma_listen_command_opens_window_unless_locked(monkeypatch):
     asyncio.run(run())
 
 
+def test_oma_listen_with_key_switches_to_asking_agents_chat(monkeypatch):
+    import agent_voice.__main__ as m
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    monkeypatch.setattr(m, "locked", lambda: False)
+    monkeypatch.setattr(m, "mic_outputs", lambda: [])
+
+    async def run():
+        await oma.command({"do": "listen", "secs": 5, "key": "agent:s"})
+        assert oma.brain.key == "agent:s" and oma.ear.open  # ответ на вопрос уйдёт в чат спросившего
+        assert {"chat": {"key": "agent:s", "messages": []}} in [e["line"] for e in emitted]
+
+    asyncio.run(run())
+
+
 def test_oma_listen_command_skips_when_foreign_mic_capture(monkeypatch):
     import agent_voice.__main__ as m
     sent, emitted = [], []

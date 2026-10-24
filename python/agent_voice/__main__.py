@@ -106,6 +106,9 @@ class Oma:
         elif do == "listen":
             # экран заблокирован или микрофон держит чужой (conv.mic при закрытом слухе не знает: pid нет) — не открываем
             if not await asyncio.to_thread(locked) and not foreign_capture(await asyncio.to_thread(mic_outputs), set()):
+                key = cmd.get("key")  # окно после вопроса — ответ в чат спросившего агента
+                if key and key != self.brain.key and c.state == "idle":
+                    await self.switch(key)
                 await self.act(c.listen(float(cmd.get("secs", 5))))
         elif do == "chats":
             self.emit({"chats": await asyncio.to_thread(self.brain.chats)})
@@ -114,15 +117,19 @@ class Oma:
         elif do in ("ask", "open", "new"):
             key = "new" if do == "new" else cmd.get("key") or self.brain.key
             if key != self.brain.key:
-                if c.turn:  # ход прошлого чата обрываем, пока его клиент жив
-                    await self.act(c.cancel())
-                self.history = []  # open упал — чужая история не останется под новым ключом
-                self.history = await self.brain.open(key)
-                self.emit({"chat": {"key": key, "messages": self.history}})
+                await self.switch(key)
             elif do != "ask":
                 self.emit({"chat": {"key": key, "messages": self.history}})
             if do == "ask":
                 await self.act(c.ask(cmd.get("text", "")))
+
+    async def switch(self, key):
+        """Перейти в чат key."""
+        if self.conv.turn:  # ход прошлого чата обрываем, пока его клиент жив
+            await self.act(self.conv.cancel())
+        self.history = []  # open упал — чужая история не останется под новым ключом
+        self.history = await self.brain.open(key)
+        self.emit({"chat": {"key": key, "messages": self.history}})
 
     async def event(self, ev):
         kind, c = ev[0], self.conv
