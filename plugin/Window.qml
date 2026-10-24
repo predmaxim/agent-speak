@@ -729,24 +729,9 @@ Item {
               row: 0
               label: root.settingsSecs[0].caption
               caps: true
-              ButtonGroup {
-                options: root.settingsSecs[0].options.map(function(o) { return { value: String(o.value), label: o.label } })
-                value: String(root.speech.read_intermediate)
-                focusable: false
-                foreground: root.fg
-                fontFamily: root.font
-                fontSize: Style.font.title
-                onChanged: function(v) { root.choose("read_intermediate", v === "true", false) }
-              }
-            }
-
-            SettingRow {
-              row: 1
-              label: root.settingsSecs[1].caption
-              caps: true
               Dropdown {
                 id: speakerBox
-                options: root.settingsSecs[1].options
+                options: root.settingsSecs[0].options
                 value: root.speech.speaker
                 foreground: root.fg
                 fontFamily: root.font
@@ -757,12 +742,12 @@ Item {
             }
 
             SettingRow {
-              row: 2
-              label: root.settingsSecs[2].caption
+              row: 1
+              label: root.settingsSecs[1].caption
               caps: true
               Dropdown {
                 id: rateBox
-                options: root.settingsSecs[2].options
+                options: root.settingsSecs[1].options
                 value: root.speech.rate
                 foreground: root.fg
                 fontFamily: root.font
@@ -783,7 +768,7 @@ Item {
             }
 
             SettingRow {
-              row: 3
+              row: 2
               label: root.tr("Quiet now")
               ToggleSwitch {
                 checked: root.speech.quiet === true
@@ -793,7 +778,7 @@ Item {
             }
 
             SettingRow {
-              row: 4
+              row: 3
               label: root.tr("On schedule")
               ToggleSwitch {
                 checked: root.speech.quiet_schedule === true
@@ -803,14 +788,14 @@ Item {
             }
 
             SettingRow {
-              row: 5
+              row: 4
               label: root.tr("From / to")
               Dropdown {
                 id: fromBox
                 width: Style.space(100)
                 options: Model.HOURS
                 value: root.speech.quiet_from
-                hasCursor: !root.onHead && root.cursor === 5 && root.hoursCol === 0
+                hasCursor: !root.onHead && root.cursor === 4 && root.hoursCol === 0
                 foreground: root.fg
                 fontFamily: root.font
                 onChanged: function(v) { root.choose("quiet_from", v, false); value = Qt.binding(function() { return root.speech.quiet_from }) }
@@ -821,7 +806,7 @@ Item {
                 width: Style.space(100)
                 options: Model.HOURS
                 value: root.speech.quiet_to
-                hasCursor: !root.onHead && root.cursor === 5 && root.hoursCol === 1
+                hasCursor: !root.onHead && root.cursor === 4 && root.hoursCol === 1
                 foreground: root.fg
                 fontFamily: root.font
                 onChanged: function(v) { root.choose("quiet_to", v, false); value = Qt.binding(function() { return root.speech.quiet_to }) }
@@ -841,7 +826,7 @@ Item {
             }
 
             SettingRow {
-              row: 6
+              row: 5
               label: root.tr("Over fullscreen windows")
               ToggleSwitch {
                 checked: root.speech.orb_over_fullscreen === true

@@ -3,7 +3,6 @@ mod agents;
 mod audio;
 mod config;
 mod daemon;
-mod dedup;
 mod digest;
 mod focus;
 mod ipc;

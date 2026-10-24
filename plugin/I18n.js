@@ -12,7 +12,6 @@ var TABLES = {
     "Oma": "Ома", "%1 waiting": "Ждут ответа: %1", "Read agents aloud": "Озвучивать агентов", "End conversation": "Закончить разговор",
     "just now": "только что", "%1 min": "%1 мин", "%1 h": "%1 ч", "%1 d": "%1 д",
     "Working": "Работает", "Waiting": "Ждёт", "Done": "Готово", "Idle": "Свободен",
-    "INTERMEDIATE STATUSES": "ПРОМЕЖУТОЧНЫЕ СТАТУСЫ", "Read": "Читать", "Final answer only": "Только итог",
     "VOICE": "ГОЛОС", "SPEED": "СКОРОСТЬ",
     "Very slow": "Очень медленно", "Slow": "Медленно", "Normal": "Обычно", "Fast": "Быстро", "Very fast": "Очень быстро",
     "%1 agents": ["%1 агент", "%1 агента", "%1 агентов"], "Talk": "Говорить", "New chat": "Новый чат",

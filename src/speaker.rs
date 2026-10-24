@@ -75,11 +75,11 @@ impl Shared {
     }
 
     pub fn pause(&self) {
-        self.bump(&mut self.queue.lock().unwrap(), |q| q.pause(Instant::now()));
+        self.bump(&mut self.queue.lock().unwrap(), Queue::pause);
     }
 
     pub fn resume(&self) {
-        self.queue.lock().unwrap().resume(Instant::now());
+        self.queue.lock().unwrap().resume();
         self.cv.notify_all();
     }
 
@@ -106,8 +106,8 @@ impl Shared {
 
     pub fn stop(&self) {
         self.bump(&mut self.queue.lock().unwrap(), |q| {
-            q.clear_active();
-            q.resume(Instant::now());
+            q.clear();
+            q.resume();
         });
     }
 }
@@ -152,7 +152,7 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                         }
                     }
                 }
-                if let Some(it) = q.pop(Instant::now()) {
+                if let Some(it) = q.pop() {
                     tail = None;
                     break (it, shared.generation.load(Ordering::SeqCst));
                 }
@@ -162,8 +162,7 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
             }
         };
         shared.set_busy(Some(&item.session));
-        let (default, rate) = shared.voice.lock().unwrap().clone();
-        let speaker = if item.speaker.is_empty() { default } else { item.speaker.clone() };
+        let (speaker, rate) = shared.voice.lock().unwrap().clone();
         let Some(pcm) = tts.synth(&item.text, &speaker, &rate) else {
             // синтез упал: очередь ждёт, а не теряет фразу
             player.close();
@@ -250,7 +249,7 @@ mod tests {
     }
 
     fn start_with(fails: Arc<Mutex<u32>>, write_fails: u32) -> (Arc<Shared>, Events) {
-        let shared = Arc::new(Shared::new(Queue::new(Duration::from_secs(30)), "x".into(), "m".into()));
+        let shared = Arc::new(Shared::new(Queue::new(), "x".into(), "m".into()));
         let ev: Events = Default::default();
         let (s, e) = (shared.clone(), ev.clone());
         std::thread::spawn(move || {
@@ -261,7 +260,7 @@ mod tests {
 
     fn say(shared: &Shared) {
         let mut q = shared.queue.lock().unwrap();
-        q.push(Item { session: "s".into(), text: "фраза".into(), kind: Kind::Manual, born: Instant::now(), msg: "m".into(), speaker: String::new() });
+        q.push(Item { session: "s".into(), text: "фраза".into(), kind: Kind::Read });
         shared.cv.notify_all();
     }
 
@@ -282,7 +281,7 @@ mod tests {
     #[test]
     fn busy_changes_are_reported_once() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let shared = Shared::new(Queue::new(Duration::from_secs(30)), "x".into(), "m".into());
+        let shared = Shared::new(Queue::new(), "x".into(), "m".into());
         *shared.changed.lock().unwrap() = Some(tx);
         shared.set_busy(Some("a"));
         shared.set_busy(Some("a")); // без изменений — молчит
@@ -343,7 +342,7 @@ mod tests {
     #[test]
     fn preview_not_replayed_after_pause() {
         let (shared, ev) = start(0, 0);
-        shared.queue.lock().unwrap().push(Item { session: "s".into(), text: "образец".into(), kind: Kind::Preview, born: Instant::now(), msg: "m".into(), speaker: String::new() });
+        shared.queue.lock().unwrap().push(Item { session: "s".into(), text: "образец".into(), kind: Kind::Preview });
         shared.cv.notify_all();
         wait(|| count(&ev, "write") == 2);
         shared.pause();

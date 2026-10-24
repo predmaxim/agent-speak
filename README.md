@@ -48,7 +48,6 @@
 
 | Ключ | Значения | По умолчанию |
 |---|---|---|
-| `read_intermediate` | `true` / `false` (иначе — только итог хода) | `true` |
 | `agents_voice` | `true` / `false` — озвучивать статусы и итоги агентов (срочное и ответы Омы звучат всегда) | `false` |
 | `speaker` | `xenia`, `baya`, `kseniya`, `aidar`, `eugene` | `xenia` |
 | `rate` | `x-slow` … `x-fast` | `medium` |
@@ -57,7 +56,6 @@
 | `quiet_override` | `""` / `on` / `off` (до границы расписания) | `""` |
 | `orb_pos` | `угол,dx,dy` — угол `top-left`, `top-right`, `bottom-left`, `bottom-right` и отступ в пикселях (орб тащится мышью) | `bottom-right,0,0` |
 | `orb_over_fullscreen` | `true` / `false` — орб и пузыри и над полноэкранными окнами (слой Overlay), иначе под ними (Top); меняется на лету | `true` |
-| `max_age_secs` | сколько живёт не начатый статус | `30` |
 
 Словарь произношений — `~/.local/share/agent-speak/terms.tsv` (`слово<TAB>произношение`, `+` — ударение). Незнакомые слова сначала читаются транслитерацией, а фоновая самая лёгкая модель агента дописывает их в словарь.
 

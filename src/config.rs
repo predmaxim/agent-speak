@@ -8,16 +8,13 @@ use std::path::PathBuf;
 pub struct Config {
     pub speaker: String,
     pub rate: String,
-    pub max_age_secs: u64,
-    /// false — при agents_voice звучит только финальный ответ хода, без промежуточных статусов
-    pub read_intermediate: bool,
     /// тихий режим по расписанию (окно quiet_from..quiet_to, ЧЧ:ММ)
     pub quiet_schedule: bool,
     pub quiet_from: String,
     pub quiet_to: String,
     /// ручное переопределение расписания: "" (нет) / "on" / "off"
     pub quiet_override: String,
-    /// агенты звучат: статусы и финалы читаются вслух
+    /// озвучивать агентов (переключатель окна); дословно их тексты не читаются
     pub agents_voice: bool,
     /// позиция орба: "<угол>,<dx>,<dy>", см. valid_pos
     pub orb_pos: String,
@@ -27,7 +24,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Config {
-        Config { speaker: "xenia".into(), rate: "medium".into(), max_age_secs: 30, read_intermediate: true,
+        Config { speaker: "xenia".into(), rate: "medium".into(),
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: false, orb_pos: "bottom-right,0,0".into(),
             orb_over_fullscreen: true }
     }
@@ -83,7 +80,6 @@ impl Config {
         match key {
             "speaker" if SPEAKERS.contains(&s) => self.speaker = s.into(),
             "rate" if RATES.contains(&s) => self.rate = s.into(),
-            "read_intermediate" if value.is_boolean() => self.read_intermediate = value.as_bool().unwrap(),
             "quiet_schedule" if value.is_boolean() => self.quiet_schedule = value.as_bool().unwrap(),
             "quiet_from" if hhmm(s).is_some() => self.quiet_from = s.into(),
             "quiet_to" if hhmm(s).is_some() => self.quiet_to = s.into(),
@@ -121,13 +117,17 @@ mod tests {
         let c: Config = toml::from_str("speaker = \"baya\"\nmode = \"auto\"\nvoice_last_agent = \"codex\"").unwrap();
         assert_eq!(c.speaker, "baya");
         assert_eq!(c.rate, "medium");
-        assert_eq!(c.max_age_secs, 30);
-        assert!(c.read_intermediate);
         assert_eq!(
             (c.quiet_schedule, c.quiet_from.as_str(), c.quiet_to.as_str(), c.quiet_override.as_str()),
             (true, "23:00", "08:00", "")
         );
         assert_eq!((c.agents_voice, c.orb_pos.as_str()), (false, "bottom-right,0,0"));
+    }
+
+    #[test]
+    fn old_config_keys_ignored() {
+        let c: Config = toml::from_str("read_intermediate = false\nmax_age_secs = 5\nspeaker = \"baya\"\n").unwrap();
+        assert_eq!(c.speaker, "baya");
     }
 
     #[test]
@@ -177,8 +177,7 @@ mod tests {
         assert!(!c.set("mode", &json!("auto"))); // режима больше нет
         assert!(c.set("speaker", &json!("eugene")));
         assert!(c.set("rate", &json!("x-fast")));
-        assert!(c.set("read_intermediate", &json!(false)));
-        assert!(!c.set("read_intermediate", &json!("true"))); // строка вместо булева
+        assert!(!c.set("read_intermediate", &json!(false))); // настройки больше нет
         assert!(!c.set("speaker", &json!(1)));
         assert!(!c.set("rate", &json!("warp")));
         assert!(c.set("quiet_schedule", &json!(false)));
@@ -187,10 +186,7 @@ mod tests {
         assert!(!c.set("quiet_from", &json!("25:00")));
         assert!(!c.set("quiet_override", &json!("maybe")));
         assert!(!c.set("quiet_schedule", &json!("true")));
-        assert!(!c.set("max_age_secs", &json!(5))); // не настраивается из интерфейса
-        assert_eq!(
-            (c.speaker.as_str(), c.rate.as_str(), c.read_intermediate, c.max_age_secs),
-            ("eugene", "x-fast", false, 30)
-        );
+        assert!(!c.set("max_age_secs", &json!(5))); // настройки больше нет
+        assert_eq!((c.speaker.as_str(), c.rate.as_str()), ("eugene", "x-fast"));
     }
 }

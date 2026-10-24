@@ -106,21 +106,20 @@ assert.strictEqual(ru(...M.orbTip(Object.assign({}, st, { waiting: 2 }))), "Жд
 // Command lines
 assert.strictEqual(M.cmd("pause"), '{"cmd":"pause"}\n')
 assert.strictEqual(M.cmd("subscribe"), '{"cmd":"subscribe"}\n')
-assert.strictEqual(M.set("read_intermediate", false), '{"cmd":"set","key":"read_intermediate","value":false}\n')
+assert.strictEqual(M.set("agents_voice", false), '{"cmd":"set","key":"agents_voice","value":false}\n')
 assert.deepStrictEqual(JSON.parse(M.set("speaker", "baya")), { cmd: "set", key: "speaker", value: "baya" })
 assert.strictEqual(M.say(M.SAMPLE), '{"cmd":"say","text":"Так звучит этот голос."}\n')
 
 // Window sections: keys, values the daemon accepts, value types as in the state line
 const secs = M.sections(ru)
-const sample = { read_intermediate: true, speaker: "xenia", rate: "medium" }
-assert.deepStrictEqual(secs.map(s => s.key), ["read_intermediate", "speaker", "rate"])
-assert.deepStrictEqual(secs.map(s => s.sample), [false, true, true])
-assert.deepStrictEqual(secs.map(s => s.caption), ["ПРОМЕЖУТОЧНЫЕ СТАТУСЫ", "ГОЛОС", "СКОРОСТЬ"])
-assert.deepStrictEqual(secs[0].options, [{ value: true, label: "Читать" }, { value: false, label: "Только итог" }])
-assert.deepStrictEqual(secs[1].options.map(o => o.value), ["xenia", "baya", "kseniya", "aidar", "eugene"])
-assert.deepStrictEqual(secs[1].options.map(o => o.label), ["Xenia", "Baya", "Kseniya", "Aidar", "Eugene"])
-assert.deepStrictEqual(secs[2].options.map(o => o.value), ["x-slow", "slow", "medium", "fast", "x-fast"])
-assert.deepStrictEqual(secs[2].options.map(o => o.label), ["Очень медленно", "Медленно", "Обычно", "Быстро", "Очень быстро"])
+const sample = { speaker: "xenia", rate: "medium" }
+assert.deepStrictEqual(secs.map(s => s.key), ["speaker", "rate"])
+assert.deepStrictEqual(secs.map(s => s.sample), [true, true])
+assert.deepStrictEqual(secs.map(s => s.caption), ["ГОЛОС", "СКОРОСТЬ"])
+assert.deepStrictEqual(secs[0].options.map(o => o.value), ["xenia", "baya", "kseniya", "aidar", "eugene"])
+assert.deepStrictEqual(secs[0].options.map(o => o.label), ["Xenia", "Baya", "Kseniya", "Aidar", "Eugene"])
+assert.deepStrictEqual(secs[1].options.map(o => o.value), ["x-slow", "slow", "medium", "fast", "x-fast"])
+assert.deepStrictEqual(secs[1].options.map(o => o.label), ["Очень медленно", "Медленно", "Обычно", "Быстро", "Очень быстро"])
 for (const s of secs) for (const o of s.options) assert.strictEqual(typeof o.value, typeof sample[s.key], s.key)
 
 // The window's chat: a chat that got its id replaces the one shown, other chats are skipped
@@ -134,9 +133,8 @@ assert.deepStrictEqual(M.chatFor("new", { key: "chat:x", was: "*", messages: m1 
 assert.deepStrictEqual(M.chatFor("chat:2", { key: "agent:a", was: "*", messages: m1 }), { key: "agent:a", messages: m1 })
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
-const cfg = { read_intermediate: true, speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 7)
-assert.deepStrictEqual(M.settingStep("read_intermediate", cfg, 1), { key: "read_intermediate", value: false, sample: false })
+const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
+assert.strictEqual(M.SETTINGS_ROWS.length, 6)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "eugene", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")

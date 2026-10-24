@@ -6,7 +6,7 @@
 var SAMPLE = "Так звучит этот голос."
 
 // No connection to the daemon: the status-line fields, empty.
-var OFFLINE = { running: false, speaking: false, paused: false, read_intermediate: false, speaker: "", rate: "", project: "",
+var OFFLINE = { running: false, speaking: false, paused: false, speaker: "", rate: "", project: "",
   oma: "off", talking: false, agents_voice: false, quiet: false, quiet_schedule: false, quiet_from: "", quiet_to: "", orb_pos: "", orb_over_fullscreen: true, waiting: 0 }
 
 // One socket line -> {type, value}, or null for anything else (a broken line must not blank the state).
@@ -179,8 +179,6 @@ function say(text) {
 function sections(tr) {
   var voices = ["xenia", "baya", "kseniya", "aidar", "eugene"]
   return [
-    { key: "read_intermediate", caption: tr("INTERMEDIATE STATUSES"), sample: false,
-      options: [{ value: true, label: tr("Read") }, { value: false, label: tr("Final answer only") }] },
     { key: "speaker", caption: tr("VOICE"), sample: true,
       options: voices.map(function(v) { return { value: v, label: v.charAt(0).toUpperCase() + v.slice(1) } }) },
     { key: "rate", caption: tr("SPEED"), sample: true,
@@ -192,8 +190,8 @@ function sections(tr) {
   ]
 }
 
-// The settings page's rows, top to bottom: the three sections, quiet mode, the orb.
-var SETTINGS_ROWS = ["read_intermediate", "speaker", "rate", "quiet_now", "quiet_schedule", "quiet_hours", "orb_over_fullscreen"]
+// The settings page's rows, top to bottom: the two sections, quiet mode, the orb.
+var SETTINGS_ROWS = ["speaker", "rate", "quiet_now", "quiet_schedule", "quiet_hours", "orb_over_fullscreen"]
 
 // ←/→ (dx) or Enter (dx 1) on a settings row: the `set` to send ({key,
 // value, sample}) or null. Choices go round, switches flip; the hours row
