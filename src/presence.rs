@@ -163,6 +163,10 @@ impl Presence {
         if self.last_input == 0 { now } else { self.last_input }
     }
 
+    pub fn buds(&self) -> Buds {
+        self.facts.as_ref().map_or(Buds::Unknown, |f| f.buds)
+    }
+
     pub fn sure(&self) -> bool {
         self.facts.as_ref().is_some_and(|f| f.buds == Buds::In)
     }
@@ -347,5 +351,13 @@ mod tests {
         let mut p = Presence::default();
         p.apply(facts(1005, 1000), 1005);
         assert_eq!(p.apply(facts(4600, 0), 4600), Some(3600));
+    }
+
+    #[test]
+    fn buds_follow_last_snapshot() {
+        let mut p = Presence::default();
+        assert_eq!(p.buds(), Buds::Unknown);
+        p.apply(parse_facts(r#"{"at":1000,"buds":"out"}"#).unwrap(), 1000);
+        assert_eq!(p.buds(), Buds::Out);
     }
 }

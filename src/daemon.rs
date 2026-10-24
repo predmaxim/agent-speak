@@ -146,6 +146,7 @@ struct State {
     welcome: bool,              // вернулся после долгого отсутствия: следующие новости — с приветствием и обзором
     night_keep: bool,           // тишина настала, пока пользователя нет: накопленное ждёт утра
     facts_src: Box<dyn Fn() -> Option<String>>, // снимок присутствия при старте; в тестах — подделка
+    speakers: Box<dyn Fn() -> String>, // динамики ноутбука для Омы, пока наушники вынуты; в тестах — подделка
 }
 
 fn home() -> PathBuf {
@@ -289,6 +290,7 @@ pub fn run() {
         welcome: false,
         night_keep: false,
         facts_src: Box::new(move || std::fs::read_to_string(&facts).ok()),
+        speakers: Box::new(crate::audio::speakers),
     };
     st.oma_spawn();
     if let Some(t) = (st.facts_src)() {
@@ -947,6 +949,9 @@ impl State {
         let Some(f) = presence::parse_facts(text) else { return };
         let back = self.presence.apply(f, (self.now_secs)());
         self.on_back(back);
+        // наушники вынуты, но подключены — звук по умолчанию идёт в них, лежащих на столе: Ома говорит в динамики
+        let sink = if self.presence.buds() == presence::Buds::Out { (self.speakers)() } else { String::new() };
+        *self.shared.sink.lock().unwrap() = sink; // плеер перезапускает pw-cat, только если выход сменился
     }
 
     /// Пользователь вернулся (absence — сколько его не было): «Ты тут?» ответа больше не ждёт.
@@ -1133,6 +1138,7 @@ mod tests {
             welcome: false,
             night_keep: false,
             facts_src: Box::new(|| None), // снимка нет — как без сервиса присутствия
+            speakers: Box::new(|| "speakers".into()),
         }
     }
 
@@ -2742,5 +2748,14 @@ mod tests {
         st.cfg.quiet_override = "on".into(); // включил тишину сам, на месте — доска стирается
         st.apply();
         assert!(st.board.is_empty());
+    }
+
+    #[test]
+    fn buds_out_speaks_through_speakers() {
+        let mut st = test_state();
+        st.on_presence(r#"{"at":1000,"buds":"out"}"#);
+        assert_eq!(*st.shared.sink.lock().unwrap(), "speakers");
+        st.on_presence(r#"{"at":1000,"buds":"in"}"#);
+        assert_eq!(*st.shared.sink.lock().unwrap(), "");
     }
 }
