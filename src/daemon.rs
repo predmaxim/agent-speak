@@ -52,6 +52,9 @@ const HERE_WAIT: u64 = 20;
 /// Не уверена, что слушают: сначала спросить, новости — после ответа.
 const ARE_YOU_THERE: &str = "Ты тут? Есть новости.";
 
+/// Первая фраза после долгого отсутствия, перед обзором доски.
+const WELCOME: &str = "С возвращением.";
+
 /// Символов промпта пользователя в задании пересказа — хвост: длинный промпт не упрётся в предел argv `claude -p`.
 const CONTEXT_MAX: usize = 1000;
 
@@ -137,6 +140,7 @@ struct State {
     listen_at: Option<Instant>, // новости смолкли: окно ответа — когда доиграет хвост pw-cat
     presence: Presence,         // слушает ли пользователь: снимки сервиса оболочки и его слова
     here_ask: Option<u64>,      // «Ты тут?» спрошен: ответа ждём HERE_WAIT с открытия окна ответа
+    welcome: bool,              // вернулся после долгого отсутствия: следующие новости — с приветствием и обзором
     facts_src: Box<dyn Fn() -> Option<String>>, // снимок присутствия при старте; в тестах — подделка
 }
 
@@ -278,6 +282,7 @@ pub fn run() {
         listen_at: None,
         presence: Presence::default(),
         here_ask: None,
+        welcome: false,
         facts_src: Box::new(move || std::fs::read_to_string(&facts).ok()),
     };
     st.oma_spawn();
@@ -632,8 +637,19 @@ impl State {
             self.here_ask = Some(now);
             ("here", ARE_YOU_THERE.to_string())
         } else {
-            let Some(text) = self.board.take(now, focused.as_deref(), self.presence.sure()) else { return };
-            (if self.board.asked().is_some() { "question" } else { "news" }, text)
+            let mut parts = Vec::new();
+            if std::mem::take(&mut self.welcome) {
+                if self.board.is_empty() {
+                    return; // вводить в курс нечем — приветствие без новостей не нужно
+                }
+                parts.push(WELCOME.to_string());
+                parts.extend(self.board.overview());
+            }
+            parts.extend(self.board.take(now, focused.as_deref(), self.presence.sure()));
+            if parts.is_empty() {
+                return;
+            }
+            (if self.board.asked().is_some() { "question" } else { "news" }, parts.join(" "))
         };
         if self.enqueue(Agent::Claude, "news", &text, Kind::News) > 0 {
             self.oma_send(&serde_json::json!({"do": "warm"}));
@@ -909,10 +925,13 @@ impl State {
     }
 
     /// Пользователь вернулся (absence — сколько его не было): «Ты тут?» ответа больше не ждёт.
+    /// Долгое отсутствие — приветствие, обзор и повтор неуслышанного; короткое — журнал сказанного забыт.
     fn on_back(&mut self, absence: Option<u64>) {
         let Some(a) = absence else { return };
         self.here_ask = None;
-        self.board.returned((self.now_secs)().saturating_sub(a), false); // повтора нет — журнал сказанного забыт
+        let long = a >= presence::BACK_AFTER;
+        self.welcome |= long;
+        self.board.returned((self.now_secs)().saturating_sub(a), long);
     }
 
     fn read(&mut self) {
@@ -1086,6 +1105,7 @@ mod tests {
             listen_at: None,
             presence: Presence::default(),
             here_ask: None,
+            welcome: false,
             facts_src: Box::new(|| None), // снимка нет — как без сервиса присутствия
         }
     }
@@ -2450,5 +2470,71 @@ mod tests {
         st.on_digest(dg("t", Ask::Final, false, "Тесты зелёные."));
         st.tick();
         assert_eq!(texts(&st), ["плуг: Тесты зелёные."]);
+    }
+
+    // --- возвращение ---
+
+    const GREETING: [&str; 3] = ["С возвращением.", "Пока тебя не было: один проект закончил.", "плуг: Фича готова."];
+
+    #[test]
+    fn return_after_long_absence_greets_with_overview() {
+        let (mut st, now) = presence_state(1600);
+        snap(&mut st, serde_json::json!({"at": 1600, "idle_since": 1000}));
+        final_s(&mut st);
+        st.tick();
+        assert!(texts(&st).is_empty(), "нет на месте — молчит");
+        *now.lock().unwrap() = 1700;
+        snap(&mut st, serde_json::json!({"at": 1700, "idle_since": 0}));
+        st.tick();
+        assert_eq!(texts(&st), GREETING);
+    }
+
+    #[test]
+    fn news_spoken_into_void_repeated_on_return() {
+        let (mut st, now) = presence_state(1060);
+        snap(&mut st, serde_json::json!({"at": 1060, "idle_since": 1000}));
+        final_s(&mut st);
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
+        *now.lock().unwrap() = 1300;
+        snap(&mut st, serde_json::json!({"at": 1300, "idle_since": 0}));
+        st.tick();
+        assert_eq!(texts(&st), GREETING);
+    }
+
+    #[test]
+    fn listener_sitting_still_hears_no_repeat() {
+        let (mut st, now) = presence_state(1070);
+        snap(&mut st, serde_json::json!({"at": 1070, "idle_since": 1000}));
+        final_s(&mut st);
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
+        *now.lock().unwrap() = 1150;
+        snap(&mut st, serde_json::json!({"at": 1150, "idle_since": 0}));
+        st.tick();
+        assert!(texts(&st).is_empty());
+    }
+
+    #[test]
+    fn short_absence_no_greeting() {
+        let (mut st, _now) = presence_state(1120);
+        snap(&mut st, serde_json::json!({"at": 1120, "idle_since": 1000}));
+        final_s(&mut st); // без tick: «не уверена» с новостью спросила бы «Ты тут?»
+        snap(&mut st, serde_json::json!({"at": 1120, "idle_since": 0}));
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
+    }
+
+    #[test]
+    fn locked_then_unlocked_is_return() {
+        let (mut st, now) = presence_state(1000);
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 1000, "locked": true}));
+        final_s(&mut st);
+        st.tick();
+        assert!(texts(&st).is_empty());
+        *now.lock().unwrap() = 1400;
+        snap(&mut st, serde_json::json!({"at": 1400, "idle_since": 0}));
+        st.tick();
+        assert_eq!(texts(&st), GREETING);
     }
 }

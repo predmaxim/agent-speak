@@ -5,7 +5,6 @@ use serde::{Deserialize, Deserializer};
 
 pub const UNSURE_AFTER: u64 = 90;
 pub const AWAY_AFTER: u64 = 600;
-#[allow(dead_code)] // daemon подключит в следующих задачах
 pub const BACK_AFTER: u64 = 180; // отсутствие не короче — приветствие и повтор
 pub const BUSY_FOR: u64 = 900;
 pub const AWAY_GRACE: u64 = 60;

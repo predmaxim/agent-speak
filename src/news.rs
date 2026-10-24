@@ -152,7 +152,6 @@ impl Board {
     }
 
     /// «Пока тебя не было: …» — по счётчикам доски; пусто — None.
-    #[allow(dead_code)] // daemon подключит в следующих задачах
     pub fn overview(&self) -> Option<String> {
         let mut done: Vec<&str> = self.items.iter().filter(|i| i.class == Class::Final).map(|i| i.session.as_str()).collect();
         done.sort_unstable();
