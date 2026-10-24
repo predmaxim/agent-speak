@@ -537,14 +537,14 @@ git commit -m "Ома вводит в курс по возвращении: пр
   ```js
   function micBusy(nodes)                // как у перерывов + без node.name "oma-ear"
   function anyPlaying(players)           // хоть один isPlaying
-  function video(playing, rawIdle, idle) // играет и держится запрет на сон: rawIdle заснул, idle (с запретами) — нет
+  function video(clientsJson, players)   // hyprctl clients -j + [{pid, playing}] плееров MPRIS → pid окна с inhibitingIdle совпал с pid играющего плеера
   function onBuds(sinkName)              // имя выхода начинается с "bluez_output."
   function budsState(onBuds, sensor)     // sensor true/false/null → "in" | "out" | "unknown"; не на наушниках → "unknown"
   function snapshot(f)                   // объект фактов → строка JSON с полями ровно в порядке выше
   function changed(prev, next)           // отличается ли что-нибудь, кроме at
   ```
 
-`Service.qml`: `IdleMonitor { timeout: 5; respectInhibitors: false }` — `idle_since = isIdle ? now − 5 : 0`; `Mpris.players.values` → `anyPlaying`; второй `IdleMonitor { timeout: 5; respectInhibitors: true }` → `video(anyPlaying, raw.isIdle, inhibited.isIdle)`; `Pipewire.nodes.values` (+`PwObjectTracker`) → `mic`; `Pipewire.defaultAudioSink.name` → `onBuds`; `Process` раз в 5 с: `omarchy-hyprland-session-locked` (код 0 — `locked`) и камера (`fuser /dev/video*`, как `prober` у перерывов); запись `FileView { atomicWrites: true }` при `changed` и раз в 30 с. Время в снимке — эпоха в секундах.
+`Service.qml`: `IdleMonitor { timeout: 5; respectInhibitors: false }` — `idle_since = isIdle ? now − 5 : 0`; видео — в том же `Process` раз в 5 с: `hyprctl clients -j` и для каждого `org.mpris.MediaPlayer2.*` на шине пользователя — pid (`busctl --user status <имя>`, строка `PID=`) и `PlaybackStatus` → `video(...)` (запрет на сон держит и Orca, поэтому нужен именно pid играющего плеера — запись задачи 1); `Pipewire.nodes.values` (+`PwObjectTracker`) → `mic`; `Pipewire.defaultAudioSink.name` → `onBuds`; `Process` раз в 5 с: `omarchy-hyprland-session-locked` (код 0 — `locked`) и камера (`fuser /dev/video*`, как `prober` у перерывов); запись `FileView { atomicWrites: true }` при `changed` и раз в 30 с. Время в снимке — эпоха в секундах.
 
 - [ ] **Step 1: Write the failing tests** (`test.js`)
 
@@ -556,7 +556,11 @@ assert.strictEqual(L.anyPlaying([{ isPlaying: false }, { isPlaying: true }]), tr
 assert.strictEqual(L.onBuds("bluez_output.00_11_22_33_44_55.1"), true)
 assert.strictEqual(L.onBuds("alsa_output.pci-0000_00_1f.3.analog-stereo"), false)
 assert.deepStrictEqual([L.budsState(true, true), L.budsState(true, false), L.budsState(true, null), L.budsState(false, true)], ["in", "out", "unknown", "unknown"])
-assert.deepStrictEqual([L.video(true, true, false), L.video(true, true, true), L.video(false, true, false), L.video(true, false, false)], [true, false, false, false])
+const cl = '[{"class":"orca","pid":10,"inhibitingIdle":true},{"class":"yandex-browser","pid":20,"inhibitingIdle":true}]'
+assert.strictEqual(L.video(cl, [{ pid: 20, playing: true }]), true)
+assert.strictEqual(L.video(cl, [{ pid: 20, playing: false }]), false)
+assert.strictEqual(L.video(cl, [{ pid: 30, playing: true }]), false)   // играет, но окно без запрета — музыка
+assert.strictEqual(L.video("junk", [{ pid: 20, playing: true }]), false)
 assert.strictEqual(L.snapshot({ at: 1, idle_since: 0, locked: false, mic: false, camera: false, video: true, buds: "in" }),
   '{"at":1,"idle_since":0,"locked":false,"mic":false,"camera":false,"video":true,"buds":"in"}')
 assert.strictEqual(L.changed({ at: 1, video: false }, { at: 2, video: false }), false)
@@ -587,33 +591,36 @@ git -C ~/omarchy-dotfiles commit -m "predmaxim.presence: общий сервис
 ### Task 9: Датчик «в ушах» в `predmaxim.presence`
 
 **Files:**
-- Modify: `~/omarchy-dotfiles/home/.config/omarchy/plugins/predmaxim.presence/Service.qml`, `logic.js`, `test.js`, `README.md`
+- Create: `~/omarchy-dotfiles/home/.config/omarchy/plugins/predmaxim.presence/in_ear.py` — адаптер OpenFreebuds
+- Modify: `…/predmaxim.presence/Service.qml`, `logic.js`, `test.js`, `README.md`
 
 **Interfaces:**
-- Consumes: запись задачи 1 об OpenFreebuds; `budsState(onBuds, sensor)` (задача 8).
-- Produces: `function parseInEar(text) -> true | false | null` в `logic.js` — разбор вывода способа чтения из задачи 1 (непонятно — `null`).
+- Consumes: запись задачи 1 об OpenFreebuds (спека, «Результаты проверок»); `budsState(onBuds, sensor)` (задача 8).
+- Produces:
+  - `in_ear.py NAME ADDRESS` — долгий процесс на системном `/usr/bin/python3` (OpenFreebuds стоит в системе, не в voice-venv): `openfreebuds.create()`, свой обработчик пакетов `2b 25` и `2b ac` (оба: `param_1` — левый, `param_2` — правый, 1 — в ухе) поверх драйвера Pro 3; печатает строку `in` (хоть один в ухе) или `out` (оба вынуты) при каждой смене и сразу после подключения; `unknown` — не подключились или связь пропала; нет модуля `openfreebuds` — `unknown` и выход 0.
+  - `logic.js`: `function parseInEar(line) -> true | false | null` (`in` → true, `out` → false, прочее → null).
 
-`Service.qml`: пока выход на наушниках — опрос датчика раз в 5 с способом из задачи 1 (`Process` или `FileView`/HTTP — как записано), таймаут 2 с; результат → `parseInEar` → `budsState`. Если задача 1 записала «датчик не читается» — `parseInEar` не нужен: `sensor` всегда `null` с комментарием `// shortcut: no in-ear sensor for FreeBuds Pro 4 via OpenFreebuds; add when it can read one`, а задача сводится к README.
+`Service.qml`: пока выход на наушниках (`onBuds`) — `Process` `in_ear.py` с именем и адресом наушников (из `bluetoothctl info` выхода или узла PipeWire: `api.bluez5.address`, `device.description`), `SplitParser` → `parseInEar` → `budsState`; выход ушёл с наушников — процесс остановить; процесс упал — перезапуск не чаще раза в 30 с. Как регистрировать свой обработчик в драйвере OpenFreebuds — по коду пакета (`/usr/lib/python3.14/site-packages/openfreebuds/driver/huawei/`, образец — `handler/state_in_ear.py`) и пробе `/tmp/presence-probe/buds.py`.
 
-- [ ] **Step 1: Write the failing test** — `parseInEar` на образцах вывода из записи задачи 1: «в ушах» → `true`, «вынут» → `false`, мусор и пусто → `null`.
+- [ ] **Step 1: Write the failing test** — в `test.js`: `parseInEar("in") === true`, `parseInEar("out") === false`, `parseInEar("unknown") === null`, `parseInEar("") === null`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `node ~/omarchy-dotfiles/home/.config/omarchy/plugins/predmaxim.presence/test.js`
 Expected: FAIL — `parseInEar is not a function`.
 
-- [ ] **Step 3: Implement**; `omarchy-shell restart`.
+- [ ] **Step 3: Implement** `in_ear.py`, `parseInEar`, процесс в `Service.qml`; `omarchy-shell restart`.
 
-- [ ] **Step 4: Run test and check live** — пользователь вынимает и вставляет наушник.
+- [ ] **Step 4: Check live** — пользователь вынимает и вставляет наушники.
 
 Run: `node …/predmaxim.presence/test.js && watch -n1 cat $XDG_RUNTIME_DIR/predmaxim-presence.json`
-Expected: `ok`; `buds` меняется `in` ↔ `out` за ≤ 10 с.
+Expected: `ok`; `buds` меняется `in` ↔ `out` за ≤ 3 с; звук в наушниках не рвётся.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git -C ~/omarchy-dotfiles add home/.config/omarchy/plugins/predmaxim.presence docs/changelog.md
-git -C ~/omarchy-dotfiles commit -m "predmaxim.presence: наушники «в ушах» через OpenFreebuds"
+git -C ~/omarchy-dotfiles commit -m "predmaxim.presence: наушники «в ушах» через OpenFreebuds (пакеты 2b25/2bac FreeBuds Pro 4)"
 ```
 
 ---

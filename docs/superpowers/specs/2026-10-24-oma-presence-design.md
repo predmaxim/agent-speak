@@ -310,3 +310,12 @@ AUR `openfreebuds` 0.18.1, Pro 4 — на драйвере Pro 3; чтение �
 - Что Chromium, Telegram и mpv публикуют MPRIS и состояние `Playing`.
 - Как выглядит смена выхода при отключении Bluetooth-наушников в
   `Pipewire.defaultAudioSink`.
+
+## Результаты проверок (2026-10-25)
+
+- **`IdleMonitor`** (`timeout: 5`, `respectInhibitors: false`): `idle true` через 5 с покоя, `idle false` на мышь и на клавишу — проверено пробой (`/tmp/presence-probe/probe.qml`).
+- **`IdleMonitor` с `respectInhibitors: true` не засыпает никогда**: запрет на сон всё время держит Orca (`hyprctl clients -j` → `inhibitingIdle: true` у `orca`). Признак «простой есть, а с запретами — нет» видео не отличает. Видео — играющий MPRIS-плеер, чьё окно держит запрет: у видео в Yandex Browser окно `yandex-browser` pid 302315 `inhibitingIdle: true`, а плеер — `org.mpris.MediaPlayer2.chromium.instance302315` (`PlaybackStatus Playing`, pid шины `busctl --user status` = 302315). Совпадение pid окна с запретом и pid играющего плеера — видео; Orca держит запрет, но не играет.
+- **MPRIS**: `isPlaying` есть и верен (Yandex Browser `true` при игре, `false` на паузе; `playbackState` 1/2); mpv виден.
+- **Выход звука**: наушники — `bluez_output.00_11_22_33_44_55.1`; в кейсе — `alsa_output.pci-0000_00_1f.3.analog-stereo`, вернул — снова `bluez_output…`.
+- **`FileView { atomicWrites: true }`**: файл появляется событием `CREATE` (запись во временный и подмена); демон ловит `Create | Modify` по имени — годится.
+- **OpenFreebuds 0.18.1** (AUR; `openfreebuds_cmd` сломан — нет `aiocmd`, библиотека работает): `openfreebuds.create()` + `start("HUAWEI FreeBuds Pro 4", "00:11:22:33:44:55")` → `state 3` (подключено) за ~3 с, звук не рвётся. Свой обработчик «в ушах» у драйвера Pro 3 (`2b 03`, параметры 8, 9) у Pro 4 молчит (`in_ear` всегда `false`). У Pro 4 «в ушах» — пакет **`2b 25`**: `param_1` — левый, `param_2` — правый (1 — в ухе, 0 — нет), приходит при каждой смене за ~1 с; при подключении — **`2b ac`** с теми же двумя полями (текущее состояние). Проба (`/tmp/presence-probe/buds.py`): левый вынут `0,1`, вставлен `1,1`, правый вынут `1,0`, вставлен `1,1`, оба вынуты `0,0`. Библиотека печатает такие пакеты как «Got unsupported package»; адаптеру нужен свой обработчик команд `2b 25` и `2b ac`. «В ушах» — хоть один наушник.
