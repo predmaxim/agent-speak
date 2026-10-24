@@ -81,14 +81,15 @@ impl Board {
             self.asked = None;
         }
         let mut taken = self.drain(Class::Restore);
+        let mut more = None; // суффикс «после этого ещё N» — только во фразе, не в журнале
         if !waiting {
             let (mut qs, focused): (Vec<News>, Vec<News>) = self.drain(Class::Question).into_iter().partition(|i| Some(i.session.as_str()) != skip);
             self.items.extend(focused);
             if !qs.is_empty() {
-                let mut q = qs.remove(0);
+                let q = qs.remove(0);
                 self.asked = Some((q.clone(), now));
                 if !qs.is_empty() {
-                    q.say = format!("{} {}", q.say, more_questions(qs.len()));
+                    more = Some(more_questions(qs.len()));
                 }
                 self.items.extend(qs);
                 taken.push(q);
@@ -104,9 +105,12 @@ impl Board {
         if taken.is_empty() {
             return None;
         }
-        let say = taken.iter().map(|i| i.say.as_str()).collect::<Vec<_>>().join(" ");
+        let mut say = taken.iter().map(|i| i.say.as_str()).collect::<Vec<_>>().join(" ");
+        if let Some(m) = more {
+            say = format!("{say} {m}"); // вопрос в пачке последний: после него ничего не берётся
+        }
         if !sure {
-            // в журнале вопрос без «после этого ещё N»: при повторе счёт будет свежий
+            // при повторе счёт «ещё N» будет свежий
             self.spoken.extend(taken.into_iter().map(|i| (i, now)));
         }
         Some(say)
@@ -249,6 +253,19 @@ mod tests {
         b.returned(1000, true);
         assert_eq!(b.take(2000, None, true).unwrap(), "новый");
         assert_eq!(b.take(2001, None, true), None);
+    }
+
+    #[test]
+    fn spoken_question_logged_without_more_suffix() {
+        let mut b = Board::default();
+        b.push(n("a", Class::Question, "A?", 1));
+        b.push(n("b", Class::Question, "B?", 2));
+        assert_eq!(sp(&mut b, 1100).unwrap(), "A? После этого ещё один вопрос.");
+        b.returned(1000, true);
+        assert_eq!(b.take(5000, None, true).unwrap(), "A? После этого ещё один вопрос."); // A вернулась, B ещё на доске
+        b.answered("b");
+        b.unask();
+        assert_eq!(b.take(5001, None, true).unwrap(), "A?");
     }
 
     #[test]
