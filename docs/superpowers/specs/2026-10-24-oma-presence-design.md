@@ -193,8 +193,10 @@
   активное время, Ома — слышит ли её пользователь; правил потребителей в
   сервисе нет.
 - **Где:** плагин-сервис оболочки (`kinds: ["service"]`, как
-  `predmaxim.breaks/Service.qml`), в `~/omarchy-dotfiles/home/.config/omarchy/plugins/predmaxim.presence`
-  рядом с перерывами (моё решение). В Quickshell простой ввода (`IdleMonitor`),
+  `predmaxim.breaks/Service.qml`), свой публичный репозиторий
+  [predmaxim/omarchy-presence](https://github.com/predmaxim/omarchy-presence), клон
+  `~/Projects/omarchy/own/omarchy-presence`, в `~/.config/omarchy/plugins/predmaxim.presence` — ссылка
+  на клон (решено с пользователем: свои плагины — в своих репозиториях, не в dotfiles). В Quickshell простой ввода (`IdleMonitor`),
   MPRIS и PipeWire — родные, новых зависимостей нет; отдельному демону нужны
   были бы клиент Wayland и D-Bus.
 - **API — файл-снимок** `$XDG_RUNTIME_DIR/predmaxim-presence.json`, атомарная
