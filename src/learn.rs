@@ -51,23 +51,30 @@ fn run(rx: Receiver<(Agent, String)>, terms: Arc<Mutex<Terms>>) {
 }
 
 fn ask(agent: &Agent, prompt: &str) -> Option<String> {
-    let mut cmd = match agent {
-        Agent::Claude => {
-            let mut c = Command::new("timeout");
-            // промпт сразу после -p: --tools принимает несколько значений и проглотил бы его
-            c.args(["60", "claude", "-p", prompt, "--model", "haiku", "--no-session-persistence", "--setting-sources", "",
-                    "--strict-mcp-config", "--tools", ""])
-                .env("MAX_THINKING_TOKENS", "0")
-                .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
-            c
-        }
+    match agent {
+        Agent::Claude => ask_claude(prompt),
         Agent::Codex => {
             let mut c = Command::new("timeout");
             c.args(["60", "codex", "exec", "--ephemeral", "--skip-git-repo-check", "-m", &codex_small()?,
                     "-c", "model_reasoning_effort=low", prompt]);
-            c
+            output(c)
         }
-    };
+    }
+}
+
+/// Лёгкий Claude без инструментов и памяти; зовут и словарь, и пересказ (digest).
+pub fn ask_claude(prompt: &str) -> Option<String> {
+    let mut c = Command::new("timeout");
+    // промпт сразу после -p: --tools принимает несколько значений и проглотил бы его
+    c.args(["60", "claude", "-p", prompt, "--model", "haiku", "--no-session-persistence", "--setting-sources", "",
+            "--strict-mcp-config", "--tools", ""])
+        .env("MAX_THINKING_TOKENS", "0")
+        .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
+    output(c)
+}
+
+/// AGENT_SPEAK=1: хуки вложенного агента не должны озвучить этот запрос.
+fn output(mut cmd: Command) -> Option<String> {
     let out = cmd.env("AGENT_SPEAK", "1").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
