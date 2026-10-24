@@ -1,6 +1,7 @@
 //! Пересказ хода агента: лёгкая модель → короткая фраза для голоса.
 
 use crate::learn;
+use crate::text::sentences;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -35,16 +36,19 @@ pub struct Digest {
 /// Символов текста агента в промпте — хвост: итог хода в конце.
 pub const MAX_INPUT: usize = 6000;
 pub const WORKERS: usize = 3;
+/// Слов в пересказе — около 12 секунд речи; модель иногда пишет больше, чем просят.
+pub const MAX_SAY_WORDS: usize = 30;
 
 const COMMON: &str = "Ты — Ома, помощница, которая пересказывает пользователю голосом работу ИИ-агента. Пиши по-русски, коротко, простыми словами. \
+Об агенте говори в третьем лице («агент сделал»), к пользователю — на «ты» и без родовых окончаний: не «видел» или «видела», а «слышно ли», «получилось ли». \
 Не называй переменные, функции, классы, файлы, пути, команды и код — только смысл: что сделано, каким способом в общих словах, что дальше. \
 Без markdown и списков. Ответ — строго одна строка JSON: {\"say\": \"…\", \"important\": true или false}.";
 
 pub fn prompt(job: &Job) -> String {
     let kind = match job.ask {
-        Ask::Final => "Агент закончил ход. Одной-двумя фразами: что сделано и что требует внимания пользователя — оставшиеся проблемы, советы агента, что не запушено или не проверено. important — true, если пользователю нужно что-то решить или сделать.",
-        Ask::Question => "Агент ждёт ответа пользователя. Перескажи суть вопроса общими словами и совет агента, если он есть. Если вопрос важный (архитектура, данные, деньги, необратимые действия), добавь в общих словах, как агент предлагает это сделать. important — true.",
-        Ask::Progress => "Агент ещё работает; ниже его сообщения за последнюю минуту. Одной фразой: какой шаг закрыт и что дальше. important — true, только если пользователю стоит узнать это сейчас: проблема, смена плана, неожиданный результат.",
+        Ask::Final => "Агент закончил ход. Одной фразой, не длиннее 20 слов: что сделано и что требует внимания пользователя — оставшиеся проблемы, советы агента, что не запушено или не проверено. important — true, если пользователю нужно что-то решить или сделать.",
+        Ask::Question => "Агент ждёт ответа пользователя. Одной фразой, не длиннее 25 слов: суть вопроса общими словами и совет агента, если он есть. Варианты ответа не перечисляй. Вопросов несколько — их число и суть каждого в двух-трёх словах. Вопрос важный (архитектура, данные, деньги, необратимые действия) — в тех же 25 словах, как агент предлагает это сделать. important — true.",
+        Ask::Progress => "Агент ещё работает; ниже его сообщения за последнюю минуту. Одной фразой, не длиннее 15 слов: какой шаг закрыт и что дальше. important — true, только если пользователю стоит узнать это сейчас: проблема, смена плана, неожиданный результат.",
     };
     let skip = job.text.chars().count().saturating_sub(MAX_INPUT);
     let tail: String = job.text.chars().skip(skip).collect();
@@ -55,7 +59,25 @@ pub fn prompt(job: &Job) -> String {
 pub fn parse(out: &str) -> Option<(bool, String)> {
     let v: serde_json::Value = serde_json::from_str(out.get(out.find('{')?..=out.rfind('}')?)?).ok()?;
     let say = v["say"].as_str()?.trim();
-    (!say.is_empty()).then(|| (v["important"].as_bool().unwrap_or(false), say.to_string()))
+    (!say.is_empty()).then(|| (v["important"].as_bool().unwrap_or(false), clip(say)))
+}
+
+/// Не длиннее MAX_SAY_WORDS: целые предложения, сколько влезет; первое само длиннее — обрезать по слову с «…».
+fn clip(say: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut words = 0;
+    for s in sentences::split(say) {
+        words += s.split_whitespace().count();
+        if words > MAX_SAY_WORDS {
+            break;
+        }
+        out.push(s);
+    }
+    if out.is_empty() {
+        let head: Vec<&str> = say.split_whitespace().take(MAX_SAY_WORDS).collect();
+        return format!("{}…", head.join(" ").trim_end_matches([',', ';', ':', '—', '-']).trim_end());
+    }
+    out.join(" ")
 }
 
 pub fn digest(job: Job, ask: impl Fn(&str) -> Option<String>) -> Option<Digest> {
@@ -113,6 +135,17 @@ mod tests {
         assert!(p.chars().count() < MAX_INPUT + 2000);
         assert!(prompt(&job(Ask::Question, "x", None)).contains("ждёт ответа"));
         assert!(prompt(&job(Ask::Progress, "x", None)).contains("какой шаг закрыт"));
+        assert!(p.contains("не длиннее 20 слов") && p.contains("без родовых окончаний"));
+        assert!(prompt(&job(Ask::Question, "x", None)).contains("Варианты ответа не перечисляй"));
+    }
+
+    #[test]
+    fn clip_keeps_whole_sentences_within_limit() {
+        assert_eq!(clip("Коротко."), "Коротко.");
+        let c = clip(&"Раз два три четыре пять. ".repeat(10)); // 50 слов
+        assert_eq!((c.split_whitespace().count(), c.ends_with('.')), (30, true));
+        let c = clip(&format!("{} — хвост", "слово ".repeat(40))); // одно предложение длиннее предела
+        assert_eq!((c.split_whitespace().count(), c.ends_with("слово…")), (MAX_SAY_WORDS, true));
     }
 
     #[test]
@@ -122,6 +155,8 @@ mod tests {
         assert_eq!(parse("{\"say\":\"Без важности.\"}"), Some((false, "Без важности.".into())));
         assert_eq!(parse("Sure! Here is the summary."), None);
         assert_eq!(parse("{\"say\": \"  \", \"important\": true}"), None);
+        let long = format!("{{\"say\": \"{}\"}}", "Раз два три четыре пять. ".repeat(10));
+        assert_eq!(parse(&long).unwrap().1.split_whitespace().count(), 30); // длинный ответ модели обрезан
     }
 
     #[test]
