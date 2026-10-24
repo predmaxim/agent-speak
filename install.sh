@@ -10,7 +10,8 @@ mkdir -p ~/.local/bin "$DATA" ~/.config/systemd/user
 ln -sfn "$PWD/target/release/agent-speak" ~/.local/bin/agent-speak
 ln -sfn "$PWD/python/silero_tts.py" "$DATA/silero_tts.py"
 [[ -f $DATA/terms.tsv ]] || cp data/terms.tsv "$DATA/terms.tsv"
-ln -sfn "$PWD/systemd/agent-speakd.service" ~/.config/systemd/user/agent-speakd.service
+# копия, не ссылка: `systemctl disable` (agent-speak off) снимает ссылку на юнит вместе с автозапуском
+install -m644 systemd/agent-speakd.service ~/.config/systemd/user/agent-speakd.service
 # Плагин Omarchy — панель Омы (орб и окно); включается: omarchy plugin enable predmaxim.agent-speak
 mkdir -p ~/.config/omarchy/plugins
 ln -sfn "$PWD/plugin" ~/.config/omarchy/plugins/predmaxim.agent-speak
