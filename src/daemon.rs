@@ -902,11 +902,20 @@ impl State {
                 self.asm.flush_session(&session); // недосказанный хвост есть в финале; в следующий ход не тянется
                 let transcript = PathBuf::from(p["transcript_path"].as_str().unwrap_or_default());
                 let last = final_message(p, &transcript).unwrap_or_default();
-                self.registry.finished(&session, &last, now);
+                // помощники в фоне — «Жду ревью» не итог, а агент работает
+                let waiting = claude::pending_background(&tail_of(&transcript.to_string_lossy())) > 0;
+                if waiting {
+                    self.registry.status(&session, &last, now);
+                } else {
+                    self.registry.finished(&session, &last, now);
+                }
                 self.registry.reload(&session, &last);
                 self.board.answered(&session); // ход кончился — вопрос решён, хоть разрешение и дали в терминале без промпта
                 self.progress.remove(&session); // промежуточное покрывает итог
-                self.ask(&session, Ask::Final, &last, Some("готово".into()));
+                // shortcut: вопрос текстом в конце такого хода не звучит (AskUserQuestion — звучит), научить, если начнёт теряться
+                if !waiting {
+                    self.ask(&session, Ask::Final, &last, Some("готово".into()));
+                }
             }
             "codex-notify" => {
                 let thread = p["thread-id"].as_str().unwrap_or_default().to_string();
@@ -1610,6 +1619,23 @@ mod tests {
 
     fn stop(st: &mut State, session: &str, last: &str) {
         st.on_hook("stop", &serde_json::json!({"session_id": session, "transcript_path": "/nonexistent", "last_assistant_message": last}));
+    }
+
+    #[test]
+    fn stop_with_pending_helpers_is_not_a_final() {
+        let dir = std::env::temp_dir().join(format!("agent-speak-pending-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let line = serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": [{"type": "text", "text": "Async agent launched successfully.\nagentId: aaa (internal ID)"}]}]}});
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        let mut st = test_state();
+        with_agents(&mut st, &["s"]);
+        let rx = jobs(&mut st);
+        st.on_hook("stop", &serde_json::json!({"session_id": "s", "transcript_path": path, "last_assistant_message": "Жду ревью 7."}));
+        assert!(rx.try_recv().is_err(), "модель не звана");
+        let a = st.registry.get("s").unwrap();
+        assert_eq!((a.state, a.status.as_str()), (agents::State::Working, "Жду ревью 7."));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

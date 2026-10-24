@@ -77,6 +77,32 @@ pub fn last_tool(content: &str) -> Option<String> {
     })
 }
 
+/// Сколько фоновых задач агента (помощники, команды) запущено и ещё не отчиталось, по хвосту транскрипта.
+pub fn pending_background(content: &str) -> usize {
+    // id — буквы и цифры после маркера; в JSON-тексте перед ним то кавычки, то двоеточие
+    let id_after = |line: &str, marker: &str| -> Option<String> {
+        let rest = &line[line.find(marker)? + marker.len()..];
+        let id: String = rest.chars().skip_while(|c| !c.is_ascii_alphanumeric()).take_while(|c| c.is_ascii_alphanumeric()).collect();
+        (!id.is_empty()).then_some(id)
+    };
+    let mut pending = std::collections::HashSet::new();
+    for line in content.lines() {
+        if line.contains("<task-notification>") {
+            let done = ["completed", "failed", "killed"].iter().any(|s| line.contains(&format!("<status>{s}</status>")));
+            if let Some(id) = id_after(line, "<task-id>").filter(|_| done) {
+                pending.remove(&id);
+            }
+        } else if line.contains("Async agent launched") {
+            pending.extend(id_after(line, "agentId:"));
+        } else if line.contains("running in background with ID:") {
+            pending.extend(id_after(line, "running in background with ID:"));
+        } else if line.contains("resumedAgentId") {
+            pending.extend(id_after(line, "resumedAgentId"));
+        }
+    }
+    pending.len()
+}
+
 /// Самый поздний вызов инструмента целиком.
 fn last_call(content: &str) -> Option<Value> {
     content.lines().rev().find_map(|line| {
@@ -119,6 +145,35 @@ pub fn question_context(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tool_result(text: &str) -> String {
+        serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": [{"type": "text", "text": text}]}]}}).to_string()
+    }
+    fn launched(id: &str) -> String { tool_result(&format!("Async agent launched successfully.\nagentId: {id} (internal ID)")) }
+    fn report(id: &str, status: &str) -> String {
+        serde_json::json!({"type": "queue-operation", "content": format!("<task-notification>\n<task-id>{id}</task-id>\n<status>{status}</status>\n</task-notification>")}).to_string()
+    }
+
+    #[test]
+    fn pending_counts_launched_minus_reported() {
+        let log = [launched("aaa"), launched("bbb"), tool_result("Command running in background with ID: b3jh6h2yt. Output is being written"), report("aaa", "completed"), report("aaa", "completed")];
+        assert_eq!(pending_background(&log.join("\n")), 2);
+        assert_eq!(pending_background(&[log.join("\n"), report("b3jh6h2yt", "killed")].join("\n")), 1);
+    }
+
+    #[test]
+    fn resumed_helper_pending_again() {
+        let resumed = tool_result(r#"{"success":true,"resumedAgentId":"aaa","pin":{"id":"aaa"}}"#);
+        assert_eq!(pending_background(&[launched("aaa"), report("aaa", "completed")].join("\n")), 0);
+        assert_eq!(pending_background(&[launched("aaa"), report("aaa", "completed"), resumed].join("\n")), 1);
+    }
+
+    #[test]
+    fn no_background_is_zero() {
+        let text = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}"#;
+        assert_eq!(pending_background(&[text.to_string(), tool_result("ok"), "обрывок".into()].join("\n")), 0);
+    }
+
 
     #[test]
     fn last_tool_is_latest_call() {
