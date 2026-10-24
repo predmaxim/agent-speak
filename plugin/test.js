@@ -24,6 +24,8 @@ assert.strictEqual(M.orbMode(st), "idle")
 assert.strictEqual(M.orbMode(Object.assign({}, st, { waiting: 2, quiet: true })), "waiting")
 assert.strictEqual(M.orbMode(Object.assign({}, st, { quiet: true })), "quiet")
 assert.strictEqual(M.orbMode(Object.assign({}, st, { oma: "listening", waiting: 1 })), "listening")
+// news and manual reading are the service's speech, Oma herself is idle: still "speaking", not the waiting red
+assert.strictEqual(M.orbMode(Object.assign({}, st, { speaking: true, waiting: 1 })), "speaking")
 // Oma is down: the orb says so, but a waiting agent still turns it yellow
 assert.strictEqual(M.orbMode(Object.assign({}, st, { oma: "off" })), "off")
 assert.strictEqual(M.orbMode(Object.assign({}, st, { oma: "off", quiet: true })), "off")

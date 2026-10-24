@@ -29,6 +29,7 @@ function parseLine(line) {
 function orbMode(st) {
   if (!st || !st.running) return "off"
   if (["loading", "listening", "thinking", "speaking", "paused"].indexOf(st.oma) >= 0) return st.oma
+  if (st.speaking) return "speaking"   // news or manual reading: the service speaks, Oma is idle
   if (st.waiting > 0) return "waiting"
   if (st.oma === "off") return "off"
   return st.quiet ? "quiet" : "idle"
