@@ -383,7 +383,7 @@ impl State {
 
     /// Очередь и доска — только то, что слышно сейчас: настала тишина — лишнее выбросить. Звучащая фраза доигрывает.
     fn purge(&mut self) {
-        if !self.cfg.progress_digest {
+        if !self.cfg.progress_digest || !self.cfg.agents_voice {
             self.progress.clear(); // пересказ выключен — накопленное не нужно
         }
         let quiet = self.quiet();
@@ -394,7 +394,7 @@ impl State {
             // новости выброшены — окно ответа по чужой речи не откроется
             (self.listen_after, self.listen_at) = (false, None);
         } else if !self.cfg.agents_voice {
-            self.board.retain_classes(&[Class::Restore, Class::Question]);
+            self.board.retain_classes(&[]); // за агентами не следим — о них ни слова
         }
     }
 
@@ -517,7 +517,7 @@ impl State {
 
     /// Текст хода — в накопленное для пересказа промежуточного; срок PROGRESS_EVERY — от первого предложения.
     fn note(&mut self, session: &str, text: &str) {
-        if !self.cfg.progress_digest {
+        if !self.cfg.progress_digest || !self.cfg.agents_voice {
             return;
         }
         let at = (self.clock)();
@@ -530,6 +530,9 @@ impl State {
 
     /// Задание на пересказ; сессии не из реестра (не пользователя) не пересказываем.
     fn ask(&mut self, session: &str, ask: Ask, text: &str, fallback: Option<String>) {
+        if !self.cfg.agents_voice {
+            return; // «Следить за агентами» выключено: модель не зовём
+        }
         let Some(e) = self.registry.get(session) else { return };
         let prompt = self.registry.last_prompt(session);
         let skip = prompt.chars().count().saturating_sub(CONTEXT_MAX);
@@ -540,6 +543,9 @@ impl State {
 
     /// Пересказ пришёл: строка «что сейчас», пузырь, а вне тишины — на доску новостей.
     fn on_digest(&mut self, d: Digest) {
+        if !self.cfg.agents_voice {
+            return; // пересказ начат до выключения слежки
+        }
         let Some(e) = self.registry.get(&d.session) else { return };
         // устарел, пока шёл пересказ: ход кончился (промежуточное звучало бы поверх итога)
         // или на вопрос уже ответили (промпт, разрешение в терминале, конец хода)
@@ -563,8 +569,8 @@ impl State {
         }
         let class = match d.ask {
             Ask::Question => Some(Class::Question),
-            Ask::Final => self.cfg.agents_voice.then_some(Class::Final),
-            Ask::Progress => (self.cfg.agents_voice && d.important).then_some(Class::Progress),
+            Ask::Final => Some(Class::Final),
+            Ask::Progress => d.important.then_some(Class::Progress),
         };
         if let Some(class) = class.filter(|_| !self.quiet()) {
             if class == Class::Question {
@@ -1048,7 +1054,7 @@ mod tests {
         let st = test_state();
         assert_eq!(
             st.status_line(),
-            "{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":false,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0}\n"
+            "{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":true,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0}\n"
         );
     }
 
@@ -1062,7 +1068,7 @@ mod tests {
     #[test]
     fn voice_text_plays_without_agents_voice() {
         let mut st = test_state();
-        assert!(!st.cfg.agents_voice);
+        st.cfg.agents_voice = false; // помощник говорит и без слежки за агентами
         st.on_msg(Msg::Voice { text: "Ответ Омы здесь.".into() });
         assert!(!st.shared.queue.lock().unwrap().is_empty());
     }
@@ -1339,7 +1345,7 @@ mod tests {
         st.on_msg(Msg::Set { key: "volume".into(), value: serde_json::json!("loud") });
         let mut l = String::new();
         assert!(r.read_line(&mut l).is_err(), "неверный set ничего не рассылает: {l}");
-        assert_eq!((st.cfg.speaker.as_str(), st.cfg.agents_voice), ("baya", false));
+        assert_eq!((st.cfg.speaker.as_str(), st.cfg.agents_voice), ("baya", true));
     }
 
     #[test]
@@ -1662,10 +1668,25 @@ mod tests {
     }
 
     #[test]
-    fn agents_voice_off_speaks_questions_not_finals() {
+    fn agents_watch_off_is_silent_and_asks_no_model() {
         let mut st = test_state();
+        st.cfg.agents_voice = false; // «Следить за агентами» выключено: Ома — только помощник
         with_agents(&mut st, &["s", "t"]);
-        st.on_digest(dg("s", Ask::Final, true, "Фича готова."));
+        let rx = jobs(&mut st);
+        let mut r = sub(&mut st);
+        stop(&mut st, "s", "Готово.");
+        assert!(rx.try_recv().is_err(), "без слежки Haiku не зовём");
+        st.on_digest(dg("s", Ask::Final, true, "Фича готова.")); // пересказ, начатый до выключения
+        question(&mut st, "t", true, "Удалить старый код?");
+        st.tick();
+        assert!(texts(&st).is_empty() && bubbles(&mut r).is_empty());
+    }
+
+    #[test]
+    fn agents_watch_on_speaks_questions_even_unimportant() {
+        let mut st = test_state();
+        st.cfg.agents_voice = true;
+        with_agents(&mut st, &["t"]);
         question(&mut st, "t", false, "Удалить старый код?"); // вопрос звучит, даже если модель сочла его неважным
         st.tick();
         assert_eq!(texts(&st), ["плуг: Удалить старый код?"]);
@@ -1696,7 +1717,8 @@ mod tests {
         st.cfg.agents_voice = false;
         st.apply();
         st.tick();
-        assert_eq!(texts(&st), ["плуг: Удалить старый код?"]);
+        assert!(texts(&st).is_empty()); // слежка выключена — и вопросы с доски ушли
+        st.cfg.agents_voice = true;
         question(&mut st, "t", true, "Удалить и тесты?");
         st.cfg.quiet_override = "on".into();
         st.apply();

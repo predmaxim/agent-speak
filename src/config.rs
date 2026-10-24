@@ -14,7 +14,8 @@ pub struct Config {
     pub quiet_to: String,
     /// ручное переопределение расписания: "" (нет) / "on" / "off"
     pub quiet_override: String,
-    /// озвучивать агентов (переключатель окна); дословно их тексты не читаются
+    /// следить за агентами («Следить за агентами»): пересказы моделью, пузыри и голос о них;
+    /// выкл — об агентах ни слова и ни одного вызова модели, Ома — только голосовой помощник
     pub agents_voice: bool,
     /// пересказывать промежуточное моделью (раз в минуту на агента); выключено — в окне дословная последняя фраза
     pub progress_digest: bool,
@@ -27,7 +28,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config { speaker: "xenia".into(), rate: "medium".into(),
-            quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: false, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
+            quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: true, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
             orb_over_fullscreen: true }
     }
 }
@@ -124,7 +125,7 @@ mod tests {
             (c.quiet_schedule, c.quiet_from.as_str(), c.quiet_to.as_str(), c.quiet_override.as_str()),
             (true, "23:00", "08:00", "")
         );
-        assert_eq!((c.agents_voice, c.orb_pos.as_str()), (false, "bottom-right,0,0"));
+        assert_eq!((c.agents_voice, c.orb_pos.as_str()), (true, "bottom-right,0,0"));
     }
 
     #[test]
