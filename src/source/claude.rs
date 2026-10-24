@@ -77,7 +77,7 @@ pub fn last_tool(content: &str) -> Option<String> {
     })
 }
 
-/// Сколько фоновых задач агента (помощники, команды) запущено и ещё не отчиталось, по хвосту транскрипта.
+/// Сколько помощников агента запущено и ещё не отчиталось, по хвосту транскрипта; фоновые команды не считаются: сервер не отчитывается никогда.
 pub fn pending_background(content: &str) -> usize {
     // id — буквы и цифры после маркера; в JSON-тексте перед ним то кавычки, то двоеточие
     let id_after = |line: &str, marker: &str| -> Option<String> {
@@ -88,14 +88,15 @@ pub fn pending_background(content: &str) -> usize {
     let mut pending = std::collections::HashSet::new();
     for line in content.lines() {
         if line.contains("<task-notification>") {
-            let done = ["completed", "failed", "killed"].iter().any(|s| line.contains(&format!("<status>{s}</status>")));
-            if let Some(id) = id_after(line, "<task-id>").filter(|_| done) {
-                pending.remove(&id);
+            // в одной строке бывает несколько отчётов: id и статус — из одного куска
+            for part in line.split("<task-notification>").skip(1) {
+                let done = ["completed", "failed", "killed"].iter().any(|s| part.contains(&format!("<status>{s}</status>")));
+                if let Some(id) = id_after(part, "<task-id>").filter(|_| done) {
+                    pending.remove(&id);
+                }
             }
         } else if line.contains("Async agent launched") {
             pending.extend(id_after(line, "agentId:"));
-        } else if line.contains("running in background with ID:") {
-            pending.extend(id_after(line, "running in background with ID:"));
         } else if line.contains("resumedAgentId") {
             pending.extend(id_after(line, "resumedAgentId"));
         }
@@ -156,9 +157,15 @@ mod tests {
 
     #[test]
     fn pending_counts_launched_minus_reported() {
-        let log = [launched("aaa"), launched("bbb"), tool_result("Command running in background with ID: b3jh6h2yt. Output is being written"), report("aaa", "completed"), report("aaa", "completed")];
+        let log = [launched("aaa"), launched("bbb"), launched("ccc"), report("aaa", "completed"), report("aaa", "completed")];
         assert_eq!(pending_background(&log.join("\n")), 2);
-        assert_eq!(pending_background(&[log.join("\n"), report("b3jh6h2yt", "killed")].join("\n")), 1);
+        assert_eq!(pending_background(&tool_result("Command running in background with ID: b3jh6h2yt. Output is being written")), 0);
+    }
+
+    #[test]
+    fn several_reports_in_one_line() {
+        let two = serde_json::json!({"type": "queue-operation", "content": "<task-notification>\n<task-id>aaa</task-id>\n<status>completed</status>\n</task-notification>\n<task-notification>\n<task-id>bbb</task-id>\n<status>failed</status>\n</task-notification>"}).to_string();
+        assert_eq!(pending_background(&[launched("aaa"), launched("bbb"), two].join("\n")), 0);
     }
 
     #[test]

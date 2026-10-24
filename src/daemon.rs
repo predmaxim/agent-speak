@@ -912,7 +912,7 @@ impl State {
                 self.registry.reload(&session, &last);
                 self.board.answered(&session); // ход кончился — вопрос решён, хоть разрешение и дали в терминале без промпта
                 self.progress.remove(&session); // промежуточное покрывает итог
-                // shortcut: вопрос текстом в конце такого хода не звучит (AskUserQuestion — звучит), научить, если начнёт теряться
+                // shortcut: вопрос текстом в конце такого хода не звучит (AskUserQuestion — звучит), научить, если начнёт теряться; помощник без отчёта держит ход «работает», пока его запуск не уйдёт из хвоста 256 КБ
                 if !waiting {
                     self.ask(&session, Ask::Final, &last, Some("готово".into()));
                 }
