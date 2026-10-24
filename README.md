@@ -34,7 +34,7 @@
 | Окно Омы | `omarchy-shell predmaxim.oma toggle` (Super+Shift+S), ПКМ по орбу |
 | Начать / закончить разговор | клик по орбу, микрофон в шапке окна, `agent-speak voice` (Super+Ctrl+Alt+S), `omarchy-shell predmaxim.oma talk` |
 | Отменить фразу | `Esc` во время фразы, `omarchy-shell predmaxim.oma cancel` |
-| Озвучивать агентов | тумблер в окне, `agents_voice` в настройках |
+| Озвучивать агентов | тумблер в окне, `agents_voice` в настройках; выключение обрывает и то, что звучит сейчас |
 | Пересказывать промежуточное | тумблер на странице настроек окна, `progress_digest` |
 | Прочитать ход окна в фокусе / остановить | `agent-speak read` (Super+Shift+Alt+S) |
 | Пауза / продолжить | `agent-speak pause` (Super+Ctrl+Shift+Alt+S) |

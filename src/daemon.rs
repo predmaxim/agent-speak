@@ -791,8 +791,12 @@ impl State {
             Msg::Read => self.read(),
             Msg::Hook { kind, payload } => self.on_hook(&kind, &payload),
             Msg::Set { key, value } => {
+                let muted = key == "agents_voice" && value == false && self.cfg.agents_voice;
                 if self.cfg.set(&key, &value) {
                     self.cfg.save();
+                    if muted {
+                        self.stop(); // выключили озвучку — и то, что звучит, обрываем, а не ждём конца фразы
+                    }
                     self.apply();
                 } else {
                     eprintln!("agent-speak: set: неверно {key} = {value}");
@@ -1336,6 +1340,19 @@ mod tests {
         let mut l = String::new();
         assert!(r.read_line(&mut l).is_err(), "неверный set ничего не рассылает: {l}");
         assert_eq!((st.cfg.speaker.as_str(), st.cfg.agents_voice), ("baya", false));
+    }
+
+    #[test]
+    fn agents_voice_off_cuts_what_is_playing() {
+        let _home = TempHome::new("mute"); // set сохраняет config.toml
+        let mut st = test_state();
+        st.cfg.agents_voice = true;
+        with_agents(&mut st, &["s"]);
+        st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
+        st.on_msg(Msg::Set { key: "agents_voice".into(), value: serde_json::json!(false) });
+        assert!(texts(&st).is_empty() && !st.listen_after); // тумблер — и способ замолчать сейчас
     }
 
     fn say(st: &mut State) {
