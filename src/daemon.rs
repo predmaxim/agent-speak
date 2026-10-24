@@ -588,8 +588,8 @@ impl State {
             return; // пересказ начат до выключения слежки
         }
         if d.ask == Ask::Summary {
-            // сводка возвращения — от Омы, не от агента: в реестре её нет; звучит итогом и без important
-            self.bubble(SUMMARY, &format!("final-{SUMMARY}"), "Ома", &d.say, "final");
+            // сводка возвращения — от Омы, не от агента: в реестре её нет, пузырь без агента открывает чат Омы; звучит итогом и без important
+            self.bubble("", &format!("final-{SUMMARY}"), "Ома", &d.say, "final");
             if !self.quiet() {
                 self.board.push(News { session: d.session, class: Class::Final, say: d.say, born: (self.now_secs)() });
             }
@@ -2590,7 +2590,7 @@ mod tests {
         let mut r = sub(&mut st);
         st.on_digest(Digest { session: job.session, project: job.project, ask: Ask::Summary, important: true, say: "Четыре проекта готовы.".into() });
         let b = bubbles(&mut r);
-        assert_eq!((b.len(), b[0]["who"].as_str(), b[0]["kind"].as_str()), (1, Some("Ома"), Some("final")));
+        assert_eq!((b.len(), b[0]["who"].as_str(), b[0]["kind"].as_str(), b[0]["agent"].as_str()), (1, Some("Ома"), Some("final"), Some("")));
         st.tick();
         assert_eq!(texts(&st), ["Четыре проекта готовы."]);
     }
