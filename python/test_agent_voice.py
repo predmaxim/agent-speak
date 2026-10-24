@@ -403,7 +403,21 @@ def test_on_ac_usb_counts(tmp_path):
     assert on_ac(str(tmp_path))
 
 
-from agent_voice.ear import Whisper
+from agent_voice.ear import Whisper, transcribe
+
+
+def test_transcribe_drops_whisper_hallucinations():
+    class Seg:
+        def __init__(self, text): self.text = text
+    class Model:
+        def __init__(self, *texts): self.texts = texts
+        def transcribe(self, audio, **kw): return [Seg(t) for t in self.texts], None
+    pcm = b"\0\0" * 160
+    assert transcribe(Model(" Покажи агентов.", " Что с тестами?"), pcm) == "Покажи агентов. Что с тестами?"
+    # титры YouTube, которые whisper «слышит» в тишине; хвост «Спасибо.» — тот же шум
+    assert transcribe(Model(" Субтитры создавал DimaTorzok", " Спасибо."), pcm) == ""
+    assert transcribe(Model(" Продолжение следует..."), pcm) == ""
+    assert transcribe(Model(" Редактор субтитров А.Синецкая Корректор А.Егорова"), pcm) == ""
 
 
 def test_whisper_loads_once_and_unloads_on_battery_only():

@@ -3,6 +3,7 @@
 n — Ear.seq, номер речи (растёт всегда, при перезапуске слуха не сбрасывается)."""
 import asyncio
 import contextlib
+import re
 import time
 
 import numpy as np
@@ -24,10 +25,15 @@ def load_whisper():
         return WhisperModel("small", device="cpu", compute_type="int8")
 
 
+# Титры YouTube из обучающих данных: whisper уверенно «слышит» их в тишине и шуме, порог no_speech их не ловит.
+HALLUCINATION = re.compile(r"субтитр|dimatorzok|синецкая|продолжение следует|спасибо за просмотр|подпис\w* на( наш)? канал", re.I)
+
+
 def transcribe(model, pcm):
     audio = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768
     segs, _ = model.transcribe(audio, language="ru", beam_size=1)
-    return " ".join(s.text.strip() for s in segs).strip()
+    text = " ".join(s.text.strip() for s in segs).strip()
+    return "" if HALLUCINATION.search(text) else text  # вся фраза — шум, «Спасибо.» рядом с титрами тоже
 
 
 class Whisper:
