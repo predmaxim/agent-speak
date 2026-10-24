@@ -4,9 +4,9 @@
 
 **Goal:** Ома не говорит в пустоту: знает, слушает ли пользователь (ввод, блокировка, звонок, видео, наушники, его слова), копит новости, пока его нет, и вводит в курс, когда он вернулся; «Ок» после новости закрывает микрофон; речь — с верными ударениями; конец хода, пока агент ждёт своих фоновых помощников, не пересказывается как «ждёт тебя».
 
-**Architecture:** демон (Rust) держит состояние присутствия (`src/presence.rs`) рядом с доской новостей (`src/news.rs`) и по нему решает, говорить ли сейчас, спросить «Ты тут?» или копить. Сигналы приходят новыми сообщениями сокета: простой ввода и MPRIS — от плагина (Quickshell `IdleMonitor`, `Mpris`), блокировка, чужой микрофон и наушники — от Омы (Python), смысл фраз «не сейчас / я отойду / я тут» — от мозга Омы инструментом `presence`. Закрывающие «Ок» ловит код разговора (`conversation.py`).
+**Architecture:** факты о пользователе (простой ввода, блокировка, микрофон, камера, медиа, наушники) собирает общий сервис оболочки `predmaxim.presence` и пишет снимком в `$XDG_RUNTIME_DIR/predmaxim-presence.json`; демон agent-speak (Rust) следит за файлом, держит по нему состояние присутствия (`src/presence.rs`) рядом с доской новостей (`src/news.rs`) и решает, говорить ли сейчас, спросить «Ты тут?» или копить. Смысл фраз «не сейчас / я отойду / я тут» понимает мозг Омы (инструмент `presence` → сообщение сокета демону). Закрывающие «Ок» ловит код разговора (`conversation.py`).
 
-**Tech Stack:** Rust (serde_json — уже в Cargo.toml), Python 3 (voice-venv), QML/JS плагин (Quickshell 0.3.2), OpenFreebuds (системная программа из AUR, необязательная — за адаптером).
+**Tech Stack:** Rust (serde_json, notify — уже в Cargo.toml), Python 3 (voice-venv), QML/JS (Quickshell 0.3.2: `IdleMonitor`, `Mpris`, `Pipewire`, `FileView`), OpenFreebuds (системная программа из AUR, необязательная — за адаптером).
 
 **Spec:** `docs/superpowers/specs/2026-10-24-oma-presence-design.md`
 
@@ -14,7 +14,8 @@
 
 - Новых зависимостей нет ни в `Cargo.toml`, ни в voice-venv, ни в плагине. OpenFreebuds — внешняя программа; нет её — «датчика нет», всё остальное работает.
 - Пороги — константы в коде, без настроек: «не уверена» 90 с простоя, «нет на месте» 10 мин, отсутствие для приветствия и повтора — от 3 мин, «не сейчас» — 15 мин, «я отойду» — 60 с ввод не считается возвращением, сводка Haiku — итогов больше 3, «возможно, не услышано» — нет ввода от 60 с до начала речи.
-- Нет сигнала от плагина (не прислал, молчит дольше 150 с) — поведение как до этого плана.
+- Нет снимка присутствия или он старше 90 с (`at`) — поведение как до этого плана.
+- Сервис присутствия отдаёт только факты; правил потребителей (Омы, перерывов) в нём нет.
 - Тихий режим: ничего не звучит; пришедшее в тишину не копится; накопленное до тишины, пока пользователя нет, ждёт утра.
 - В речи нет имён переменных, функций, файлов, путей, команд.
 - Комментарии: в Rust и Python — по-русски, в QML и JS плагина — по-английски, как в окружающем коде; одна строка «почему».
@@ -27,7 +28,7 @@
 2. Агент закрыт, пока пользователя не было → его новости не повторяются (тест `closed_session_not_replayed`, задача 3).
 3. Пока пользователя не было, тот же агент закончил ещё раз → повтор старого итога не вытесняет новый (тест `replay_never_overrides_newer_news`, задача 3).
 4. Ноутбук спал час, открыли крышку и шевельнули мышью → это возвращение со сводкой, а не «Ты тут?» в пустую комнату до сна (тест `wake_from_sleep_is_return`, задача 2).
-5. Оболочка перезапущена или упала посреди простоя → Ома не замолкает навсегда: устаревший сигнал — как «слушает» (тест `stale_signal_is_here`, задача 2).
+5. Оболочка перезапущена или упала посреди простоя → Ома не замолкает навсегда: устаревший снимок — как «слушает» (тест `stale_facts_are_here`, задача 2).
 
 ---
 
@@ -119,18 +120,20 @@ ShellRoot { IdleMonitor { timeout: 5; respectInhibitors: false; onIsIdleChanged:
 
 - [ ] **Step 5: записать результат** в спеку разделом «Результаты проверок»: по каждому шагу — что увидели; для OpenFreebuds — точная команда или запрос, его вывод «в ушах / вынут», время ответа, или «датчик не читается» с причиной. Задача 9 строит адаптер по этой записи.
 
+- [ ] **Step 5a: `FileView` пишет атомарно.** В `/tmp/idle.qml` добавить `FileView { id: f; path: "/tmp/presence-probe.json"; atomicWrites: true }` и `f.setText(JSON.stringify({at: Date.now()}))` по `isIdle`; `inotifywait -m /tmp` показывает `MOVED_TO`, а не `MODIFY` по частям. Записать в тот же раздел.
+
 - [ ] **Step 6: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-10-24-oma-presence-design.md
-git commit -m "docs: присутствие — результаты проверок IdleMonitor, MPRIS, выхода звука, OpenFreebuds"
+git commit -m "docs: присутствие — результаты проверок IdleMonitor, MPRIS, выхода звука, FileView, OpenFreebuds"
 ```
 
 ---
 
 ### Task 2: Состояние присутствия — `src/presence.rs`
 
-Чистая машина состояний без ввода-вывода; время — эпоха в секундах, как у доски.
+Чистая машина состояний без ввода-вывода; время — эпоха в секундах, как у доски. Факты приходят снимком сервиса `predmaxim.presence` (задача 8).
 
 **Files:**
 - Create: `src/presence.rs`
@@ -140,65 +143,57 @@ git commit -m "docs: присутствие — результаты прове�
 **Interfaces:**
 - Produces:
   ```rust
-  pub const PROBE: u64 = 5;          // таймаут IdleMonitor плагина: простой начался за столько до сигнала
   pub const UNSURE_AFTER: u64 = 90;
   pub const AWAY_AFTER: u64 = 600;
   pub const BACK_AFTER: u64 = 180;   // отсутствие не короче — приветствие и повтор
   pub const BUSY_FOR: u64 = 900;
   pub const AWAY_GRACE: u64 = 60;
-  pub const STALE_AFTER: u64 = 150;  // плагин шлёт сигнал раз в 60 с; дольше тишина — сигнала нет
+  pub const STALE_AFTER: u64 = 90;   // сервис пишет снимок раз в 30 с; старше — фактов нет
+  pub const FILE: &str = "predmaxim-presence.json"; // в $XDG_RUNTIME_DIR
   #[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum Mode { Here, Busy, Unsure, Away }
   #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)] pub enum Buds { #[default] Unknown, In, Out }
-  impl Buds { pub fn parse(s: &str) -> Buds } // "in" | "out" | прочее — Unknown
+  #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+  pub struct Facts { pub at: u64, pub idle_since: u64, pub locked: bool, pub mic: bool, pub camera: bool, pub media: bool, #[serde(deserialize_with = ..)] pub buds: Buds }
+  pub fn parse_facts(s: &str) -> Option<Facts>;           // сломанный JSON — None; нет поля — значение по умолчанию; buds: "in" | "out" | прочее — Unknown
   #[derive(Default)] pub struct Presence { .. }
   impl Presence {
-      pub fn signal(&mut self, idle: bool, now: u64) -> Option<u64>; // сообщение плагина; Some(отсутствие, с) — вернулся
-      pub fn input(&mut self, now: u64) -> Option<u64>;              // любой ввод; Some — только если до него было Unsure или Away
-      pub fn set_locked(&mut self, on: bool, now: u64) -> Option<u64>; // разблокировка — ввод
-      pub fn set_call(&mut self, on: bool);
-      pub fn set_media(&mut self, on: bool);
-      pub fn set_buds(&mut self, b: Buds);                           // переход в Out — «не уверена» до ввода
-      pub fn said(&mut self, m: Mode, now: u64) -> Option<u64>;      // слова пользователя; Some — только для Here
-      pub fn unanswered(&mut self);                                  // «Ты тут?» без ответа — Away до ввода
+      pub fn apply(&mut self, f: Facts, now: u64) -> Option<u64>; // новый снимок; Some(отсутствие, с) — пользователь вернулся
+      pub fn said(&mut self, m: Mode, now: u64) -> Option<u64>;   // слова пользователя; Some — только для Here
+      pub fn unanswered(&mut self);                               // «Ты тут?» без ответа — Away до ввода
       pub fn mode(&self, now: u64) -> Mode;
       pub fn last_input(&self, now: u64) -> u64;
-      pub fn sure(&self) -> bool;                                    // наушники в ушах: слышит наверняка
+      pub fn sure(&self) -> bool;                                 // наушники в ушах: слышит наверняка
   }
   ```
 
-Порядок в `mode` — приоритет: заблокировано → Away; «я отойду» / «Ты тут?» без ответа (до ввода после `AWAY_GRACE`) → Away; звонок, медиа, `busy_until > now` → Busy; `Buds::In` → Here; сигнала нет (`signal` не приходил или последний старше `STALE_AFTER`) → Here; `Buds::Out` после последнего ввода → Unsure; простой ≥ `AWAY_AFTER` → Away; ≥ `UNSURE_AFTER` → Unsure; иначе Here. `signal(true, now)` ставит начало простоя `now - PROBE`, только если простоя ещё нет (повтор раз в минуту его не сдвигает); `signal(false, now)` — это `input(now)`. `said(Here)` — ввод, снимает busy и away; `said(Busy)` — ввод без возврата (`None`) и `busy_until = now + BUSY_FOR`; `said(Away)` — away с отсрочкой `AWAY_GRACE`: ввод в отсрочке away не снимает.
+`apply`: ввод — это `idle_since` стал 0 (был не 0) или `locked` стал false (был true); возврат `Some(now - прежний last_input)` — только если до этого снимка `mode` без учёта устаревания был Unsure или Away. `buds` из `In` в `Out` — «не уверена» до следующего ввода.
 
-- [ ] **Step 1: Write the failing tests**
+Порядок в `mode` — приоритет: фактов нет (снимка не было или `now - at > STALE_AFTER`) → Here; заблокировано → Away; «я отойду» / «Ты тут?» без ответа (до ввода после `AWAY_GRACE`) → Away; `mic`, `camera`, `media`, `busy_until > now` → Busy; `Buds::In` → Here; `Buds::Out` после последнего ввода → Unsure; простой ≥ `AWAY_AFTER` → Away; ≥ `UNSURE_AFTER` → Unsure; иначе Here. `said(Here)` — ввод, снимает busy и away; `said(Busy)` — ввод без возврата (`None`) и `busy_until = now + BUSY_FOR`; `said(Away)` — away с отсрочкой `AWAY_GRACE`: ввод в отсрочке away не снимает.
+
+- [ ] **Step 1: Write the failing tests** (`facts(at, idle_since)` — помощник теста; прочие поля — по умолчанию)
 
 ```rust
+#[test] fn parse_facts_tolerates_junk() { /* "{" → None; "{}" → Some(Facts::default()); buds "in" → In, "x" → Unknown */ }
 #[test] fn idle_thresholds() {
     let mut p = Presence::default();
-    p.signal(true, 1005); // простой с 1000
-    assert_eq!([p.mode(1089), p.mode(1090), p.mode(1599), p.mode(1600)], [Mode::Here, Mode::Unsure, Mode::Unsure, Mode::Away]);
-    p.signal(true, 1065); // повтор раз в минуту начало не сдвигает
-    assert_eq!(p.mode(1090), Mode::Unsure);
+    p.apply(facts(1005, 1000), 1005);
+    assert_eq!([p.mode(1089), p.mode(1090)], [Mode::Here, Mode::Unsure]);
+    p.apply(facts(1595, 1000), 1595);
+    assert_eq!([p.mode(1599), p.mode(1600)], [Mode::Unsure, Mode::Away]);
 }
 #[test] fn input_returns_absence_only_after_unsure_or_away() {
-    // простой с 1000: ввод в 1060 → None; простой снова с 1060, ввод в 1260 → Some(200)
+    // простой с 1000; снимок с idle_since 0 в 1060 → None; простой с 1060, ввод в 1260 → Some(200)
 }
-#[test] fn busy_beats_idle_but_not_lock() {
-    // set_media(true), простой 700 с → Busy; set_locked(true) → Away; set_call(true) без медиа → Busy
-}
+#[test] fn busy_beats_idle_but_not_lock() { /* media, простой 700 с → Busy; + locked → Away; mic без медиа → Busy; camera → Busy */ }
 #[test] fn buds_in_beats_idle() { /* Buds::In, простой 700 с → Here; sure() == true */ }
-#[test] fn buds_out_unsure_until_input() { /* In → Out при простое 10 с → Unsure; input → Here */ }
-#[test] fn said_away_has_grace() {
-    // said(Away, 1000); input(1030) → Away; input(1061) → Here
-}
+#[test] fn buds_out_unsure_until_input() { /* In → Out при простое 10 с → Unsure; ввод → Here */ }
+#[test] fn said_away_has_grace() { /* said(Away, 1000); ввод в 1030 → Away; ввод в 1061 → Here */ }
 #[test] fn said_busy_for_fifteen_minutes() { /* said(Busy, 1000) → Busy до 1899, Here в 1900; возврат None */ }
 #[test] fn said_here_clears_busy_and_away() {}
 #[test] fn unanswered_is_away_until_input() {}
-#[test] fn no_signal_is_here() { /* signal не приходил: простоя не знаем → Here при любом now */ }
-#[test] fn stale_signal_is_here() {
-    // signal(true, 1005), потом ничего: mode(1005 + STALE_AFTER + 1) == Here, хотя простой > 90 с
-}
-#[test] fn wake_from_sleep_is_return() {
-    // signal(true, 1005); ноутбук спал; signal(false, 4600) → Some(3600)
-}
+#[test] fn no_facts_is_here() { /* apply не было → Here при любом now */ }
+#[test] fn stale_facts_are_here() { /* снимок at 1005, простой с 1000: mode(1005 + STALE_AFTER + 1) == Here */ }
+#[test] fn wake_from_sleep_is_return() { /* снимок at 1005 простой с 1000; снимок at 4600 idle_since 0 → Some(3600) */ }
 ```
 
 Тела тестов — по комментариям; значения точные.
@@ -208,20 +203,18 @@ git commit -m "docs: присутствие — результаты прове�
 Run: `cargo test presence`
 Expected: FAIL — `presence` не найден.
 
-- [ ] **Step 3: Implement `src/presence.rs`** по интерфейсу и порядку приоритетов выше; `mod presence;` в `src/main.rs`.
-
-Внимание: `stale_signal_is_here` и `wake_from_sleep_is_return` противоречат друг другу только на вид — устаревший сигнал даёт Here в `mode`, а `signal(false)` после сна возвращает отсутствие от начала простоя: `input` считает его по `last_input`, а не по `mode`. Возврат — `Some`, если до ввода было Unsure или Away **без учёта устаревания**.
+- [ ] **Step 3: Implement `src/presence.rs`** по интерфейсу и порядку приоритетов; `mod presence;` в `src/main.rs`. `stale_facts_are_here` и `wake_from_sleep_is_return` не спорят: устаревание действует только в `mode`, возврат в `apply` считается по `last_input`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test presence`
-Expected: PASS (12 тестов).
+Expected: PASS (13 тестов).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/presence.rs src/main.rs
-git commit -m "presence: состояние присутствия — простой, блокировка, звонок, видео, наушники, слова пользователя"
+git commit -m "presence: состояние присутствия по снимку фактов — простой, блокировка, звонок, медиа, наушники, слова пользователя"
 ```
 
 ---
@@ -393,14 +386,12 @@ git commit -m "ударения: модель ставит знак в омог�
 - Test: `src/ipc.rs` (`msg_roundtrip`), `src/daemon.rs` (`mod tests`)
 
 **Interfaces:**
-- Consumes: `Presence`, `Mode`, `Buds` (задача 2); `Board::take(now, skip, sure)`, `unask`, `is_empty` (задача 3).
+- Consumes: `Presence`, `Mode`, `Facts`, `parse_facts`, `presence::FILE` (задача 2); `Board::take(now, skip, sure)`, `unask`, `is_empty` (задача 3).
 - Produces:
   ```rust
   // ipc::Msg
-  Input { idle: bool },                       // плагин: IdleMonitor; и раз в 60 с — как есть
-  Media { playing: bool },                    // плагин: играет ли какой-нибудь MPRIS-плеер
-  Signals { #[serde(default)] locked: bool, #[serde(default)] call: bool, #[serde(default)] buds: String }, // Ома: снимок
   Presence { state: String },                 // Ома: "here" | "busy" | "away" — голос пользователя
+  // daemon: Event::Presence(String) — новый текст снимка; State.facts_src: Box<dyn Fn() -> Option<String>> (в тестах — подделка)
   // daemon
   const HERE_WAIT: u64 = 20;                  // с от «Ты тут?» до вывода «нет на месте»
   const ARE_YOU_THERE: &str = "Ты тут? Есть новости.";
@@ -416,17 +407,18 @@ git commit -m "ударения: модель ставит знак в омог�
 
 `tick`: `here_ask = Some(t)`, `now ≥ t + HERE_WAIT`, `!oma.talking` → если `presence.last_input(now) < t` — `presence.unanswered()`; `here_ask = None` в любом случае.
 
-`on_msg`: `Input` → `presence.signal`; `Media` → `set_media`; `Signals` → `set_locked`, `set_call`, `set_buds(Buds::parse(..))`; `Presence` → `said`; при `"busy"` ещё `board.unask()` (звучащую новость обрывать не нужно: перебив уже оборвал её на начале речи). Возврат (`Some`) из `signal` / `set_locked` / `said` — в `on_back(Option<u64>)`; в этой задаче он только снимает `here_ask` и зовёт `board.returned(now - a, false)`; задача 7 добавит приветствие.
+Снимок: в `run` — `notify`-наблюдатель за папкой `$XDG_RUNTIME_DIR` (не за файлом: атомарная запись подменяет файл), событие по `presence::FILE` → `Event::Presence(текст)`; при старте — прочитать файл сразу. `on_presence(text)` → `parse_facts` → `presence.apply`. `on_msg`: `Presence` → `said`; при `"busy"` ещё `board.unask()` (звучащую новость обрывать не нужно: перебив уже оборвал её на начале речи). Возврат (`Some`) из `apply` / `said` — в `on_back(Option<u64>)`; в этой задаче он только снимает `here_ask` и зовёт `board.returned(now - a, false)`; задача 7 добавит приветствие.
 
 - [ ] **Step 1: Write the failing tests** (в `daemon.rs`; время — подменой `now_secs` на значение под `Arc<Mutex<u64>>`)
 
 ```rust
-#[test] fn msg_roundtrip() /* ipc.rs: + input, media, signals (без полей — false/""), presence */
+#[test] fn msg_roundtrip() /* ipc.rs: + presence */
+#[test] fn presence_file_change_reaches_state() { /* on_presence(r#"{"at":1000,"idle_since":300}"#) при now 1000 → presence.mode == Away; мусор — без паники, состояние прежнее */ }
 #[test] fn away_user_hears_nothing() {
-    // Input{idle:true} в 1000, now 1700; итог на доске; tick → texts пусто
+    // снимок idle_since 1000, now 1700; итог на доске; tick → texts пусто
 }
 #[test] fn unsure_asks_are_you_there_once() {
-    // Input{idle:true} в 1000, now 1100; итог; tick → texts == ["Ты тут? Есть новости."]; pop; tick → пусто
+    // снимок idle_since 1000, now 1100; итог; tick → texts == ["Ты тут? Есть новости."]; pop; tick → пусто
 }
 #[test] fn are_you_there_unanswered_is_away() {
     // после вопроса now += HERE_WAIT; tick → presence.mode(now) == Mode::Away
@@ -435,15 +427,15 @@ git commit -m "ударения: модель ставит знак в омог�
     // Msg::Presence{state:"here"}; tick → texts == ["плуг: Фича готова."]
 }
 #[test] fn busy_holds_news_and_releases_without_greeting() {
-    // Media{playing:true}; итог; tick → пусто; Media{playing:false}; tick → ["плуг: Фича готова."]
+    // снимок media:true; итог; tick → пусто; снимок media:false; tick → ["плуг: Фича готова."]
 }
 #[test] fn not_now_after_question_requeues_it() {
     // вопрос озвучен; Msg::Presence{state:"busy"}; итог s2 на доске; tick → пусто (busy);
     // now += BUSY_FOR; tick → первым звучит вопрос
 }
-#[test] fn buds_in_ear_speaks_despite_idle() { /* Signals{buds:"in"}, простой 700 с → новость звучит */ }
+#[test] fn buds_in_ear_speaks_despite_idle() { /* снимок buds "in", простой 700 с → новость звучит */ }
 #[test] fn focused_agent_final_not_spoken() { /* focus_src → s; итог s; tick → пусто; вопрос s ждёт, пока s в фокусе */ }
-#[test] fn no_plugin_signal_behaves_as_before() { /* без Input: итог звучит, как в final_digest_bubbles_then_speaks_when_idle */ }
+#[test] fn no_presence_file_behaves_as_before() { /* снимка нет: итог звучит, как в final_digest_bubbles_then_speaks_when_idle */ }
 ```
 
 Прежние тесты окна ответа (`listen_after` как bool, ожидаемый JSON `{"do":"listen","secs":5}` и `{"do":"listen","secs":5,"key":"agent:s"}`) — обновить под `kind` и `said`.
@@ -451,7 +443,7 @@ git commit -m "ударения: модель ставит знак в омог�
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test`
-Expected: FAIL — нет `Msg::Input` и т. д.
+Expected: FAIL — нет `Msg::Presence`, `on_presence`.
 
 - [ ] **Step 3: Implement** в `src/ipc.rs` и `src/daemon.rs` по поведению выше.
 
@@ -464,7 +456,7 @@ Expected: PASS; `0`.
 
 ```bash
 git add src/ipc.rs src/daemon.rs
-git commit -m "Ома молчит, когда её не слушают: сигналы присутствия, «Ты тут?», агент в фокусе, «не сейчас»"
+git commit -m "Ома молчит, когда её не слушают: снимок присутствия, «Ты тут?», агент в фокусе, «не сейчас»"
 ```
 
 ---
@@ -489,22 +481,22 @@ git commit -m "Ома молчит, когда её не слушают: сиг�
 
 ```rust
 #[test] fn return_after_long_absence_greets_with_overview() {
-    // простой с 1000; итог в 1300 (Away → не звучит); Input{idle:false} в 1700; tick →
+    // снимок: простой с 1000; итог в 1300 (Away → не звучит); снимок idle_since 0 в 1700; tick →
     // texts == ["С возвращением.", "Пока тебя не было: один проект закончил.", "плуг: Фича готова."]
 }
 #[test] fn news_spoken_into_void_repeated_on_return() {
-    // ввод в 1000; итог звучит в 1060 (Here); Input{idle:true} в 1065; Input{idle:false} в 1300 → итог звучит снова с приветствием
+    // простой с 1000; итог звучит в 1060 (Here); снимок idle_since 0 в 1300 → итог звучит снова с приветствием
 }
 #[test] fn listener_sitting_still_hears_no_repeat() {
-    // итог звучит в 1070 при простое с 1000; Input{idle:false} в 1150 → tick → пусто
+    // итог звучит в 1070 при простое с 1000; снимок idle_since 0 в 1150 → tick → пусто
 }
 #[test] fn short_absence_no_greeting() { /* отсутствие 120 с, итог на доске → звучит без «С возвращением.» */ }
 #[test] fn long_absence_summarizes_finals_once() {
     // 4 итога, возвращение → Job Ask::Summary с 4 строками; on_digest(Summary) → следующей звучит сводка
 }
-#[test] fn locked_then_unlocked_is_return() { /* Signals{locked:true} → молчит; Signals{locked:false} через 400 с → приветствие */ }
+#[test] fn locked_then_unlocked_is_return() { /* снимок locked → молчит; снимок locked:false через 400 с → приветствие */ }
 #[test] fn night_keeps_board_when_away_until_morning() {
-    // Away, итог на доске; minutes → 23:00, tick (тишина) → доска цела; minutes → 08:00, tick; Input{idle:false} → приветствие и итог
+    // Away, итог на доске; minutes → 23:00, tick (тишина) → доска цела; minutes → 08:00, tick; снимок idle_since 0 → приветствие и итог
 }
 #[test] fn night_clears_board_when_here() { /* как сейчас: muting_clears_board */ }
 ```
@@ -530,102 +522,95 @@ git commit -m "Ома вводит в курс по возвращении: пр
 
 ---
 
-### Task 8: Плагин — простой ввода и MPRIS
+### Task 8: Сервис присутствия `predmaxim.presence`
+
+Новый плагин-сервис оболочки в репозитории dotfiles, рядом с `predmaxim.breaks` (его `Service.qml`, `logic.js`, `test.js` — образец устройства). Правила работы с dotfiles — `~/omarchy-dotfiles/docs/rules.md` (прочитать до правок).
 
 **Files:**
-- Modify: `plugin/Model.js`, `plugin/Oma.qml`, `plugin/test.js`
+- Create: `~/omarchy-dotfiles/home/.config/omarchy/plugins/predmaxim.presence/manifest.json` (`kinds: ["service"]`, `entryPoints.service: "Service.qml"`), `Service.qml`, `logic.js`, `test.js`, `README.md`
+- Modify: `~/.config/omarchy/shell.json` (запись `{"id": "predmaxim.presence"}` в `plugins[]`, как у перерывов), установка ссылки — как у других плагинов из `home/` (по `rules.md`)
 
 **Interfaces:**
-- Consumes: `Msg::Input`, `Msg::Media` (задача 6).
-- Produces: `Model.input(idle) -> string` (`{"cmd":"input","idle":idle}\n`), `Model.media(playing) -> string`, `Model.anyPlaying(players) -> bool` (массив объектов с `isPlaying`; поле — по записи задачи 1).
+- Consumes: запись задачи 1 (`isPlaying` или `playbackState`, `FileView.atomicWrites`).
+- Produces: файл `$XDG_RUNTIME_DIR/predmaxim-presence.json` — `{"at", "idle_since", "locked", "mic", "camera", "media", "buds"}` (смысл полей — спека, «Сигналы»); `logic.js`:
+  ```js
+  function micBusy(nodes)                // как у перерывов + без node.name "oma-ear"
+  function anyPlaying(players)           // хоть один isPlaying
+  function onBuds(sinkName)              // имя выхода начинается с "bluez_output."
+  function budsState(onBuds, sensor)     // sensor true/false/null → "in" | "out" | "unknown"; не на наушниках → "unknown"
+  function snapshot(f)                   // объект фактов → строка JSON с полями ровно в порядке выше
+  function changed(prev, next)           // отличается ли что-нибудь, кроме at
+  ```
 
-В `Oma.qml` (один экземпляр `Link`; `Indicator.qml` не трогать): `IdleMonitor { timeout: 5; respectInhibitors: false }` — `onIsIdleChanged` шлёт `Model.input(isIdle)`; `readonly property bool playing: Model.anyPlaying(Mpris.players.values)` — `onPlayingChanged` шлёт `Model.media(playing)`; `Timer` 60 с шлёт оба как есть (сигнал жив); при `link.up` — сразу оба. Комментарий у `timeout`: должен совпадать с `presence::PROBE`.
+`Service.qml`: `IdleMonitor { timeout: 5; respectInhibitors: false }` — `idle_since = isIdle ? now − 5 : 0`; `Mpris.players.values` → `media`; `Pipewire.nodes.values` (+`PwObjectTracker`) → `mic`; `Pipewire.defaultAudioSink.name` → `onBuds`; `Process` раз в 5 с: `omarchy-hyprland-session-locked` (код 0 — `locked`) и камера (`fuser /dev/video*`, как `prober` у перерывов); запись `FileView { atomicWrites: true }` при `changed` и раз в 30 с. Время в снимке — эпоха в секундах.
 
-- [ ] **Step 1: Write the failing test** (в `plugin/test.js`, имена — в список `load`)
+- [ ] **Step 1: Write the failing tests** (`test.js`)
 
 ```js
-assert.strictEqual(M.input(true), '{"cmd":"input","idle":true}\n')
-assert.strictEqual(M.media(false), '{"cmd":"media","playing":false}\n')
-assert.strictEqual(M.anyPlaying([{ isPlaying: false }, { isPlaying: true }]), true)
-assert.strictEqual(M.anyPlaying([]), false)
+assert.strictEqual(L.micBusy([{ isStream: true, isSink: false, properties: { "node.name": "oma-ear" } }]), false)
+assert.strictEqual(L.micBusy([{ isStream: true, isSink: false, properties: {} }]), true)
+assert.strictEqual(L.micBusy([{ isStream: true, isSink: false, properties: { "node.virtual": "true" } }]), false)
+assert.strictEqual(L.anyPlaying([{ isPlaying: false }, { isPlaying: true }]), true)
+assert.strictEqual(L.onBuds("bluez_output.00_11_22_33_44_55.1"), true)
+assert.strictEqual(L.onBuds("alsa_output.pci-0000_00_1f.3.analog-stereo"), false)
+assert.deepStrictEqual([L.budsState(true, true), L.budsState(true, false), L.budsState(true, null), L.budsState(false, true)], ["in", "out", "unknown", "unknown"])
+assert.strictEqual(L.snapshot({ at: 1, idle_since: 0, locked: false, mic: false, camera: false, media: true, buds: "in" }),
+  '{"at":1,"idle_since":0,"locked":false,"mic":false,"camera":false,"media":true,"buds":"in"}')
+assert.strictEqual(L.changed({ at: 1, media: false }, { at: 2, media: false }), false)
+assert.strictEqual(L.changed({ at: 1, media: false }, { at: 2, media: true }), true)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `node plugin/test.js`
-Expected: FAIL — `M.input is not a function`.
+Run: `node ~/omarchy-dotfiles/home/.config/omarchy/plugins/predmaxim.presence/test.js`
+Expected: FAIL — нет `logic.js`.
 
-- [ ] **Step 3: Implement** в `Model.js` и `Oma.qml`.
+- [ ] **Step 3: Implement** `logic.js`, `Service.qml`, `manifest.json`, `README.md` (что пишет, поля, кто читает); запись в `shell.json`; `omarchy-shell restart`.
 
-- [ ] **Step 4: Run tests and load the shell**
+- [ ] **Step 4: Run tests and check the file**
 
-Run: `node plugin/test.js && omarchy-shell restart 2>&1 | tail -3; sleep 3; journalctl --user -b --since "-1min" | grep -i -E "predmaxim.oma|qml" | grep -i -E "error|warn" | head`
-Expected: `ok`; ошибок QML нет. В журнале демона (`journalctl --user -u agent-speak --since "-1min"`) ошибок разбора `input`/`media` нет.
+Run: `node ~/omarchy-dotfiles/home/.config/omarchy/plugins/predmaxim.presence/test.js && sleep 35 && cat $XDG_RUNTIME_DIR/predmaxim-presence.json`
+Expected: `ok`; снимок с `at` не старше 30 с и `buds` — `unknown` (датчика ещё нет) при выходе на наушники; в журнале оболочки нет ошибок QML плагина.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit** (в dotfiles; changelog — по `rules.md`)
 
 ```bash
-git add plugin/Model.js plugin/Oma.qml plugin/test.js
-git commit -m "plugin: простой ввода (IdleMonitor) и играющий MPRIS — демону, раз в минуту — как есть"
+git -C ~/omarchy-dotfiles add home/.config/omarchy/plugins/predmaxim.presence docs/changelog.md
+git -C ~/omarchy-dotfiles commit -m "predmaxim.presence: общий сервис присутствия — факты о пользователе снимком в XDG_RUNTIME_DIR"
 ```
 
 ---
 
-### Task 9: Ома — блокировка, звонок, наушники
+### Task 9: Датчик «в ушах» в `predmaxim.presence`
 
 **Files:**
-- Create: `python/agent_voice/buds.py`
-- Modify: `python/agent_voice/__main__.py` (цикл `signals` в `keep`)
-- Test: `python/test_agent_voice.py`
+- Modify: `~/omarchy-dotfiles/home/.config/omarchy/plugins/predmaxim.presence/Service.qml`, `logic.js`, `test.js`, `README.md`
 
 **Interfaces:**
-- Consumes: `Msg::Signals` (задача 6); `locked`, `mic_outputs`, `foreign_capture` из `context.py`; запись задачи 1 об OpenFreebuds.
-- Produces:
-  ```python
-  def default_sink(run=subprocess.run) -> str            # pactl get-default-sink, сбой — ""
-  def in_ear(run=subprocess.run) -> bool | None          # датчик «в ушах»; None — датчика нет
-  def buds_state(sink: str, sensor: bool | None, was_on_buds: bool) -> str  # "in" | "out" | "unknown"
-  SIGNALS_EVERY = 3  # с, __main__.py
-  ```
+- Consumes: запись задачи 1 об OpenFreebuds; `budsState(onBuds, sensor)` (задача 8).
+- Produces: `function parseInEar(text) -> true | false | null` в `logic.js` — разбор вывода способа чтения из задачи 1 (непонятно — `null`).
 
-`buds_state`: выход `bluez_output.*` → `"in"` при `sensor is True`, `"out"` при `False`, `"unknown"` при `None`; выход не наушники → `"out"`, если прошлый опрос был на наушниках, иначе `"unknown"`. `in_ear` — по записи задачи 1 (команда/запрос с таймаутом 2 с, сбой — `None`); если задача 1 записала «датчик не читается» — `in_ear` возвращает `None` без вызовов, с комментарием `shortcut: датчика нет, вернуть, когда OpenFreebuds научится читать Pro 4`.
+`Service.qml`: пока выход на наушниках — опрос датчика раз в 5 с способом из задачи 1 (`Process` или `FileView`/HTTP — как записано), таймаут 2 с; результат → `parseInEar` → `budsState`. Если задача 1 записала «датчик не читается» — `parseInEar` не нужен: `sensor` всегда `null` с комментарием `// shortcut: no in-ear sensor for FreeBuds Pro 4 via OpenFreebuds; add when it can read one`, а задача сводится к README.
 
-Цикл `signals` в `__main__.py`: раз в `SIGNALS_EVERY` — `locked()`, `foreign_capture(mic_outputs(), {oma.ear.pid} if pid else set())`, `buds_state(...)` (блокирующее — `asyncio.to_thread`); первый снимок и каждый изменившийся — `link.send({"cmd": "signals", "locked": …, "call": …, "buds": …})`.
+- [ ] **Step 1: Write the failing test** — `parseInEar` на образцах вывода из записи задачи 1: «в ушах» → `true`, «вынут» → `false`, мусор и пусто → `null`.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 2: Run test to verify it fails**
 
-```python
-def test_buds_state_table():
-    assert buds_state("bluez_output.00_11_22_33_44_55.1", True, False) == "in"
-    assert buds_state("bluez_output.00_11_22_33_44_55.1", False, True) == "out"
-    assert buds_state("bluez_output.00_11_22_33_44_55.1", None, True) == "unknown"
-    assert buds_state("alsa_output.pci-0000_00_1f.3.analog-stereo", None, True) == "out"
-    assert buds_state("alsa_output.pci-0000_00_1f.3.analog-stereo", None, False) == "unknown"
+Run: `node ~/omarchy-dotfiles/home/.config/omarchy/plugins/predmaxim.presence/test.js`
+Expected: FAIL — `parseInEar is not a function`.
 
-def test_default_sink_failure_is_empty():
-    def boom(*a, **k): raise OSError
-    assert default_sink(boom) == ""
-```
+- [ ] **Step 3: Implement**; `omarchy-shell restart`.
 
-Плюс тест `in_ear` на подделке `run` по формату вывода из задачи 1 (если датчик читается).
+- [ ] **Step 4: Run test and check live** — пользователь вынимает и вставляет наушник.
 
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `~/.local/share/agent-speak/voice-venv/bin/python -m pytest python/test_agent_voice.py -k buds -q`
-Expected: FAIL — `buds` не найден.
-
-- [ ] **Step 3: Implement** `buds.py` и цикл `signals`.
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `~/.local/share/agent-speak/voice-venv/bin/python -m pytest python/test_agent_voice.py -q`
-Expected: PASS.
+Run: `node …/predmaxim.presence/test.js && watch -n1 cat $XDG_RUNTIME_DIR/predmaxim-presence.json`
+Expected: `ok`; `buds` меняется `in` ↔ `out` за ≤ 10 с.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/agent_voice/buds.py python/agent_voice/__main__.py python/test_agent_voice.py
-git commit -m "Ома: блокировка, звонок и наушники «в ушах» — демону снимком при изменении"
+git -C ~/omarchy-dotfiles add home/.config/omarchy/plugins/predmaxim.presence docs/changelog.md
+git -C ~/omarchy-dotfiles commit -m "predmaxim.presence: наушники «в ушах» через OpenFreebuds"
 ```
 
 ---
@@ -732,7 +717,7 @@ git commit -m "мозг Омы: «не сейчас», «я отойду», «р
 ### Task 12: Установка, документация, живая проверка
 
 **Files:**
-- Modify: `README.md` (раздел о присутствии: состояния, «Ты тут?», возвращение, «Ок», наушники и OpenFreebuds — необязательно), `~/omarchy-dotfiles/docs/changelog.md` (запись по `rules.md`, «Порядок работы»)
+- Modify: `README.md` (раздел о присутствии: состояния, «Ты тут?», возвращение, «Ок»; факты — от `predmaxim.presence`, без него — как раньше), `~/omarchy-dotfiles/docs/rules.md` (раздел о `predmaxim.presence`: что пишет, поля, кто читает, факты — не правила), `~/omarchy-dotfiles/docs/changelog.md`
 
 - [ ] **Step 1: Все проверки**
 
@@ -755,5 +740,5 @@ Expected: всё PASS; `0`.
 ```bash
 git add README.md
 git commit -m "README: Ома видит, слушает ли пользователь"
-git -C ~/omarchy-dotfiles add docs/changelog.md && git -C ~/omarchy-dotfiles commit -m "changelog: agent-speak — присутствие пользователя"
+git -C ~/omarchy-dotfiles add docs/rules.md docs/changelog.md && git -C ~/omarchy-dotfiles commit -m "rules: predmaxim.presence — общий сервис присутствия; agent-speak читает его снимок"
 ```
