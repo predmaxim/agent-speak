@@ -43,6 +43,10 @@ impl Board {
 
     pub fn retain_sessions(&mut self, alive: impl Fn(&str) -> bool) {
         self.items.retain(|i| alive(&i.session));
+        // закрытый агент не ответит: итоги не ждут его ANSWER_WAIT
+        if self.asked.as_ref().is_some_and(|(s, _)| !alive(s)) {
+            self.asked = None;
+        }
     }
 
     pub fn retain_classes(&mut self, keep: &[Class]) {
@@ -168,6 +172,16 @@ mod tests {
         assert_eq!(b.take(10).unwrap(), "Q?");
         b.answered("q");
         assert_eq!(b.take(11), None);
+    }
+
+    #[test]
+    fn gone_session_frees_answer_wait() {
+        let mut b = Board::default();
+        b.push(n("q", Class::Question, "Q?", 1));
+        b.push(n("d", Class::Final, "D готов.", 1));
+        assert_eq!(b.take(10).unwrap(), "Q?");
+        b.retain_sessions(|s| s != "q");               // спросивший агент закрыт — ответа не будет
+        assert_eq!(b.take(11).unwrap(), "D готов.");
     }
 
     #[test]

@@ -434,6 +434,18 @@ impl Registry {
         self.event(id, "final", &shown(text), State::Done, Some(first_sentence(&plain(text))), now)
     }
 
+    /// Пересказ Омы — строка «что сейчас» в окне; в ленту не пишется: там дословный текст агента.
+    pub fn summary(&mut self, id: &str, text: &str) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.id == id) else { return false };
+        e.status = text.to_string();
+        true
+    }
+
+    /// Последний промпт пользователя из ленты; нет — пусто.
+    pub fn last_prompt(&self, id: &str) -> String {
+        self.get(id).and_then(|e| e.feed.iter().rev().find(|l| l.kind == "prompt")).map(|l| l.text.clone()).unwrap_or_default()
+    }
+
     /// done старше IDLE_AFTER → idle. true — что-то изменилось.
     pub fn tick(&mut self, now: u64) -> bool {
         let mut changed = false;
@@ -659,6 +671,30 @@ mod tests {
         assert_eq!((a.feed.len(), a.feed.front().unwrap().text.as_str()), (FEED_MAX, "статус 5"));
         r.status("a", &"я".repeat(LINE_MAX + 100), 30);
         assert_eq!(r.get("a").unwrap().feed.back().unwrap().text.chars().count(), LINE_MAX);
+    }
+
+    #[test]
+    fn summary_sets_status_without_feed_line() {
+        let mut r = Registry::new();
+        r.sync(vec![live("a", true)], 0);
+        r.status("a", "Правлю орб.", 1);
+        let n = r.get("a").unwrap().feed.len();
+        assert!(r.summary("a", "Орб почти готов."));
+        let a = r.get("a").unwrap();
+        assert_eq!((a.status.as_str(), a.feed.len(), a.state), ("Орб почти готов.", n, State::Working));
+        assert!(!r.summary("чужой", "текст"));
+    }
+
+    #[test]
+    fn last_prompt_is_latest_prompt_line() {
+        let mut r = Registry::new();
+        r.sync(vec![live("a", true)], 0);
+        assert_eq!(r.last_prompt("a"), "");
+        r.prompt("a", "сделай орб", 1);
+        r.prompt("a", "и пузыри", 2);
+        r.status("a", "Делаю.", 3);
+        assert_eq!(r.last_prompt("a"), "и пузыри");
+        assert_eq!(r.last_prompt("чужой"), "");
     }
 
     #[test]

@@ -1,14 +1,14 @@
-//! Очередь фраз: образец голоса впереди всех, срочные — за ним, остальное по порядку.
-//! Пока Ома думает или говорит, срочное ждёт; на паузе играет только образец.
+//! Очередь фраз: образец голоса впереди всех, остальное по порядку.
+//! Пока Ома думает или говорит, новости ждут; на паузе играет только образец.
 
 use std::collections::VecDeque;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
-    Urgent,  // вопрос агента: вперёд остальных, но за Омой
     Read,    // ручное чтение (read)
     Preview, // образец голоса: один в очереди, впереди всех, играет и на паузе
     Voice,   // голосовой разговор
+    News,    // новости агентов голосом Омы: в свою очередь, за Омой
 }
 
 #[derive(Clone, Debug)]
@@ -21,7 +21,7 @@ pub struct Item {
 pub struct Queue {
     items: VecDeque<Item>,
     paused: bool,
-    hold: bool, // Ома думает или говорит: срочное ждёт
+    hold: bool, // Ома думает или говорит: новости ждут
 }
 
 impl Queue {
@@ -33,9 +33,6 @@ impl Queue {
         if item.kind == Kind::Preview {
             self.items.retain(|i| i.kind != Kind::Preview);
             self.items.push_front(item);
-        } else if item.kind == Kind::Urgent {
-            let pos = self.items.iter().take_while(|i| i.kind == Kind::Urgent).count();
-            self.items.insert(pos, item);
         } else {
             self.items.push_back(item);
         }
@@ -54,9 +51,9 @@ impl Queue {
         self.hold
     }
 
-    /// Играет ли фраза сейчас: на удержании срочное ждёт Ому.
+    /// Играет ли фраза сейчас: на удержании новость ждёт Ому.
     fn playable(&self, i: &Item) -> bool {
-        !(self.hold && i.kind == Kind::Urgent)
+        !(self.hold && i.kind == Kind::News)
     }
 
     /// Прерванная фраза встаёт за образцом голоса: образец играет первым (на паузе — иначе он застрянет).
@@ -95,7 +92,7 @@ impl Queue {
         self.items.clear();
     }
 
-    /// Ому перебили: её ответ не нужен; срочное, чтение и образец ждут своей очереди.
+    /// Ому перебили: её ответ не нужен; новости, чтение и образец ждут своей очереди.
     pub fn hush(&mut self) {
         self.items.retain(|i| i.kind != Kind::Voice);
     }
@@ -119,36 +116,36 @@ mod tests {
     }
 
     #[test]
-    fn hold_keeps_urgent_until_released() {
+    fn hold_keeps_news_until_released() {
         let mut q = Queue::new();
-        q.push(it("срочно", Kind::Urgent));
+        q.push(it("новость", Kind::News));
         q.push(it("ответ", Kind::Voice));
         q.set_hold(true);
         assert_eq!(q.pop().unwrap().text, "ответ");
         assert!(q.pop().is_none() && !q.ready());
         q.set_hold(false);
-        assert_eq!(q.pop().unwrap().text, "срочно");
+        assert_eq!(q.pop().unwrap().text, "новость");
     }
 
     #[test]
-    fn hush_drops_oma_keeps_urgent_and_read() {
+    fn hush_drops_oma_keeps_news_and_read() {
         let mut q = Queue::new();
-        q.set_hold(true); // Ома говорит: срочное ждёт
+        q.set_hold(true); // Ома говорит: новость ждёт
         q.push(it("чтение", Kind::Read));
-        q.push(it("срочно", Kind::Urgent));
+        q.push(it("новость", Kind::News));
         q.push(it("ответ дальше", Kind::Voice));
         q.hush();
         q.set_hold(false);
-        assert_eq!(all(&mut q), vec!["срочно", "чтение"]);
+        assert_eq!(all(&mut q), vec!["чтение", "новость"]);
     }
 
     #[test]
-    fn urgent_goes_first_in_order() {
+    fn news_keeps_its_place_behind_voice() {
         let mut q = Queue::new();
-        q.push(it("a", Kind::Read));
-        q.push(it("u1", Kind::Urgent));
-        q.push(it("u2", Kind::Urgent));
-        assert_eq!(all(&mut q), vec!["u1", "u2", "a"]);
+        q.push(it("ответ", Kind::Voice));
+        q.push(it("новость", Kind::News));
+        q.push(it("ещё ответ", Kind::Voice));
+        assert_eq!(all(&mut q), vec!["ответ", "новость", "ещё ответ"]);
     }
 
     #[test]
@@ -156,9 +153,9 @@ mod tests {
         let mut q = Queue::new();
         q.push(it("r", Kind::Read));
         q.push(it("p1", Kind::Preview));
-        q.push(it("u", Kind::Urgent));
+        q.push(it("n", Kind::News));
         q.push(it("p2", Kind::Preview));
-        assert_eq!(all(&mut q), vec!["p2", "u", "r"]);
+        assert_eq!(all(&mut q), vec!["p2", "r", "n"]);
     }
 
     #[test]
