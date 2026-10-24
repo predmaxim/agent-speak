@@ -529,20 +529,22 @@ git commit -m "Ома вводит в курс по возвращении: пр
 **Files:**
 - Create: `~/omarchy-dotfiles/home/.config/omarchy/plugins/predmaxim.presence/manifest.json` (`kinds: ["service"]`, `entryPoints.service: "Service.qml"`), `Service.qml`, `logic.js`, `test.js`, `README.md`
 - Modify: `~/.config/omarchy/shell.json` (запись `{"id": "predmaxim.presence"}` в `plugins[]`, как у перерывов), установка ссылки — как у других плагинов из `home/` (по `rules.md`)
+- Modify (worktree agent-speak): `src/presence.rs` — поле `Facts.media` → `video` (решено с пользователем: «занят» — только видео, музыка — нет), тесты и вызовы в `src/daemon.rs`; отдельный коммит в worktree
 
 **Interfaces:**
 - Consumes: запись задачи 1 (`isPlaying` или `playbackState`, `FileView.atomicWrites`).
-- Produces: файл `$XDG_RUNTIME_DIR/predmaxim-presence.json` — `{"at", "idle_since", "locked", "mic", "camera", "media", "buds"}` (смысл полей — спека, «Сигналы»); `logic.js`:
+- Produces: файл `$XDG_RUNTIME_DIR/predmaxim-presence.json` — `{"at", "idle_since", "locked", "mic", "camera", "video", "buds"}` (смысл полей — спека, «Сигналы»); `logic.js`:
   ```js
   function micBusy(nodes)                // как у перерывов + без node.name "oma-ear"
   function anyPlaying(players)           // хоть один isPlaying
+  function video(playing, rawIdle, idle) // играет и держится запрет на сон: rawIdle заснул, idle (с запретами) — нет
   function onBuds(sinkName)              // имя выхода начинается с "bluez_output."
   function budsState(onBuds, sensor)     // sensor true/false/null → "in" | "out" | "unknown"; не на наушниках → "unknown"
   function snapshot(f)                   // объект фактов → строка JSON с полями ровно в порядке выше
   function changed(prev, next)           // отличается ли что-нибудь, кроме at
   ```
 
-`Service.qml`: `IdleMonitor { timeout: 5; respectInhibitors: false }` — `idle_since = isIdle ? now − 5 : 0`; `Mpris.players.values` → `media`; `Pipewire.nodes.values` (+`PwObjectTracker`) → `mic`; `Pipewire.defaultAudioSink.name` → `onBuds`; `Process` раз в 5 с: `omarchy-hyprland-session-locked` (код 0 — `locked`) и камера (`fuser /dev/video*`, как `prober` у перерывов); запись `FileView { atomicWrites: true }` при `changed` и раз в 30 с. Время в снимке — эпоха в секундах.
+`Service.qml`: `IdleMonitor { timeout: 5; respectInhibitors: false }` — `idle_since = isIdle ? now − 5 : 0`; `Mpris.players.values` → `anyPlaying`; второй `IdleMonitor { timeout: 5; respectInhibitors: true }` → `video(anyPlaying, raw.isIdle, inhibited.isIdle)`; `Pipewire.nodes.values` (+`PwObjectTracker`) → `mic`; `Pipewire.defaultAudioSink.name` → `onBuds`; `Process` раз в 5 с: `omarchy-hyprland-session-locked` (код 0 — `locked`) и камера (`fuser /dev/video*`, как `prober` у перерывов); запись `FileView { atomicWrites: true }` при `changed` и раз в 30 с. Время в снимке — эпоха в секундах.
 
 - [ ] **Step 1: Write the failing tests** (`test.js`)
 
@@ -554,10 +556,11 @@ assert.strictEqual(L.anyPlaying([{ isPlaying: false }, { isPlaying: true }]), tr
 assert.strictEqual(L.onBuds("bluez_output.00_11_22_33_44_55.1"), true)
 assert.strictEqual(L.onBuds("alsa_output.pci-0000_00_1f.3.analog-stereo"), false)
 assert.deepStrictEqual([L.budsState(true, true), L.budsState(true, false), L.budsState(true, null), L.budsState(false, true)], ["in", "out", "unknown", "unknown"])
-assert.strictEqual(L.snapshot({ at: 1, idle_since: 0, locked: false, mic: false, camera: false, media: true, buds: "in" }),
-  '{"at":1,"idle_since":0,"locked":false,"mic":false,"camera":false,"media":true,"buds":"in"}')
-assert.strictEqual(L.changed({ at: 1, media: false }, { at: 2, media: false }), false)
-assert.strictEqual(L.changed({ at: 1, media: false }, { at: 2, media: true }), true)
+assert.deepStrictEqual([L.video(true, true, false), L.video(true, true, true), L.video(false, true, false), L.video(true, false, false)], [true, false, false, false])
+assert.strictEqual(L.snapshot({ at: 1, idle_since: 0, locked: false, mic: false, camera: false, video: true, buds: "in" }),
+  '{"at":1,"idle_since":0,"locked":false,"mic":false,"camera":false,"video":true,"buds":"in"}')
+assert.strictEqual(L.changed({ at: 1, video: false }, { at: 2, video: false }), false)
+assert.strictEqual(L.changed({ at: 1, video: false }, { at: 2, video: true }), true)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -724,7 +727,7 @@ git commit -m "мозг Омы: «не сейчас», «я отойду», «р
 Run: `cargo test && cargo build --release 2>&1 | grep -c warning; node plugin/test.js; ~/.local/share/agent-speak/voice-venv/bin/python -m pytest python/test_agent_voice.py -q`
 Expected: всё PASS; `0`.
 
-- [ ] **Step 2: Установить** `./install.sh` (как в прошлых планах), `omarchy-shell restart`. Ожидаемо: `systemctl --user is-active agent-speak` → `active`; в журнале демона через минуту есть принятые `input`/`media`/`signals` без ошибок разбора.
+- [ ] **Step 2: Установить** `./install.sh` (как в прошлых планах), `omarchy-shell restart`. Ожидаемо: `systemctl --user is-active agent-speak` → `active`; в журнале демона нет ошибок разбора снимка присутствия.
 
 - [ ] **Step 3: Живая проверка с пользователем** — у него «Следить за агентами» выключено: попросить включить. По каждому пункту — что услышал пользователь:
   1. 2 мин не трогать ноутбук, агент заканчивает ход → «Ты тут? Есть новости.»; «да» → итог.
