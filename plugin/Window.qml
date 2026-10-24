@@ -146,6 +146,7 @@ Item {
 
   function showPage(p) {
     if (p === "history") root.send({ do: "chats" })
+    settingsView.contentY = 0
     root.page = p
     root.cursor = -1
     root.onHead = false
@@ -199,7 +200,21 @@ Item {
     } else return false
     var view = root.page === "main" ? agentList : root.page === "history" ? chatsView : null
     if (view && root.cursor >= 0) view.positionViewAtIndex(root.cursor, ListView.Contain)
+    if (root.page === "settings" && root.cursor >= 0) root.showSettingRow(root.cursor)
     return true
+  }
+
+  // The settings row `row` fully in view (its header too for the first one).
+  function showSettingRow(row) {
+    var kids = settingsPage.children
+    for (var i = 0; i < kids.length; i++) {
+      if (kids[i].row !== row) continue
+      var top = row === 0 ? 0 : kids[i].y, bottom = kids[i].y + kids[i].height
+      var maxY = Math.max(0, settingsView.contentHeight - settingsView.height)
+      if (top < settingsView.contentY) settingsView.contentY = top
+      else if (bottom > settingsView.contentY + settingsView.height) settingsView.contentY = Math.min(maxY, bottom - settingsView.height)
+      return
+    }
   }
 
   // Enter or a click: the header button, the agent's chat, the chat from
@@ -750,152 +765,159 @@ Item {
           // ---- Settings page: rows in Model.SETTINGS_ROWS order. The
           //      controls are the value's picture and the mouse's target;
           //      the keys stay with the catcher (rules.md §9).
-          Column {
-            id: settingsPage
+          // The rows outgrow the card: they scroll, and the key cursor keeps its row in view.
+          Flickable {
+            id: settingsView
             visible: root.page === "settings"
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.top: parent.top
-            spacing: Style.spacing.xs
+            anchors.fill: parent
+            clip: true
+            contentHeight: settingsPage.implicitHeight
+            boundsBehavior: Flickable.StopAtBounds
 
-            SettingRow {
-              row: 0
-              label: root.settingsSecs[0].caption
-              caps: true
-              Dropdown {
-                id: speakerBox
-                options: root.settingsSecs[0].options
-                value: root.speech.speaker
+            Column {
+              id: settingsPage
+              width: settingsView.width
+              spacing: Style.spacing.xs
+
+              SettingRow {
+                row: 0
+                label: root.settingsSecs[0].caption
+                caps: true
+                Dropdown {
+                  id: speakerBox
+                  options: root.settingsSecs[0].options
+                  value: root.speech.speaker
+                  foreground: root.fg
+                  fontFamily: root.font
+                  // A pick sets the dropdown's own value; the binding comes back for the daemon's answer.
+                  onChanged: function(v) { root.choose("speaker", v, true); value = Qt.binding(function() { return root.speech.speaker }) }
+                  onPopupOpenChanged: if (!popupOpen) root.refocus()
+                }
+              }
+
+              SettingRow {
+                row: 1
+                label: root.settingsSecs[1].caption
+                caps: true
+                Dropdown {
+                  id: rateBox
+                  options: root.settingsSecs[1].options
+                  value: root.speech.rate
+                  foreground: root.fg
+                  fontFamily: root.font
+                  onChanged: function(v) { root.choose("rate", v, true); value = Qt.binding(function() { return root.speech.rate }) }
+                  onPopupOpenChanged: if (!popupOpen) root.refocus()
+                }
+              }
+
+              PanelSectionHeader {
+                leftPadding: Style.spacing.rowPaddingX
+                topPadding: Style.space(14)
+                bottomPadding: Style.space(4)
+                text: root.tr("Quiet mode").toUpperCase()
                 foreground: root.fg
                 fontFamily: root.font
-                // A pick sets the dropdown's own value; the binding comes back for the daemon's answer.
-                onChanged: function(v) { root.choose("speaker", v, true); value = Qt.binding(function() { return root.speech.speaker }) }
-                onPopupOpenChanged: if (!popupOpen) root.refocus()
+                fontSize: Style.font.body
+                font.letterSpacing: 1.2
               }
-            }
 
-            SettingRow {
-              row: 1
-              label: root.settingsSecs[1].caption
-              caps: true
-              Dropdown {
-                id: rateBox
-                options: root.settingsSecs[1].options
-                value: root.speech.rate
+              SettingRow {
+                row: 2
+                label: root.tr("Quiet now")
+                ToggleSwitch {
+                  checked: root.speech.quiet === true
+                  foreground: root.fg
+                  onToggled: root.step("quiet_now", 1)
+                }
+              }
+
+              SettingRow {
+                row: 3
+                label: root.tr("On schedule")
+                ToggleSwitch {
+                  checked: root.speech.quiet_schedule === true
+                  foreground: root.fg
+                  onToggled: root.step("quiet_schedule", 1)
+                }
+              }
+
+              SettingRow {
+                row: 4
+                label: root.tr("From / to")
+                Dropdown {
+                  id: fromBox
+                  width: Style.space(100)
+                  options: Model.HOURS
+                  value: root.speech.quiet_from
+                  hasCursor: !root.onHead && root.cursor === 4 && root.hoursCol === 0
+                  foreground: root.fg
+                  fontFamily: root.font
+                  onChanged: function(v) { root.choose("quiet_from", v, false); value = Qt.binding(function() { return root.speech.quiet_from }) }
+                  onPopupOpenChanged: if (!popupOpen) root.refocus()
+                }
+                Dropdown {
+                  id: toBox
+                  width: Style.space(100)
+                  options: Model.HOURS
+                  value: root.speech.quiet_to
+                  hasCursor: !root.onHead && root.cursor === 4 && root.hoursCol === 1
+                  foreground: root.fg
+                  fontFamily: root.font
+                  onChanged: function(v) { root.choose("quiet_to", v, false); value = Qt.binding(function() { return root.speech.quiet_to }) }
+                  onPopupOpenChanged: if (!popupOpen) root.refocus()
+                }
+              }
+
+              PanelSectionHeader {
+                leftPadding: Style.spacing.rowPaddingX
+                topPadding: Style.space(14)
+                bottomPadding: Style.space(4)
+                text: root.tr("Orb").toUpperCase()
                 foreground: root.fg
                 fontFamily: root.font
-                onChanged: function(v) { root.choose("rate", v, true); value = Qt.binding(function() { return root.speech.rate }) }
-                onPopupOpenChanged: if (!popupOpen) root.refocus()
+                fontSize: Style.font.body
+                font.letterSpacing: 1.2
               }
-            }
 
-            PanelSectionHeader {
-              leftPadding: Style.spacing.rowPaddingX
-              topPadding: Style.space(14)
-              bottomPadding: Style.space(4)
-              text: root.tr("Quiet mode").toUpperCase()
-              foreground: root.fg
-              fontFamily: root.font
-              fontSize: Style.font.body
-              font.letterSpacing: 1.2
-            }
-
-            SettingRow {
-              row: 2
-              label: root.tr("Quiet now")
-              ToggleSwitch {
-                checked: root.speech.quiet === true
-                foreground: root.fg
-                onToggled: root.step("quiet_now", 1)
+              SettingRow {
+                row: 5
+                label: root.tr("Over fullscreen windows")
+                ToggleSwitch {
+                  checked: root.speech.orb_over_fullscreen === true
+                  foreground: root.fg
+                  onToggled: root.step("orb_over_fullscreen", 1)
+                }
               }
-            }
 
-            SettingRow {
-              row: 3
-              label: root.tr("On schedule")
-              ToggleSwitch {
-                checked: root.speech.quiet_schedule === true
-                foreground: root.fg
-                onToggled: root.step("quiet_schedule", 1)
-              }
-            }
-
-            SettingRow {
-              row: 4
-              label: root.tr("From / to")
-              Dropdown {
-                id: fromBox
-                width: Style.space(100)
-                options: Model.HOURS
-                value: root.speech.quiet_from
-                hasCursor: !root.onHead && root.cursor === 4 && root.hoursCol === 0
+              PanelSectionHeader {
+                leftPadding: Style.spacing.rowPaddingX
+                topPadding: Style.space(14)
+                bottomPadding: Style.space(4)
+                text: root.tr("Agents").toUpperCase()
                 foreground: root.fg
                 fontFamily: root.font
-                onChanged: function(v) { root.choose("quiet_from", v, false); value = Qt.binding(function() { return root.speech.quiet_from }) }
-                onPopupOpenChanged: if (!popupOpen) root.refocus()
+                fontSize: Style.font.body
+                font.letterSpacing: 1.2
               }
-              Dropdown {
-                id: toBox
-                width: Style.space(100)
-                options: Model.HOURS
-                value: root.speech.quiet_to
-                hasCursor: !root.onHead && root.cursor === 4 && root.hoursCol === 1
-                foreground: root.fg
-                fontFamily: root.font
-                onChanged: function(v) { root.choose("quiet_to", v, false); value = Qt.binding(function() { return root.speech.quiet_to }) }
-                onPopupOpenChanged: if (!popupOpen) root.refocus()
+
+              SettingRow {
+                row: 6
+                label: root.tr("Watch agents")
+                ToggleSwitch {
+                  checked: root.speech.agents_voice === true
+                  foreground: root.fg
+                  onToggled: root.step("agents_voice", 1)
+                }
               }
-            }
 
-            PanelSectionHeader {
-              leftPadding: Style.spacing.rowPaddingX
-              topPadding: Style.space(14)
-              bottomPadding: Style.space(4)
-              text: root.tr("Orb").toUpperCase()
-              foreground: root.fg
-              fontFamily: root.font
-              fontSize: Style.font.body
-              font.letterSpacing: 1.2
-            }
-
-            SettingRow {
-              row: 5
-              label: root.tr("Over fullscreen windows")
-              ToggleSwitch {
-                checked: root.speech.orb_over_fullscreen === true
-                foreground: root.fg
-                onToggled: root.step("orb_over_fullscreen", 1)
-              }
-            }
-
-            PanelSectionHeader {
-              leftPadding: Style.spacing.rowPaddingX
-              topPadding: Style.space(14)
-              bottomPadding: Style.space(4)
-              text: root.tr("Agents").toUpperCase()
-              foreground: root.fg
-              fontFamily: root.font
-              fontSize: Style.font.body
-              font.letterSpacing: 1.2
-            }
-
-            SettingRow {
-              row: 6
-              label: root.tr("Watch agents")
-              ToggleSwitch {
-                checked: root.speech.agents_voice === true
-                foreground: root.fg
-                onToggled: root.step("agents_voice", 1)
-              }
-            }
-
-            SettingRow {
-              row: 7
-              label: root.tr("Retell progress")
-              ToggleSwitch {
-                checked: root.speech.progress_digest === true
-                foreground: root.fg
-                onToggled: root.step("progress_digest", 1)
+              SettingRow {
+                row: 7
+                label: root.tr("Retell progress")
+                ToggleSwitch {
+                  checked: root.speech.progress_digest === true
+                  foreground: root.fg
+                  onToggled: root.step("progress_digest", 1)
+                }
               }
             }
           }
