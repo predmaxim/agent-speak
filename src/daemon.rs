@@ -6,7 +6,7 @@ use crate::config::{hhmm, in_window, Config};
 use crate::digest::{self, Ask, Digest, Job};
 use crate::focus::{self, Agent, SessionRef};
 use crate::ipc::{self, Msg};
-use crate::news::{Board, Class, News};
+use crate::news::{Board, Class, News, SUMMARY};
 use crate::notice::notify as notice;
 use crate::presence::{self, Mode, Presence};
 use crate::queue::{Item, Kind, Queue};
@@ -54,6 +54,9 @@ const ARE_YOU_THERE: &str = "Ты тут? Есть новости.";
 
 /// Первая фраза после долгого отсутствия, перед обзором доски.
 const WELCOME: &str = "С возвращением.";
+
+/// Итогов на доске к возвращению больше — их сжимает одна сводка модели, а не склейка подряд.
+const SUMMARY_OVER: usize = 3;
 
 /// Символов промпта пользователя в задании пересказа — хвост: длинный промпт не упрётся в предел argv `claude -p`.
 const CONTEXT_MAX: usize = 1000;
@@ -579,6 +582,14 @@ impl State {
         if !self.cfg.agents_voice {
             return; // пересказ начат до выключения слежки
         }
+        if d.ask == Ask::Summary {
+            // сводка возвращения — от Омы, не от агента: в реестре её нет; звучит итогом и без important
+            self.bubble(SUMMARY, &format!("final-{SUMMARY}"), "Ома", &d.say, "final");
+            if !self.quiet() {
+                self.board.push(News { session: d.session, class: Class::Final, say: d.say, born: (self.now_secs)() });
+            }
+            return;
+        }
         let Some(e) = self.registry.get(&d.session) else { return };
         // устарел, пока шёл пересказ: ход кончился (промежуточное звучало бы поверх итога)
         // или на вопрос уже ответили (промпт, разрешение в терминале, конец хода)
@@ -593,19 +604,17 @@ impl State {
         let who = e.title.clone();
         self.registry.summary(&d.session, &d.say);
         let kind = match d.ask {
-            Ask::Final => Some("final"),
+            Ask::Final | Ask::Summary => Some("final"),
             Ask::Question => Some("question"),
             Ask::Progress => d.important.then_some("status"),
-            Ask::Summary => None, // задача 7
         };
         if let Some(kind) = kind {
             self.bubble(&d.session, &format!("{kind}-{}", d.session), &who, &d.say, kind);
         }
         let class = match d.ask {
             Ask::Question => Some(Class::Question),
-            Ask::Final => Some(Class::Final),
+            Ask::Final | Ask::Summary => Some(Class::Final),
             Ask::Progress => d.important.then_some(Class::Progress),
-            Ask::Summary => None, // задача 7
         };
         if let Some(class) = class.filter(|_| !self.quiet()) {
             if class == Class::Question {
@@ -644,6 +653,11 @@ impl State {
                 }
                 parts.push(WELCOME.to_string());
                 parts.extend(self.board.overview());
+                if self.board.finals() > SUMMARY_OVER {
+                    let lines: Vec<String> = self.board.take_finals().into_iter().map(|n| n.say).collect();
+                    let job = Job { session: SUMMARY.into(), project: String::new(), ask: Ask::Summary, text: lines.join("\n"), context: String::new(), fallback: Some(lines.join(" ")) };
+                    let _ = self.digest.send(job);
+                }
             }
             parts.extend(self.board.take(now, focused.as_deref(), self.presence.sure()));
             if parts.is_empty() {
@@ -2536,5 +2550,49 @@ mod tests {
         snap(&mut st, serde_json::json!({"at": 1400, "idle_since": 0}));
         st.tick();
         assert_eq!(texts(&st), GREETING);
+    }
+
+    /// Четыре итога, пока пользователя не было, и он вернулся: приветствие с обзором, итоги ушли на сводку.
+    fn back_to_four_finals() -> (State, mpsc::Receiver<Job>) {
+        let mut st = test_state();
+        let ids = ["a", "b", "c", "d"];
+        with_agents(&mut st, &ids);
+        let now = secs_at(&mut st, 1600);
+        let rx = jobs(&mut st);
+        snap(&mut st, serde_json::json!({"at": 1600, "idle_since": 1000}));
+        for (id, say) in ids.iter().zip(["Фича готова.", "Тесты зелёные.", "Баг найден.", "Сборка прошла."]) {
+            st.on_digest(dg(id, Ask::Final, false, say));
+        }
+        st.tick();
+        assert!(texts(&st).is_empty());
+        *now.lock().unwrap() = 1700;
+        snap(&mut st, serde_json::json!({"at": 1700, "idle_since": 0}));
+        st.tick();
+        assert_eq!(texts(&st), ["С возвращением.", "Пока тебя не было: четыре проекта закончили."]);
+        (st, rx)
+    }
+
+    #[test]
+    fn long_absence_summarizes_finals_once() {
+        let (mut st, rx) = back_to_four_finals();
+        let job = rx.try_recv().unwrap();
+        assert_eq!((job.session.as_str(), job.ask, job.text.lines().count()), (SUMMARY, Ask::Summary, 4));
+        st.tick();
+        assert!(rx.try_recv().is_err() && texts(&st).is_empty(), "сводка — одна, итоги не звучат по отдельности");
+        let mut r = sub(&mut st);
+        st.on_digest(Digest { session: job.session, project: job.project, ask: Ask::Summary, important: true, say: "Четыре проекта готовы.".into() });
+        let b = bubbles(&mut r);
+        assert_eq!((b.len(), b[0]["who"].as_str(), b[0]["kind"].as_str()), (1, Some("Ома"), Some("final")));
+        st.tick();
+        assert_eq!(texts(&st), ["Четыре проекта готовы."]);
+    }
+
+    #[test]
+    fn summary_without_model_speaks_finals() {
+        let (mut st, rx) = back_to_four_finals();
+        let d = digest::digest(rx.try_recv().unwrap(), |_| None).unwrap(); // модель не ответила — склейка, important false
+        st.on_digest(d);
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова.", "плуг: Тесты зелёные.", "плуг: Баг найден.", "плуг: Сборка прошла."]);
     }
 }

@@ -167,12 +167,10 @@ impl Board {
         if parts.is_empty() { None } else { Some(format!("Пока тебя не было: {}.", parts.join(", "))) }
     }
 
-    #[allow(dead_code)] // daemon подключит в следующих задачах
     pub fn finals(&self) -> usize {
         self.items.iter().filter(|i| i.class == Class::Final).count()
     }
 
-    #[allow(dead_code)] // daemon подключит в следующих задачах
     pub fn take_finals(&mut self) -> Vec<News> {
         self.drain(Class::Final)
     }
