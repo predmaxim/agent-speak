@@ -80,7 +80,7 @@ def foreign_capture(outputs: list, own: set) -> bool:
     own = {str(x) for x in own}
     for o in outputs:
         p = o.get("properties", {})
-        if o.get("corked") or p.get("stream.monitor") == "true" or p.get("node.name") == OWN_NODE:
+        if o.get("corked") or "true" in (p.get("stream.monitor"), p.get("stream.capture.sink")) or p.get("node.name") == OWN_NODE:
             continue
         if p.get("node.virtual") != "true" and p.get("application.process.id") not in own:
             return True

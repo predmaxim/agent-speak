@@ -391,6 +391,8 @@ def test_foreign_capture_skips_corked():
 def test_foreign_capture_skips_monitor_streams():
     # cava, OBS и т. п. пишут звук рабочего стола (монитор выхода), а не микрофон
     assert not foreign_capture([{"properties": {"application.process.id": "7", "stream.monitor": "true"}}], set())
+    # клиенты Pulse API (parec -d <выход>.monitor) приходят с stream.capture.sink, без stream.monitor
+    assert not foreign_capture([{"properties": {"application.process.id": "7", "stream.capture.sink": "true"}}], set())
 
 
 def test_on_ac_usb_counts(tmp_path):
