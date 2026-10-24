@@ -14,6 +14,9 @@ ln -sfn "$PWD/systemd/agent-speakd.service" ~/.config/systemd/user/agent-speakd.
 # Плагин Omarchy — панель Омы (орб и окно); включается: omarchy plugin enable predmaxim.agent-speak
 mkdir -p ~/.config/omarchy/plugins
 ln -sfn "$PWD/plugin" ~/.config/omarchy/plugins/predmaxim.agent-speak
+# «Ома» в меню приложений: включает службу и открывает окно
+mkdir -p ~/.local/share/applications
+sed -e "s|@BIN@|$HOME/.local/bin/agent-speak|" -e "s|@ICON@|$PWD/data/oma.svg|" data/oma.desktop >~/.local/share/applications/oma.desktop
 
 # Silero: venv и модель, если ещё нет
 if ! "$DATA/venv/bin/python" -c 'import torch, numpy, scipy' 2>/dev/null; then

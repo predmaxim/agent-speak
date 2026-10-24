@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Oma
+Name[ru]=Ома
+Comment=Voice deputy over AI agents
+Comment[ru]=Голосовая помощница и прораб ИИ-агентов
+Exec=sh -c '@BIN@ on && omarchy-shell predmaxim.oma show'
+Icon=@ICON@
+Terminal=false
+Categories=Utility;
+Keywords=oma;agent;voice;ома;агенты;голос;
