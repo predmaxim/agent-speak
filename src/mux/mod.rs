@@ -36,8 +36,9 @@ pub trait Mux: Sync {
 /// Вызов CLI мультиплексора дольше этого — завис: поток действий не встаёт.
 const CLI_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Порядок — вложенность: herdr бывает запущен в терминале Orca, и тогда внутренний (herdr) — терминал агента.
 pub fn adapters() -> [&'static dyn Mux; 2] {
-    [&orca::Orca, &herdr::Herdr]
+    [&herdr::Herdr, &orca::Orca]
 }
 
 /// Окружение живого процесса; нет процесса или прав — пусто.
@@ -168,11 +169,21 @@ mod tests {
 
     #[test]
     fn locate_picks_the_adapter_that_knows_the_env() {
-        assert_eq!(adapters().map(|m| m.name()), ["orca", "herdr"]);
+        assert_eq!(adapters().map(|m| m.name()), ["herdr", "orca"]);
         // этот процесс тестов — не в мультиплексоре, если тесты гоняют не из Orca/herdr
         let env = environ(std::process::id());
         let expect = adapters().iter().find_map(|m| m.locate(&env));
         assert_eq!(locate(std::process::id()), expect);
+    }
+
+    #[test]
+    fn herdr_inside_orca_wins() {
+        // herdr, запущенный в терминале Orca, передаёт панелям ORCA_*: писать надо в панель herdr, а не в Orca
+        let env = HashMap::from([
+            ("ORCA_TERMINAL_HANDLE".to_string(), "term_1".to_string()), ("ORCA_CLI_BIN_DIR".into(), "/x".into()),
+            ("HERDR_PANE_ID".into(), "w1:p1".into()), ("HERDR_SOCKET_PATH".into(), "/s.sock".into()),
+        ]);
+        assert_eq!(adapters().iter().find_map(|m| m.locate(&env)).unwrap().mux, "herdr");
     }
 
     #[test]
