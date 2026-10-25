@@ -102,15 +102,17 @@ def buds_out(snapshot: str, now: float) -> bool:
 
 
 def pick_mic(source: str, sink: str, sources: str, out: bool) -> tuple:
-    """Вход для слуха Омы и есть ли в нём её голос: (имя, echo). Сырой микрофон ноутбука, как у voxtype: шумодав
+    """Вход для слуха Омы, есть ли в нём её голос и вход с эхоподавлением на время её речи: (имя, echo, aec). Сырой микрофон ноутбука, как у voxtype: шумодав
     (mic_denoise) под вентиляторами вырезает слова, эхоподавление webrtc (mic_aec) их портит — whisper слышит «Играет
     музыка» вместо речи. Говорит в динамики (наушников нет или вынуты, out) — её голос в микрофоне, echo: эхо отсекает
-    разговор по тексту. Гарнитура в ушах — её микрофон: "" — вход по умолчанию."""
+    разговор по тексту, а пока она говорит, слух берёт mic_aec: её голос там вырезан, и перебив слышно.
+    Гарнитура в ушах — её микрофон: "" — вход по умолчанию."""
     if source.startswith("bluez_") and not out:
-        return "", False
+        return "", False, ""
     speakers = out or not sink.startswith("bluez_")
     names = [p[1] for p in (l.split("\t") for l in sources.splitlines()) if len(p) > 1]
-    return next((n for n in names if n.startswith("alsa_input.")), ""), speakers
+    aec = "mic_aec" if speakers and "mic_aec" in names else ""
+    return next((n for n in names if n.startswith("alsa_input.")), ""), speakers, aec
 
 
 def mic_target(run=subprocess.run, out=None) -> tuple:
@@ -126,7 +128,7 @@ def mic_target(run=subprocess.run, out=None) -> tuple:
         q = lambda *a: run(["pactl", *a], capture_output=True, text=True, timeout=2).stdout
         return pick_mic(q("get-default-source").strip(), q("get-default-sink").strip(), q("list", "short", "sources"), out)
     except Exception:
-        return "", bool(out)
+        return "", bool(out), ""
 
 
 def locked() -> bool:

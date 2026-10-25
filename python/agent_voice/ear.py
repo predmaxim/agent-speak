@@ -102,6 +102,8 @@ class Ear:
         self.audio = {}  # номер речи → её звук, пока Ома его не забрала
         self.echo = False  # слух на входе с эхоподавлением: Ома говорит в динамики
         self.speakers = None  # True — Ома говорит в динамики, хоть наушники и «в ушах»; None — по сервису присутствия
+        self.speaking = False  # звучит её голос: в динамиках слух берёт кадры входа с эхоподавлением
+        self._aec = None       # второй pw-record — mic_aec, только когда она говорит в динамики
         self._proc = self._vad = self._tasks = None
 
     @property
@@ -128,27 +130,30 @@ class Ear:
             await self._load_vad()
             # shortcut: микрофон выбирается при включении слуха; наушники вынули посреди разговора — слух на прежнем до следующего включения
             got = await asyncio.to_thread(self._mic) if self.speakers is None else await asyncio.to_thread(lambda: self._mic(out=self.speakers))
-            target, self.echo = got if isinstance(got, tuple) else (got, False)  # подделки в тестах отдают только имя
-            print(f"agent_voice: слух: вход {target or 'по умолчанию'}", file=sys.stderr, flush=True)
-            cmd = rec_cmd(self.cmd, target)
-            proc = self._proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
+            target, self.echo, aec = (tuple(got) + (False, ""))[:3] if isinstance(got, tuple) else (got, False, "")
+            print(f"agent_voice: слух: вход {target or 'по умолчанию'}{', пока говорит — ' + aec if aec else ''}",
+                  file=sys.stderr, flush=True)
+            proc = self._proc = await asyncio.create_subprocess_exec(*rec_cmd(self.cmd, target), stdout=asyncio.subprocess.PIPE)
+            self._aec = await asyncio.create_subprocess_exec(*rec_cmd(self.cmd, aec), stdout=asyncio.subprocess.PIPE) if aec else None
             phrases = asyncio.Queue()
             self._tasks = [asyncio.create_task(self._recognize(phrases)),
-                           asyncio.create_task(self._read(proc, phrases))]
+                           asyncio.create_task(self._read(proc, phrases, self._aec))]
 
     async def stop(self):
         async with self._lock:
             await self._close()
 
     async def _close(self):
-        proc, tasks, self._proc, self._tasks = self._proc, self._tasks, None, None
+        proc, aec, tasks, self._proc, self._aec, self._tasks = self._proc, self._aec, self._tasks, None, None, None
         if proc is None:
             return
         for t in tasks:
             t.cancel()
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        await asyncio.gather(*tasks, proc.wait(), return_exceptions=True)
+        procs = [p for p in (proc, aec) if p is not None]
+        for p in procs:
+            with contextlib.suppress(ProcessLookupError):
+                p.kill()
+        await asyncio.gather(*tasks, *(p.wait() for p in procs), return_exceptions=True)
 
     def cut(self):
         """Ома смолкла, а речь ещё идёт: начало фразы — без её голоса (Segmenter.cut)."""
@@ -169,12 +174,16 @@ class Ear:
                 await self.out.put(("error", f"recognize: {e!r}"))  # слух продолжает работать
                 await self.out.put(("phrase", "", n))  # речь закрыта: иначе Conversation.hearing застрянет
 
-    async def _read(self, proc, phrases):
+    async def _read(self, proc, phrases, aec=None):
         import torch
         seg = Segmenter()
         try:
             while True:
                 b = await proc.stdout.readexactly(FRAME * 2)
+                if aec is not None:  # читаем оба всё время — иначе отстающий поток копит задержку
+                    a = await aec.stdout.readexactly(FRAME * 2)
+                    if self.speaking:
+                        b = a
                 if self.paused:
                     seg = Segmenter()
                     continue
@@ -196,7 +205,9 @@ class Ear:
         await self.out.put(("error", reason))
         if self._proc is proc:
             self._tasks[0].cancel()
-            self._proc = self._tasks = None
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
-            await proc.wait()
+            self._proc = self._tasks = self._aec = None
+            for p in (proc, aec):
+                if p is not None:
+                    with contextlib.suppress(ProcessLookupError):
+                        p.kill()
+                    await p.wait()

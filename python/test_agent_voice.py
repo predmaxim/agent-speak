@@ -1113,14 +1113,14 @@ def test_mic_picks_clear_input_by_where_oma_speaks():
     raw, buds = "alsa_input.pci-0000_00_1f.3.analog-stereo", "bluez_output.00_11_22_33_44_55.1"
     # сырой микрофон ноутбука, как у voxtype: шумодав режет слова, эхоподавление webrtc их портит (docs/recognition.md)
     # Ома в наушниках — эха нет
-    assert pick_mic("mic_denoise", buds, srcs, out=False) == (raw, False)
+    assert pick_mic("mic_denoise", buds, srcs, out=False) == (raw, False, "")
     # Ома в динамиках — тоже сырой, но её голос в нём есть: echo — эхо отсекает разговор по тексту
-    assert pick_mic("mic_denoise", "alsa_output.pci-x", srcs, out=False) == (raw, True)
+    assert pick_mic("mic_denoise", "alsa_output.pci-x", srcs, out=False) == (raw, True, "mic_aec")
     # наушники на столе — Ома в динамиках, даже если вход по умолчанию — гарнитура
-    assert pick_mic("bluez_input.00_11_22_33_44_55.0", buds, srcs, out=True) == (raw, True)
+    assert pick_mic("bluez_input.00_11_22_33_44_55.0", buds, srcs, out=True) == (raw, True, "mic_aec")
     # гарнитура в ушах — её микрофон, вход по умолчанию
-    assert pick_mic("bluez_input.00_11_22_33_44_55.0", buds, srcs, out=False) == ("", False)
-    assert pick_mic("x", "alsa_output.x", "", out=False) == ("", True)
+    assert pick_mic("bluez_input.00_11_22_33_44_55.0", buds, srcs, out=False) == ("", False, "")
+    assert pick_mic("x", "alsa_output.x", "", out=False) == ("", True, "")
     assert buds_out('{"at": 1000, "buds": "out"}', 1050)
     assert not buds_out('{"at": 1000, "buds": "out"}', 1091)  # снимок устарел — сервиса нет
     assert not buds_out('{"at": 1000, "buds": "in"}', 1010)
@@ -1523,8 +1523,8 @@ def test_mic_target_forced_to_speakers(monkeypatch):
         out = {"get-default-source": "bluez_input.x\n", "get-default-sink": "bluez_output.x\n",
                "list": "1\tmic_aec\tx\n2\talsa_input.pci\tx\n"}[args[1]]
         return SimpleNamespace(stdout=out)
-    assert context.mic_target(fake_run) == ("", False), "наушники в ушах — их микрофон"
-    assert context.mic_target(fake_run, out=True) == ("alsa_input.pci", True), "спросила в динамики — сырой ноутбука, её голос в нём есть"
+    assert context.mic_target(fake_run) == ("", False, ""), "наушники в ушах — их микрофон"
+    assert context.mic_target(fake_run, out=True) == ("alsa_input.pci", True, "mic_aec"), "спросила в динамики — сырой ноутбука, её голос в нём есть"
 
 
 def test_barge_in_cut_only_through_echo_canceller(monkeypatch):
@@ -1547,3 +1547,27 @@ def test_barge_in_cut_only_through_echo_canceller(monkeypatch):
 def main_TAIL():
     from agent_voice import __main__ as m
     return m.TAIL
+
+
+def test_ear_hears_echo_cancelled_stream_while_oma_speaks(monkeypatch):
+    # в динамиках: пока она говорит — кадры mic_aec (её голос вырезан, перебив слышно), молчит — сырой микрофон
+    from agent_voice import ear as earmod
+    from agent_voice.ear import Ear
+    probs = iter([0.9] * 10 + [0.1] * 22 + [0.1] * 10000)
+    vad = lambda x, rate: SimpleNamespace(item=lambda: next(probs))
+    monkeypatch.setattr(earmod, "transcribe", lambda m, pcm: "стоп")
+    script = 'if [ "$1" = mic_aec ]; then c=B; else c=A; fi; yes $c | tr -d "\\n" | head -c 65536; sleep 60'
+    out = asyncio.Queue()
+    e = Ear(out, Whisper(load=lambda: "m"), cmd=["sh", "-c", script, "sh"], vad_load=lambda: vad,
+            mic=lambda: ("", True, "mic_aec"))
+    e.speaking = True
+
+    async def go():
+        await e.start()
+        while True:
+            ev = await asyncio.wait_for(out.get(), 5)
+            if ev[0] == "phrase":
+                break
+        await e.stop()
+    run(go())
+    assert set(e.audio[1]) == {ord("B")}, "фраза — из потока без её голоса"

@@ -165,6 +165,7 @@ class Oma:
             self.emit({"chat": {"key": self.brain.key, "messages": self.history}})
             self.emit({"chats": await asyncio.to_thread(self.brain.chats)})
         elif kind == "audio":
+            self.ear.speaking = ev[1]  # её голос звучит: в динамиках слух — на входе с эхоподавлением
             # её перебили: в начале фразы — её голос из динамиков; срезать, когда доиграет хвост pw-cat.
             # В наушниках её голоса в микрофоне нет — срез съел бы начало ответа
             if not ev[1] and c.hearing and getattr(self.ear, "echo", False):
