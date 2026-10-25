@@ -1187,9 +1187,9 @@ impl State {
                     let text = question.as_ref().map_or(msg.clone(), |q| format!("вопрос: {q}"));
                     self.registry.question(&session, &text, now);
                     // модели — суть и совет агента: его текст и ввод вызова; перевод уведомления — запасная фраза
-                    let context = claude::question_context(&tail);
-                    self.registry.asking(&session, &context); // мозг Омы отвечает по тем же вариантам
-                    self.ask(&session, Ask::Question, &context, Some(msg));
+                    // мозг Омы отвечает по тем же вариантам и видит план целиком
+                    self.registry.asking(&session, &claude::question_context(&tail, claude::ASK_MAX));
+                    self.ask(&session, Ask::Question, &claude::question_context(&tail, claude::TOOL_MAX), Some(msg));
                 }
             }
             "message-display" => {

@@ -35,7 +35,8 @@ fn typed(item: usize, text: &str) -> Result<Vec<Step>, String> {
 }
 
 /// Как передать ответ агенту: вызов, который ждёт пользователя (меню), — клавишами; иначе — текстом в поле ввода.
-/// option — пункт меню (0 — свой ответ текстом); screen читается только у плана: набор его пунктов зависит от режима.
+/// option — пункт меню (0 — свой ответ текстом); screen читается у плана (набор пунктов зависит от режима)
+/// и у прочих вызовов в полёте (не ждёт ли разрешения), у вопроса с вариантами — нет.
 pub fn steps(call: Option<&Value>, text: &str, option: usize, screen: impl FnOnce() -> Result<String, String>) -> Result<Vec<Step>, String> {
     let text = text.trim();
     match call.and_then(|c| c["name"].as_str()) {
@@ -67,8 +68,18 @@ pub fn steps(call: Option<&Value>, text: &str, option: usize, screen: impl FnOnc
             }
         }
         _ if text.is_empty() => Err("пустой текст".into()),
+        // вызов в полёте может ждать разрешения: в меню Enter выбрал бы подсвеченный пункт («Yes»)
+        Some(_) if menu_on(&screen()?) => Err("агент ждёт разрешения в терминале — ответь там".into()),
         _ => Ok(vec![Step::Text(text.into())]),
     }
+}
+
+/// На экране меню Claude Code: строка с курсором «❯» на пункте с номером.
+fn menu_on(screen: &str) -> bool {
+    screen.lines().any(|l| l.trim_start().strip_prefix('❯').is_some_and(|r| {
+        let r = r.trim_start();
+        r.split_once('.').is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    }))
 }
 
 const NO_PLAN_MENU: &str = "не вижу меню одобрения плана";
@@ -158,9 +169,19 @@ mod tests {
     #[test]
     fn no_menu_is_plain_text_and_empty_is_error() {
         let bash = json!({"name": "Bash", "input": {"command": "cargo test"}});
-        assert_eq!(steps(Some(&bash), "займись тестами", 2, no_screen).unwrap(), [Step::Text("займись тестами".into())]);
+        let prompt = || Ok("✻ Running…\n❯ \n  ⏵⏵ auto mode on".to_string());
+        assert_eq!(steps(Some(&bash), "займись тестами", 2, prompt).unwrap(), [Step::Text("займись тестами".into())]);
         assert_eq!(steps(None, "займись тестами", 0, no_screen).unwrap(), [Step::Text("займись тестами".into())]);
         assert!(steps(None, " ", 0, no_screen).is_err());
+    }
+
+    #[test]
+    fn permission_menu_is_refused() {
+        // меню разрешения: Enter выбрал бы подсвеченное «Yes» — и «нет, не удаляй» запустило бы rm
+        let bash = json!({"name": "Bash", "input": {"command": "rm -rf build"}});
+        let menu = || Ok(" Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again\n   3. No".to_string());
+        assert!(steps(Some(&bash), "Нет, не удаляй", 0, menu).unwrap_err().contains("разрешения"));
+        assert!(steps(Some(&bash), "дальше", 0, no_screen).is_err(), "экран не прочитан — не пишем вслепую");
     }
 
     #[test]

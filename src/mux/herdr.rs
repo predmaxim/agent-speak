@@ -22,7 +22,7 @@ impl Mux for Herdr {
     fn send(&self, pane: &Pane, text: &str) -> Result<(), String> {
         // agent prompt учитывает bracketed paste агента; не распознал агента — текст и Enter как команда
         let prompted = cli(herdr(pane, &["agent", "prompt", &pane.id, text])).and_then(|o| ok(&o));
-        prompted.or_else(|_| cli(herdr(pane, &["pane", "run", &pane.id, text])).and_then(|o| ok(&o)))
+        prompted.or_else(|e| if as_command(&e) { cli(herdr(pane, &["pane", "run", &pane.id, text])).and_then(|o| ok(&o)) } else { Err(e) })
     }
     fn key(&self, pane: &Pane, key: &Key) -> Result<(), String> {
         ok(&cli(herdr(pane, &["pane", "send-keys", &pane.id, &key_name(key)]))?)
@@ -33,6 +33,11 @@ impl Mux for Herdr {
     fn screen(&self, pane: &Pane) -> Result<String, String> {
         cli(herdr(pane, &["pane", "read", &pane.id, "--source", "visible", "--lines", "40"]))
     }
+}
+
+/// Отказ `agent prompt` — повод послать текст командой; агент в диалоге (agent_blocked) — нет: Enter выбрал бы пункт.
+fn as_command(err: &str) -> bool {
+    !err.contains("blocked")
 }
 
 /// Имя клавиши для `pane send-keys`.
@@ -77,6 +82,12 @@ mod tests {
     fn error_reply_is_err() {
         assert!(ok(r#"{"error":{"code":"agent_not_found","message":"agent target w1:p1 not found"},"id":"x"}"#).unwrap_err().contains("not found"));
         assert_eq!(ok(r#"{"id":"x","result":{}}"#), Ok(()));
+    }
+
+    #[test]
+    fn blocked_agent_gets_no_command_fallback() {
+        assert!(!as_command("agent w1:p1 is blocked and requires interactive input"), "текст с Enter в диалог — выбор пункта");
+        assert!(as_command("agent target w1:p1 not found"), "herdr не распознал агента — команда в оболочку");
     }
 
     #[test]

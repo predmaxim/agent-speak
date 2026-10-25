@@ -131,11 +131,13 @@ pub fn last_question(content: &str) -> Option<String> {
 }
 
 /// Символов ввода инструмента в тексте вопроса: хвост пересказа (digest::MAX_INPUT) не съест текст агента.
-const TOOL_MAX: usize = 3000;
+pub const TOOL_MAX: usize = 3000;
+/// То же для мозга Омы: опасное в конце длинного плана должна видеть проверка голосового «одобряю».
+pub const ASK_MAX: usize = 20_000;
 
 /// Текст для пересказа вопроса: последний текст агента в ходе и ввод его последнего вызова —
 /// вопрос с вариантами, план, команда (у прочих инструментов — ввод как есть).
-pub fn question_context(content: &str) -> String {
+pub fn question_context(content: &str, max: usize) -> String {
     let join = |parts: &[&str], sep: &str| parts.iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(sep);
     let tool = last_call(content).map(|c| {
         let (name, i) = (c["name"].as_str().unwrap_or_default(), &c["input"]);
@@ -150,7 +152,7 @@ pub fn question_context(content: &str) -> String {
             "Bash" => join(&[&s("description"), &s("command")], ": "),
             _ => i.to_string(),
         };
-        format!("Ждёт ответа на {name}: {body}").chars().take(TOOL_MAX).collect::<String>()
+        format!("Ждёт ответа на {name}: {body}").chars().take(max).collect::<String>()
     });
     join(&[&last_turn(content).pop().unwrap_or_default(), &tool.unwrap_or_default()], "\n\n")
 }
@@ -380,15 +382,17 @@ mod tests {
         let call = |name: &str, input: serde_json::Value| serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":name,"input":input}]}}).to_string();
         let ask = call("AskUserQuestion", serde_json::json!({"questions":[{"question":"Что делаем с мёртвым кодом?","options":[
             {"label":"Удалить","description":"Рекомендую: он нигде не вызывается"},{"label":"Оставить"}]}]}));
-        let c = question_context(&[user("почисти"), said("Нашёл мёртвый код."), ask].join("\n"));
+        let c = question_context(&[user("почисти"), said("Нашёл мёртвый код."), ask].join("\n"), TOOL_MAX);
         assert_eq!(c, "Нашёл мёртвый код.\n\nЖдёт ответа на AskUserQuestion: Что делаем с мёртвым кодом? Варианты: Удалить — Рекомендую: он нигде не вызывается; Оставить");
         let plan = call("ExitPlanMode", serde_json::json!({"plan":"1. Вынести орб. 2. Тесты."}));
-        assert!(question_context(&plan).ends_with("ExitPlanMode: 1. Вынести орб. 2. Тесты."));
+        assert!(question_context(&plan, TOOL_MAX).ends_with("ExitPlanMode: 1. Вынести орб. 2. Тесты."));
         let bash = call("Bash", serde_json::json!({"command":"rm -rf build","description":"Чищу сборку"}));
-        assert!(question_context(&bash).ends_with("Bash: Чищу сборку: rm -rf build"));
+        assert!(question_context(&bash, TOOL_MAX).ends_with("Bash: Чищу сборку: rm -rf build"));
         let big = call("Write", serde_json::json!({"content":"я".repeat(TOOL_MAX * 2)}));
-        assert_eq!(question_context(&big).chars().count(), TOOL_MAX);
-        assert_eq!(question_context(""), "");
+        assert_eq!(question_context(&big, TOOL_MAX).chars().count(), TOOL_MAX);
+        assert_eq!(question_context("", TOOL_MAX), "");
+        let long = format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"ExitPlanMode","input":{{"plan":"{} git push"}}}}]}}}}"#, "шаг ".repeat(2000));
+        assert!(question_context(&long, ASK_MAX).ends_with("git push"), "проверка опасного видит план целиком");
     }
 
     fn err_line(kind: &str, side: bool) -> String {
