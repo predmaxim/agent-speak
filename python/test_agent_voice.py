@@ -772,6 +772,7 @@ def test_oma_barge_in_cuts_the_mixed_start_once_her_voice_is_gone(monkeypatch):
     monkeypatch.setattr(m, "TAIL", 0.01)
     sent, emitted = [], []
     clk, oma = _oma(sent, emitted)
+    oma.ear.echo = True  # в динамиках: её голос просачивается в микрофон
 
     async def run():
         await oma.command({"do": "talk"})
@@ -1493,3 +1494,25 @@ def test_mic_target_forced_to_speakers(monkeypatch):
         return SimpleNamespace(stdout=out)
     assert context.mic_target(fake_run) == "", "наушники в ушах — их микрофон"
     assert context.mic_target(fake_run, out=True) == "mic_aec", "спросила в динамики — эхоподавление"
+
+
+def test_barge_in_cut_only_through_echo_canceller(monkeypatch):
+    # в наушниках её голоса в микрофоне нет: начало ответа, сказанное поверх её речи, — слова пользователя
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    cuts = []
+    oma.ear.cut = lambda: cuts.append(1)
+
+    async def go():
+        await oma.command({"do": "talk"})
+        await oma.event(("audio", True))
+        await oma.event(("start", 1))
+        await oma.event(("audio", False))
+        await asyncio.sleep(main_TAIL() + 0.1)
+    run(go())
+    assert cuts == [], "без эхоподавления не режем"
+
+
+def main_TAIL():
+    from agent_voice import __main__ as m
+    return m.TAIL

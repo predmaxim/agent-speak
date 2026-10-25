@@ -30,6 +30,8 @@ pub enum Msg {
     Emit { line: serde_json::Value },
     /// Голос пользователя от Омы: here | busy («не сейчас») | away («я отойду»).
     Presence { state: String },
+    /// Окно Омы показывает чат агента (id) или нет (пусто): лента его перед глазами — новости его не вслух.
+    View { agent: String },
 }
 
 pub fn socket_path() -> PathBuf {
@@ -64,6 +66,8 @@ mod tests {
         assert!(matches!(oma, Msg::Oma { ref action } if action["do"] == "ask" && action["key"] == "new"));
         let emit = serde_json::from_str::<Msg>("{\"cmd\":\"emit\",\"line\":{\"chats\":[]}}").unwrap();
         assert!(matches!(emit, Msg::Emit { ref line } if *line == serde_json::json!({"chats": []})));
+        let view = serde_json::from_str::<Msg>("{\"cmd\":\"view\",\"agent\":\"s\"}").unwrap();
+        assert!(matches!(view, Msg::View { ref agent } if agent == "s"));
         let presence = serde_json::from_str::<Msg>("{\"cmd\":\"presence\",\"state\":\"busy\"}").unwrap();
         assert!(matches!(presence, Msg::Presence { ref state } if state == "busy"));
     }

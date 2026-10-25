@@ -52,6 +52,9 @@ enum Headset {
     Asked(bool),
 }
 
+/// «Ты тут?» в наушники слушается с начала фразы: окно длиннее на время самой фразы.
+const HERE_EARLY: u64 = 5;
+
 /// Переключение в гарнитуру дольше этого — спросить всё равно.
 const HEADSET_WAIT: u64 = 10;
 
@@ -60,6 +63,11 @@ const SCAN_EVERY: Duration = Duration::from_secs(2);
 
 /// Текст работающего агента копится столько, затем уходит на пересказ промежуточного.
 const PROGRESS_EVERY: Duration = Duration::from_secs(60);
+
+/// Агент в фокусе занимает пользователя, пока ввод был не раньше этого…
+const FOCUS_INPUT: u64 = 30;
+/// …или его последний промпт — не раньше этого: пользователь ждёт ответа и смотрит на экран.
+const FOCUS_PROMPT: u64 = 120;
 
 /// После новостей Ома слушает ответ столько секунд.
 const LISTEN_SECS: u64 = 5;
@@ -174,6 +182,7 @@ struct State {
     here_speakers: bool,        // «Ты тут?» в наушники без ответа — спросили ещё раз в динамики: выход — на них, пока не ответит
     presence_at: u64,           // время прошлого снимка присутствия — перерыв пишем в журнал
     presence_seen: String,      // прошлые факты снимка словами — смену пишем в журнал
+    viewing: String,            // чат какого агента открыт в окне Омы; пусто — никакого
     welcome: bool,              // вернулся после долгого отсутствия: следующие новости — с приветствием и обзором
     night_keep: bool,           // тишина настала, пока пользователя нет: накопленное ждёт утра
     facts_src: Box<dyn Fn() -> Option<String>>, // снимок присутствия при старте; в тестах — подделка
@@ -358,6 +367,7 @@ pub fn run() {
         here_speakers: false,
         presence_at: 0,
         presence_seen: String::new(),
+        viewing: String::new(),
         welcome: false,
         night_keep: false,
         facts_src: Box::new(move || std::fs::read_to_string(&facts).ok()),
@@ -545,8 +555,8 @@ fn bt_mode(mode: &str) -> bool {
 }
 
 /// Команда Оме открыть окно ответа; speakers — спросила в динамики: слушать ноутбуком, через эхоподавление.
-fn listen_cmd(kind: &str, said: &str, key: Option<String>, speakers: bool) -> serde_json::Value {
-    let mut cmd = serde_json::json!({"do": "listen", "secs": LISTEN_SECS, "kind": kind, "said": said});
+fn listen_cmd(kind: &str, said: &str, key: Option<String>, speakers: bool, secs: u64) -> serde_json::Value {
+    let mut cmd = serde_json::json!({"do": "listen", "secs": secs, "kind": kind, "said": said});
     if let Some(k) = key {
         cmd["key"] = k.into();
     }
@@ -854,7 +864,7 @@ impl State {
             return;
         }
         // hyprctl — только когда есть что сказать
-        let focused = if self.board.is_empty() { None } else { self.focused().map(|f| f.id) };
+        let focused = if self.board.is_empty() { None } else { self.engaged() };
         let (kind, text) = if mode == Mode::Unsure {
             if !self.board.sayable(now, focused.as_deref()) {
                 return; // «Есть новости» не врёт: после «да» прозвучит хоть что-то
@@ -896,8 +906,29 @@ impl State {
         eprintln!("agent-speak: говорю ({kind}, {mode:?}): {}", text.chars().take(200).collect::<String>());
         if self.enqueue(Agent::Claude, "news", &text, Kind::News) > 0 {
             self.oma_send(&serde_json::json!({"do": "warm"}));
-            self.listen_after = Some((kind, text));
+            if kind == "here" && matches!(self.headset, Headset::Asked(_)) {
+                // в наушниках её голоса в микрофоне нет: слушать сразу — «да» звучит, пока она договаривает
+                self.oma_send(&listen_cmd(kind, &text, None, false, LISTEN_SECS + HERE_EARLY));
+                self.here_ask = Some(now);
+            } else {
+                self.listen_after = Some((kind, text));
+            }
         }
+    }
+
+    /// Агент, которым пользователь занят, — его новости не вслух: его чат открыт в окне Омы или его вкладка в фокусе,
+    /// и пользователь печатает (ввод за FOCUS_INPUT) или ждёт его ответа (свой промпт за FOCUS_PROMPT).
+    /// Просто вкладка в фокусе — нет: может, отошёл или смотрит в телефон.
+    fn engaged(&mut self) -> Option<String> {
+        if !self.viewing.is_empty() {
+            return Some(self.viewing.clone());
+        }
+        let id = self.focused()?.id;
+        let now = (self.now_secs)();
+        let typing = now.saturating_sub(self.presence.last_input(now)) < FOCUS_INPUT;
+        let prompt = self.registry.get(&id).and_then(|e| e.feed.iter().rev().find(|l| l.kind == "prompt").map(|l| l.at));
+        let waiting = prompt.is_some_and(|at| now.saturating_sub(at) < FOCUS_PROMPT);
+        (typing || waiting).then_some(id)
     }
 
     /// Ничего не звучит и не ждёт очереди.
@@ -920,7 +951,7 @@ impl State {
             if let Some((kind, said)) = self.listen_after.take().filter(|_| !self.quiet()) {
                 // ответ на вопрос — в чат спросившего агента; на «Ты тут?» — Оме, даже пока вопрос ждёт ответа
                 let key = self.board.asked().filter(|_| kind == "question").map(|s| format!("agent:{s}"));
-                let cmd = listen_cmd(kind, &said, key, kind == "here" && self.here_speakers);
+                let cmd = listen_cmd(kind, &said, key, kind == "here" && self.here_speakers, LISTEN_SECS);
                 self.oma_send(&cmd);
                 // холодный TTS или удержанная речь не съедают время ответа; вернувшийся, пока звучало, ответ уже дал
                 if kind == "here" && self.here_ask.is_some() {
@@ -1191,6 +1222,7 @@ impl State {
                 };
                 self.on_back(back);
             }
+            Msg::View { agent } => self.viewing = agent,
             Msg::Subscribe => {} // приходит как Event::Subscribe
         }
         if changes {
@@ -1566,6 +1598,7 @@ mod tests {
             here_speakers: false,
             presence_at: 0,
             presence_seen: String::new(),
+            viewing: String::new(),
             welcome: false,
             night_keep: false,
             facts_src: Box::new(|| None), // снимка нет — как без сервиса присутствия
@@ -3024,6 +3057,7 @@ mod tests {
         st.on_bt("headset", true);
         st.tick();
         assert_eq!(texts(&st).join(" "), ARE_YOU_THERE);
+        assert!(st.listen_after.is_none(), "в наушниках слушает сразу: ответ сразу после «Эй, ты тут?» не теряется");
         st.bt_out = Box::new(|| false); // в гарнитуре наушники — не Bluetooth-вывод для второго вопроса не важно: проверяем возврат
         heard(&mut st, &env);
         *now.lock().unwrap() += HERE_WAIT;
@@ -3126,9 +3160,9 @@ mod tests {
 
     #[test]
     fn listen_command_marks_speakers() {
-        assert_eq!(listen_cmd("here", "т", None, true), serde_json::json!({"do": "listen", "secs": LISTEN_SECS, "kind": "here", "said": "т", "speakers": true}));
-        assert_eq!(listen_cmd("question", "т", Some("agent:s".into()), false)["key"], "agent:s");
-        assert!(listen_cmd("news", "т", None, false).get("speakers").is_none());
+        assert_eq!(listen_cmd("here", "т", None, true, LISTEN_SECS), serde_json::json!({"do": "listen", "secs": LISTEN_SECS, "kind": "here", "said": "т", "speakers": true}));
+        assert_eq!(listen_cmd("question", "т", Some("agent:s".into()), false, LISTEN_SECS)["key"], "agent:s");
+        assert!(listen_cmd("news", "т", None, false, LISTEN_SECS).get("speakers").is_none());
     }
 
     #[test]
@@ -3163,7 +3197,8 @@ mod tests {
     }
 
     #[test]
-    fn unsure_with_only_focused_final_asks_nothing() {
+    fn unsure_asks_even_for_focused_agent() {
+        // вкладка в фокусе, а ввода 100 с нет — он, может, отошёл: итог агента в фокусе — тоже повод спросить
         let (mut st, env) = env_state();
         with_agents(&mut st, &["s", "t"]);
         let _now = secs_at(&mut st, 1100);
@@ -3171,8 +3206,7 @@ mod tests {
         snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000}));
         final_s(&mut st);
         st.tick();
-        assert!(texts(&st).is_empty() && st.here_ask.is_none(), "сказать нечего — и «Ты тут?» не звучит");
-        assert!(!st.board.is_empty(), "его, может, нет на месте — итог агента в фокусе не снят");
+        assert_eq!(texts(&st).join(" "), ARE_YOU_THERE);
     }
 
     #[test]
@@ -3248,6 +3282,60 @@ mod tests {
         final_s(&mut st);
         st.tick();
         assert!(texts(&st).is_empty());
+    }
+
+    /// Агент s в фокусе, итог на доске; ввода не было idle секунд.
+    fn focused_final(idle: u64) -> (State, Env) {
+        let (mut st, env) = env_state();
+        with_agents(&mut st, &["s"]);
+        secs_at(&mut st, 1100);
+        *env.0.lock().unwrap() = Some(sref("s"));
+        snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1100 - idle}));
+        (st, env)
+    }
+
+    #[test]
+    fn focused_agent_news_read_when_not_engaged() {
+        // вкладка в фокусе, но вы её не трогаете — может, отошли или смотрите в телефон
+        let (mut st, _env) = focused_final(40);
+        final_s(&mut st);
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
+    }
+
+    #[test]
+    fn focused_agent_news_skipped_while_typing() {
+        let (mut st, _env) = focused_final(5);
+        final_s(&mut st);
+        st.tick();
+        assert!(texts(&st).is_empty(), "печатаете в его окне — его текст перед вами");
+    }
+
+    #[test]
+    fn focused_agent_news_skipped_while_waiting_its_reply() {
+        let (mut st, _env) = focused_final(40);
+        let now = Arc::new(Mutex::new(1050u64));
+        let n = now.clone();
+        st.now_secs = Box::new(move || *n.lock().unwrap());
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s", "prompt": "сделай фичу"}));
+        *now.lock().unwrap() = 1100;
+        final_s(&mut st);
+        st.tick();
+        assert!(texts(&st).is_empty(), "написали ему минуту назад и не ушли с вкладки — ждёте ответ, смотрите на экран");
+    }
+
+    #[test]
+    fn viewed_agent_chat_news_skipped() {
+        let (mut st, env) = focused_final(40);
+        *env.0.lock().unwrap() = None;
+        st.on_msg(Msg::View { agent: "s".into() });
+        final_s(&mut st);
+        st.tick();
+        assert!(texts(&st).is_empty(), "его чат открыт в окне Омы — лента перед вами");
+        st.on_msg(Msg::View { agent: String::new() });
+        final_s(&mut st);
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
     }
 
     #[test]

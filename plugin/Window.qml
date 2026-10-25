@@ -116,6 +116,10 @@ Item {
     if (s) root.choose(s.key, s.value, s.sample)
   }
 
+  // Tell the service which agent's feed is in front of the user.
+  function tellView(): void { if (root.link) root.link.send(Model.view(root.shown, root.chatKey)) }
+  onChatKeyChanged: tellView()
+
   function setKey(key) {
     root.chatKey = key
     if (key.indexOf("agent:") !== 0) root.generalKey = key
@@ -271,6 +275,7 @@ Item {
   // Hidden: no dropdown stays open into the next time.
   onShownChanged: {
     viewing = ""
+    tellView()
     if (!shown) {
       speakerBox.close()
       rateBox.close()

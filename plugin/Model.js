@@ -172,6 +172,11 @@ function omaCmd(action) {
   return JSON.stringify({ cmd: "oma", action: action }) + "\n"
 }
 
+// Which agent's chat the window shows (or none): Oma keeps that agent's news quiet.
+function view(shown, key) {
+  return JSON.stringify({ cmd: "view", agent: shown && key.indexOf("agent:") === 0 ? key.slice(6) : "" }) + "\n"
+}
+
 function cmd(name) {
   return JSON.stringify({ cmd: name }) + "\n"
 }
