@@ -18,6 +18,7 @@ SILENCE_END = 30   # с тишины до конца разговора
 WINDOW_END = 5     # с тишины после ответа Омы в разговоре из окна ответа
 ACKS = {"ок", "окей", "ok", "okay", "понял", "поняла", "ясно", "спасибо", "хорошо", "угу", "ага", "принято"}
 YES = {"да", "тут", "здесь", "я", "ага", "угу", "слушаю"}
+CANCEL = {"отбой", "отмена", "отмени", "стоп"}
 
 
 def words(text):
@@ -32,6 +33,11 @@ def is_ack(text):
 def is_yes(text):
     w = words(text)
     return 1 <= len(w) <= 3 and all(x in YES for x in w)
+
+
+def is_cancel(text):
+    w = words(text)
+    return 1 <= len(w) <= 3 and all(x in CANCEL for x in w)
 
 
 class Conversation:
@@ -196,6 +202,8 @@ class Conversation:
                 self.send_at = now + SEND_PAUSE
         if self.state == "listening" and not self.hearing and self.draft and self.send_at is not None and now >= self.send_at:
             text = self.draft.strip()
+            if is_cancel(text):  # «отбой» — не реплика: оборвать всё, что звучит (и чтение), и слушать дальше
+                return [("halt",)] + self.cancel()
             acts = ([("stop",)] if self.audio_busy else []) + self._drop()  # статус агента, что звучит, обрываем
             return acts + (self._window_send(text) if self.window else self._send(text))
         if self.quiet_at is not None and now >= self.quiet_at and not self.hearing and self.state in ("listening", "paused"):

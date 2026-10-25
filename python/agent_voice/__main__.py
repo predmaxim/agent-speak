@@ -201,6 +201,8 @@ class Oma:
                 await self.brain.interrupt()
             elif k == "stop":  # перебивание: финалы агентов, удержанные за Омой, демон не выбрасывает
                 self.send({"cmd": "hush"})
+            elif k == "halt":  # «отбой»: замолчать совсем — и её ответ, и чтение, и новости
+                self.send({"cmd": "stop"})
             elif k == "say":
                 self.send({"cmd": "voice", "text": a[1]})
             elif k == "show":

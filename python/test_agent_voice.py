@@ -1107,3 +1107,31 @@ def test_rec_cmd_targets_mic_before_stdout():
     from agent_voice.ear import REC_CMD, rec_cmd
     assert rec_cmd(REC_CMD, "") == REC_CMD
     assert rec_cmd(REC_CMD, "mic_denoise")[-3:] == ["--target", "mic_denoise", "-"]
+
+
+def test_prompt_demands_short_answers():
+    # «Умеешь ли ты …?» — «Да» или «Нет», без перечня умений: Ома говорит голосом, лишнее утомляет
+    from agent_voice import brain
+    assert "«Да» или «Нет»" in brain.OMA_PROMPT and "одной-тремя" not in brain.OMA_PROMPT
+
+
+def test_cancel_word_stops_everything_and_keeps_listening():
+    # «отбой»/«отмена» — не реплика мозгу: всё, что звучит (и чтение), обрывается, Ома сразу слушает дальше
+    clk, cv = _conv()
+    cv.talk()
+    cv.ask("расскажи про агентов")
+    cv.delta("Агент правит Ому. "); cv.audio(True)
+    start = cv.speech_start(1)
+    assert ("interrupt",) in start  # ход мозга обрывается уже на начале речи
+    cv.phrase("Отбой.", 1)
+    clk.t += SEND_PAUSE
+    acts = cv.tick()
+    assert ("halt",) in acts
+    assert not any(a[0] == "send" for a in acts)
+    assert cv.state == "listening" and cv.active
+
+
+def test_cancel_words_table():
+    from agent_voice.conversation import is_cancel
+    assert is_cancel("Отмена!") and is_cancel("отбой, отбой") and is_cancel("Стоп.") and is_cancel("отмени")
+    assert not is_cancel("отмена встречи в пятницу") and not is_cancel("стоп, а что там с тестами") and not is_cancel("")
