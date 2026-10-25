@@ -278,7 +278,7 @@ fn shown(text: &str) -> String {
 
 /// Служебная вставка Claude Code в виде промпта: начинается с XML-тега (`<agent-message …>`,
 /// `<task-notification>`, `<command-name>` …) или это сообщение другой сессии.
-fn technical(text: &str) -> bool {
+pub(crate) fn technical(text: &str) -> bool {
     let t = text.trim_start();
     (t.starts_with('<') && t[1..].starts_with(|c: char| c.is_ascii_lowercase())) || t.starts_with("Another Claude session sent a message")
 }

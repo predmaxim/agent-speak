@@ -141,6 +141,7 @@ struct State {
     clock: Box<dyn Fn() -> Instant>,
     subs: Vec<UnixStream>,
     projects: HashMap<String, String>, // сессия → имя папки проекта (из хуков и окна в фокусе)
+    helper_turn: HashMap<String, bool>, // ход начал отчёт помощника (true), пока пользователь в нём не писал
     oma: Oma,
     voice_cmd: Vec<String>, // запуск Омы; в тестах — заглушка
     minutes: Box<dyn Fn() -> u32>, // местное время, минуты от полуночи; в тестах — 12:00
@@ -301,6 +302,7 @@ pub fn run() {
         clock: Box::new(Instant::now),
         subs: Vec::new(),
         projects: HashMap::new(),
+        helper_turn: HashMap::new(),
         oma: Oma { state: "off".into(), ..Default::default() },
         voice_cmd: vec![
             data.join("voice-venv/bin/python").to_string_lossy().into(),
@@ -747,7 +749,7 @@ impl State {
         let stale = match d.ask {
             Ask::Progress => e.state != agents::State::Working,
             Ask::Question => e.state != agents::State::Waiting,
-            Ask::Final | Ask::Summary | Ask::Hung => false,
+            Ask::Final | Ask::Step | Ask::Summary | Ask::Hung => false,
         };
         if stale {
             return;
@@ -757,6 +759,7 @@ impl State {
         self.registry.summary(&d.session, &d.say);
         let kind = match d.ask {
             Ask::Final | Ask::Summary => Some("final"),
+            Ask::Step => d.important.then_some("final"),
             Ask::Question => Some("question"),
             Ask::Progress => d.important.then_some("status"),
             Ask::Hung => None,
@@ -767,6 +770,7 @@ impl State {
         let class = match d.ask {
             Ask::Question => Some(Class::Question),
             Ask::Final | Ask::Summary => Some(Class::Final),
+            Ask::Step => d.important.then_some(Class::Final),
             Ask::Progress => d.important.then_some(Class::Progress),
             Ask::Hung => None,
         };
@@ -1188,7 +1192,11 @@ impl State {
         }
         match kind {
             "user-prompt-submit" => {
-                self.registry.prompt(&session, p["prompt"].as_str().unwrap_or_default(), now);
+                let prompt = p["prompt"].as_str().unwrap_or_default();
+                // отчёт помощника под видом промпта: ход оркестратора с его помощниками; слово пользователя в ходе — ход его
+                let by_helper = agents::technical(prompt);
+                *self.helper_turn.entry(session.clone()).or_insert(by_helper) &= by_helper;
+                self.registry.prompt(&session, prompt, now);
                 self.board.answered(&session); // ответили в терминале — Оме спрашивать нечего
                 self.watch.prompted(&session);
                 self.registry.set_health(&session, &self.watch.health(&session));
@@ -1238,7 +1246,13 @@ impl State {
                 self.progress.remove(&session); // промежуточное покрывает итог
                 // shortcut: вопрос текстом в конце такого хода не звучит (AskUserQuestion — звучит), научить, если начнёт теряться; помощник без отчёта держит ход «работает», пока его запуск не уйдёт из хвоста 256 КБ
                 if !waiting {
-                    self.ask(&session, Ask::Final, &last, Some("готово".into()));
+                    if self.helper_turn.remove(&session).unwrap_or(false) {
+                        self.ask(&session, Ask::Step, &last, None); // переписка с помощниками звучит, только если важна
+                    } else {
+                        self.ask(&session, Ask::Final, &last, Some("готово".into()));
+                    }
+                } else {
+                    self.helper_turn.remove(&session);
                 }
                 // строка — последняя в ответе: цитата фразы посреди текста (доки, сводки) — не остановка
                 let line = last.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or_default();
@@ -1409,6 +1423,7 @@ mod tests {
             clock: Box::new(Instant::now),
             subs: Vec::new(),
             projects: HashMap::new(),
+            helper_turn: HashMap::new(),
             oma: Oma { state: "off".into(), ..Default::default() },
             voice_cmd: vec!["sh".into(), "-c".into(), "sleep 30".into(), "x".into()],
             minutes: Box::new(|| 720), // 12:00 — вне тихого расписания
@@ -2280,6 +2295,26 @@ mod tests {
         assert_eq!((job.session.as_str(), job.project.as_str()), ("s", "s"));
         stop(&mut st, "чужой", "Готово."); // не из реестра — не пересказываем
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn helper_report_turn_speaks_only_if_important() {
+        let mut st = test_state();
+        with_agents(&mut st, &["s"]);
+        let rx = jobs(&mut st);
+        let report = serde_json::json!({"session_id": "s", "prompt": "<task-notification> <task-id>a1</task-id> <status>completed</status> </task-notification>"});
+        st.on_hook("user-prompt-submit", &report);
+        stop(&mut st, "s", "Ревьювер принял ответ, исполнитель закрывает находку.");
+        let job = rx.try_recv().unwrap();
+        assert_eq!((job.ask, job.fallback), (Ask::Step, None), "ход начал отчёт помощника, а не пользователь; без модели — молчим");
+        st.on_digest(dg("s", Ask::Step, false, "Ревьювер принял ответ."));
+        assert!(st.board.is_empty(), "переписка оркестратора с помощниками — не новость");
+        st.on_digest(dg("s", Ask::Step, true, "Вся работа готова и влита."));
+        assert!(!st.board.is_empty(), "работа целиком готова — звучит");
+        st.on_hook("user-prompt-submit", &report);
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s", "prompt": "а что с тестами?"}));
+        stop(&mut st, "s", "Тесты зелёные.");
+        assert_eq!(rx.try_recv().unwrap().ask, Ask::Final, "пользователь написал посреди хода — итог его");
     }
 
     #[test]
