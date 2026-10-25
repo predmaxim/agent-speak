@@ -279,7 +279,7 @@ fn technical(text: &str) -> bool {
 }
 
 /// «2026-10-18T12:57:03.123Z» → секунды Unix (UTC).
-fn epoch(ts: &str) -> Option<u64> {
+pub(crate) fn epoch(ts: &str) -> Option<u64> {
     let n = |r: std::ops::Range<usize>| ts.get(r)?.parse::<i64>().ok();
     let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
     let (hh, mm, ss) = (n(11..13)?, n(14..16)?, n(17..19)?);

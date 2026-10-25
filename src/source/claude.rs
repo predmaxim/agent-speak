@@ -140,6 +140,53 @@ pub fn question_context(content: &str) -> String {
     join(&[&last_turn(content).pop().unwrap_or_default(), &tool.unwrap_or_default()], "\n\n")
 }
 
+/// Ошибка API в конце хода — по ней сторож решает, что делать.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ApiError {
+    pub kind: String, // поле error: rate_limit | server_error | invalid_request | authentication_failed | …
+    pub at: u64,
+    pub resets_at: Option<u64>,
+}
+
+/// Записи главной ветки: реплики пользователя и агента без сабагентов (isSidechain).
+fn main_records(content: &str) -> impl DoubleEndedIterator<Item = Value> + '_ {
+    content.lines().filter(|l| l.contains("\"type\":\"user\"") || l.contains("\"type\":\"assistant\"") || l.contains("queued_command")).filter_map(|l| {
+        let e: Value = serde_json::from_str(l).ok()?;
+        (matches!(e["type"].as_str(), Some("user" | "assistant" | "attachment")) && e["isSidechain"] != true).then_some(e)
+    })
+}
+
+/// Ход кончился ошибкой API: последняя реплика главной ветки — сообщение об ошибке (лимит, связь, вход…).
+pub fn last_api_error(content: &str) -> Option<ApiError> {
+    let e = main_records(content).rev().find(|e| e["type"] != "attachment")?;
+    if e["isApiErrorMessage"] != true {
+        return None;
+    }
+    let reset = &e["apiErrorParams"]["rate_limit_info"]["resetsAt"];
+    let resets_at = reset.as_u64().or_else(|| e["quotaLimits"]["resetsAt"].as_u64());
+    let at = e["timestamp"].as_str().and_then(crate::agents::epoch).unwrap_or(0);
+    Some(ApiError { kind: e["error"].as_str().unwrap_or("unknown").to_string(), at, resets_at })
+}
+
+/// Последний вызов инструмента главной ветки, на который ещё нет результата; граница хода сбрасывает недождавшиеся.
+pub fn in_flight(content: &str) -> Option<Value> {
+    let mut open: Vec<Value> = Vec::new();
+    for e in main_records(content) {
+        if is_turn_start(&e) {
+            open.clear();
+            continue;
+        }
+        for c in e["message"]["content"].as_array().into_iter().flatten() {
+            match c["type"].as_str() {
+                Some("tool_use") if e["type"] == "assistant" => open.push(c.clone()),
+                Some("tool_result") => open.retain(|u| u["id"] != c["tool_use_id"]),
+                _ => {}
+            }
+        }
+    }
+    open.pop()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +340,38 @@ mod tests {
         let big = call("Write", serde_json::json!({"content":"я".repeat(TOOL_MAX * 2)}));
         assert_eq!(question_context(&big).chars().count(), TOOL_MAX);
         assert_eq!(question_context(""), "");
+    }
+
+    fn err_line(kind: &str, side: bool) -> String {
+        serde_json::json!({"type":"assistant","isSidechain":side,"isApiErrorMessage":true,"error":kind,"timestamp":"2026-10-24T23:16:42.069Z",
+            "apiErrorParams":{"rate_limit_info":{"resetsAt":1791961800u64}},"message":{"content":[{"type":"text","text":"x"}]}}).to_string()
+    }
+    fn call(id: &str, name: &str) -> String {
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":name,"input":{"command":"git push"}}]}}).to_string()
+    }
+    fn result_of(id: &str) -> String {
+        serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"content":"ok"}]}}).to_string()
+    }
+
+    #[test]
+    fn api_error_only_when_last_main_record() {
+        let e = last_api_error(&err_line("rate_limit", false)).unwrap();
+        assert_eq!((e.kind.as_str(), e.resets_at, e.at), ("rate_limit", Some(1791961800), 1_792_883_802));
+        assert_eq!(last_api_error(&[err_line("server_error", false), call("a", "Bash")].join("\n")), None, "после ошибки работа пошла");
+        assert_eq!(last_api_error(&[call("a", "Bash"), err_line("rate_limit", true)].join("\n")), None, "ошибка сабагента — не конец хода");
+        let tail = [err_line("server_error", false), r#"{"type":"system","subtype":"x"}"#.to_string()].join("\n");
+        assert_eq!(last_api_error(&tail).unwrap().kind, "server_error", "служебные записи после ошибки не в счёт");
+        let quota = serde_json::json!({"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","timestamp":"2026-10-24T23:16:42Z","quotaLimits":{"resetsAt":5u64}}).to_string();
+        assert_eq!(last_api_error(&quota).unwrap().resets_at, Some(5));
+        assert_eq!(last_api_error(""), None);
+    }
+
+    #[test]
+    fn in_flight_is_unanswered_call() {
+        assert_eq!(in_flight(&[call("a", "Bash"), result_of("a")].join("\n")), None);
+        assert_eq!(in_flight(&[call("a", "Read"), result_of("a"), call("b", "Bash")].join("\n")).unwrap()["name"], "Bash");
+        let side = serde_json::json!({"type":"assistant","isSidechain":true,"message":{"content":[{"type":"tool_use","id":"s","name":"Grep","input":{}}]}}).to_string();
+        assert_eq!(in_flight(&[call("a", "Agent"), side].join("\n")).unwrap()["name"], "Agent", "вызовы сабагента — не главной ветки");
+        assert_eq!(in_flight(""), None);
     }
 }
