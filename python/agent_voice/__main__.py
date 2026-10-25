@@ -153,6 +153,9 @@ class Oma:
             acts = c.phrase(ev[1], ev[2])
             if pcm and c.draft != before:  # фраза вошла в черновик
                 self.utter.append(pcm)
+            if ev[1].strip():  # без текста: в нём бывает чужой разговор в комнате
+                verdict = "принята" if c.draft != before else ("эхо" if c._echoing() else "не принята")
+                print(f"agent_voice: слух: фраза {len(ev[1].split())} сл., {verdict}", file=sys.stderr, flush=True)
             await self.act(acts)
         elif kind == "tick":
             await self.act(c.tick())
