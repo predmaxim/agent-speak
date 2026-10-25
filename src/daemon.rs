@@ -1,11 +1,13 @@
 //! Цикл событий сервиса: команды и хуки из сокета, изменения транскриптов (inotify).
 
-use crate::agents::{self, Live, Registry};
+use crate::agents::{self, Entry, Live, Registry};
 use crate::assemble::{Assembler, MdEvent};
 use crate::config::{hhmm, in_window, Config};
 use crate::digest::{self, Ask, Digest, Job};
 use crate::focus::{self, Agent, SessionRef};
 use crate::ipc::{self, Msg};
+use crate::limits::{self, Limits};
+use crate::mux::{self, Pane};
 use crate::news::{Board, Class, News, SUMMARY};
 use crate::notice::notify as notice;
 use crate::presence::{self, Mode, Presence};
@@ -14,6 +16,7 @@ use crate::source::{claude, codex, tail::Tailer};
 use crate::speaker::{self, Shared};
 use crate::text::{prepare, terms::Terms};
 use crate::tts::Tts;
+use crate::watch::{self, Act, Ctx, Facts, Watch};
 use ::notify::{RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -35,6 +38,7 @@ enum Event {
     Tick, // раз в секунду: Ома, граница тихого расписания, состав агентов
     Digest(Digest), // пересказ хода агента от воркеров digest
     Presence(String), // новый снимок сервиса присутствия
+    Acted(mux::Done), // поток действий: исход действия сторожа в терминале агента
 }
 
 /// Как часто сверять реестр агентов с диском и /proc.
@@ -70,6 +74,12 @@ const OMA_BACKOFF: [u64; 4] = [10, 30, 60, 300];
 /// Прожила столько — падение случайное, отсрочка снова с начала.
 const OMA_STABLE: Duration = Duration::from_secs(60);
 
+/// Строк экрана терминала в вопросе модели о зависании.
+const SCREEN_LINES: usize = 25;
+
+/// Оболочки: агент, запущенный из них, Ома может поднять в том же терминале.
+const SHELLS: [&str; 5] = ["bash", "zsh", "fish", "sh", "dash"];
+
 /// Строка состояния для подписчиков (плагин панели). Порядок полей — протокол.
 #[derive(Serialize)]
 struct Status<'a> {
@@ -90,6 +100,7 @@ struct Status<'a> {
     orb_pos: &'a str,
     orb_over_fullscreen: bool,
     waiting: usize,
+    trouble: usize, // агентов со срочной нерешённой проблемой — сигнал орба
 }
 
 /// Процесс Омы (python -m agent_voice): команды — строками в stdin, события — через сокет.
@@ -147,6 +158,17 @@ struct State {
     night_keep: bool,           // тишина настала, пока пользователя нет: накопленное ждёт утра
     facts_src: Box<dyn Fn() -> Option<String>>, // снимок присутствия при старте; в тестах — подделка
     speakers: Box<dyn Fn() -> String>, // динамики ноутбука для Омы, пока наушники вынуты; в тестах — подделка
+    watch: Watch,              // сторож: здоровье агентов и что делать
+    limits: Limits,            // проценты лимитов и прогноз
+    limits_bad: bool,          // лимит кончится раньше сброса: промежуточное не пересказываем
+    act: Sender<mux::Job>,     // действия в терминалах агентов; в тестах — канал без потока
+    next_watch: Instant,
+    activity: HashMap<String, u64>, // сессия → последний хук, с
+    hints: PathBuf,                  // подсказки агентам про лимит для хука PostToolUse
+    facts_of: Box<dyn Fn(&Entry, u64) -> Facts>, // факты об агенте для сторожа; в тестах — подделка
+    screen: fn(&Pane) -> Option<String>,         // экран терминала — в отдельном потоке, CLI не держит цикл
+    shell_idle: Box<dyn Fn(u32) -> bool>,       // оболочка жива и ничего не запускает
+    trouble_sent: usize,                         // trouble последней разосланной строки состояния
 }
 
 fn home() -> PathBuf {
@@ -247,6 +269,16 @@ pub fn run() {
         eprintln!("agent-speak: не слежу за присутствием: {e}");
     }
     let facts = runtime.join(presence::FILE);
+    let (atx, arx) = mpsc::channel::<mux::Done>();
+    let act = mux::spawn(atx);
+    {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for d in arx {
+                let _ = tx.send(Event::Acted(d));
+            }
+        });
+    }
 
     let mut st = State {
         cfg,
@@ -291,6 +323,17 @@ pub fn run() {
         night_keep: false,
         facts_src: Box::new(move || std::fs::read_to_string(&facts).ok()),
         speakers: Box::new(crate::audio::speakers),
+        watch: Watch::default(),
+        limits: Limits::default(),
+        limits_bad: false,
+        act,
+        next_watch: Instant::now(),
+        activity: HashMap::new(),
+        hints: limits::hints_dir(),
+        facts_of: Box::new(agent_facts),
+        screen: |p| mux::screen(p).ok(),
+        shell_idle: Box::new(shell_idle),
+        trouble_sent: 0,
     };
     st.oma_spawn();
     if let Some(t) = (st.facts_src)() {
@@ -309,6 +352,7 @@ pub fn run() {
             }
             Event::Digest(d) => st.on_digest(d),
             Event::Presence(t) => st.on_presence(&t),
+            Event::Acted(d) => st.on_acted(d),
         }
     }
 }
@@ -331,6 +375,53 @@ fn tail_of(path: &str) -> String {
         let _ = f.read_to_end(&mut buf);
     }
     String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Факты о агенте без чтения диска: то, что знает реестр.
+fn blank_facts(e: &Entry, activity: u64) -> Facts {
+    Facts {
+        id: e.id.clone(), project: e.project.clone(), state: e.state, since: e.since, status: e.status.clone(),
+        active_at: activity, helpers: 0, call: None, error: None, pane: None, shell: None, resume: String::new(),
+    }
+}
+
+fn mtime(p: &Path) -> u64 {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
+}
+
+fn cmdline(pid: u32) -> Vec<String> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    raw.split(|&b| b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect()
+}
+
+/// Родитель агента, если это оболочка: в ней агента можно поднять снова.
+fn shell_of(pid: u32) -> Option<u32> {
+    let parent = focus::ppid(pid)?;
+    let comm = std::fs::read_to_string(format!("/proc/{parent}/comm")).ok()?;
+    SHELLS.contains(&comm.trim()).then_some(parent)
+}
+
+/// Оболочка жива и ничего не запускает — стоит на приглашении.
+fn shell_idle(pid: u32) -> bool {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else { return false };
+    tasks.flatten().all(|t| std::fs::read_to_string(t.path().join("children")).is_ok_and(|c| c.trim().is_empty()))
+}
+
+/// Факты сторожа: активность — новейшее из хуков, транскрипта и транскриптов сабагентов; у Claude — хвост транскрипта.
+fn agent_facts(e: &Entry, activity: u64) -> Facts {
+    let mut f = blank_facts(e, activity);
+    let t = Path::new(&e.transcript);
+    f.active_at = f.active_at.max(mtime(t));
+    (f.pane, f.shell) = (mux::locate(e.pid), shell_of(e.pid));
+    f.resume = watch::resume_cmd(e.agent, &e.id, &cmdline(e.pid), watch::RESUME_PROMPT);
+    if e.agent == "claude" {
+        for s in std::fs::read_dir(t.with_extension("").join("subagents")).into_iter().flatten().flatten() {
+            f.active_at = f.active_at.max(mtime(&s.path()));
+        }
+        let tail = tail_of(&e.transcript);
+        (f.helpers, f.call, f.error) = (claude::pending_background(&tail), claude::in_flight(&tail), claude::last_api_error(&tail));
+    }
+    f
 }
 
 /// Известные уведомления Claude Code по-русски. Незнакомые — как есть (транслитом):
@@ -456,6 +547,10 @@ impl State {
     /// Настройки → поток воспроизведения и очередь, затем — подписчикам.
     fn apply(&mut self) {
         *self.shared.voice.lock().unwrap() = (self.cfg.speaker.clone(), self.cfg.rate.clone());
+        if !self.cfg.agents_voice {
+            limits::clear_hints(&self.hints, |_| false); // не следим — и подсказок агентам нет
+            self.limits_bad = false;
+        }
         self.purge(); // могла включиться тишина
         self.broadcast();
     }
@@ -486,6 +581,7 @@ impl State {
             orb_pos: &self.cfg.orb_pos,
             orb_over_fullscreen: self.cfg.orb_over_fullscreen,
             waiting: self.registry.waiting(),
+            trouble: self.trouble(),
         };
         format!("{}\n", serde_json::to_string(&st).unwrap())
     }
@@ -499,9 +595,14 @@ impl State {
     }
 
     /// Состояние всем подписчикам.
+    fn trouble(&self) -> usize {
+        if self.cfg.agents_voice { self.watch.trouble() } else { 0 }
+    }
+
     fn broadcast(&mut self) {
         let line = self.status_line();
         self.waiting_sent = self.registry.waiting();
+        self.trouble_sent = self.trouble();
         self.broadcast_line(&line);
     }
 
@@ -525,7 +626,7 @@ impl State {
             self.broadcast_line(&line);
             self.agents_sent = line;
         }
-        if self.registry.waiting() != self.waiting_sent {
+        if self.registry.waiting() != self.waiting_sent || self.trouble() != self.trouble_sent {
             self.broadcast();
         }
     }
@@ -560,7 +661,8 @@ impl State {
 
     /// Текст хода — в накопленное для пересказа промежуточного; срок PROGRESS_EVERY — от первого предложения.
     fn note(&mut self, session: &str, text: &str) {
-        if !self.cfg.progress_digest || !self.cfg.agents_voice {
+        // плохой прогноз лимита — свой расход Омы тоже: промежуточное не пересказываем
+        if !self.cfg.progress_digest || !self.cfg.agents_voice || self.limits_bad {
             return;
         }
         let at = (self.clock)();
@@ -588,6 +690,10 @@ impl State {
     fn on_digest(&mut self, d: Digest) {
         if !self.cfg.agents_voice {
             return; // пересказ начат до выключения слежки
+        }
+        if d.ask == Ask::Hung {
+            self.watch.judged(&d.session, d.important, (self.now_secs)()); // вердикт сторожу, это не новость
+            return;
         }
         if d.ask == Ask::Summary {
             // сводка возвращения — от Омы, не от агента: в реестре её нет, пузырь без агента открывает чат Омы; звучит итогом и без important
@@ -644,6 +750,12 @@ impl State {
         let now = (self.now_secs)();
         let mode = self.presence.mode(now);
         if matches!(mode, Mode::Busy | Mode::Away) || (mode == Mode::Unsure && self.here_ask.is_some()) {
+            // занят — срочное сторожа всё равно звучит, без окна ответа: микрофон ему ни к чему
+            if mode == Mode::Busy {
+                if let Some(t) = self.board.take_urgent(now) {
+                    self.enqueue(Agent::Claude, "news", &t, Kind::News);
+                }
+            }
             return;
         }
         // hyprctl — только когда есть что сказать
@@ -855,6 +967,10 @@ impl State {
             self.registry.set_focused(focused.as_deref());
             self.push_agents();
         }
+        if self.cfg.agents_voice && now >= self.next_watch {
+            self.next_watch = now + Duration::from_secs(self.cfg.watch_every);
+            self.watch_tick();
+        }
         let due: Vec<String> = self.progress.iter().filter(|(_, (_, at))| now.saturating_duration_since(*at) >= PROGRESS_EVERY).map(|(s, _)| s.clone()).collect();
         for s in due {
             if let Some((text, _)) = self.progress.remove(&s) {
@@ -995,6 +1111,16 @@ impl State {
     }
 
     fn on_hook(&mut self, kind: &str, p: &serde_json::Value) {
+        if kind == "statusline" {
+            // рисуется на каждое событие и в покое — не активность агента, только проценты лимитов
+            if self.cfg.agents_voice {
+                let now = (self.now_secs)();
+                for w in limits::from_statusline(p) {
+                    self.limits.sample(w, now);
+                }
+            }
+            return;
+        }
         let session = p["session_id"].as_str().unwrap_or_default().to_string();
         if let Some(cwd) = p["cwd"].as_str().filter(|_| !session.is_empty()) {
             let name = Path::new(cwd).file_name().and_then(|n| n.to_str()).unwrap_or_default();
@@ -1010,6 +1136,9 @@ impl State {
             self.rescan();
         }
         let now = (self.now_secs)();
+        if !id.is_empty() {
+            self.activity.insert(id.to_string(), now);
+        }
         match kind {
             "user-prompt-submit" => {
                 self.registry.prompt(&session, p["prompt"].as_str().unwrap_or_default(), now);
@@ -1059,6 +1188,12 @@ impl State {
                 if !waiting {
                     self.ask(&session, Ask::Final, &last, Some("готово".into()));
                 }
+                if last.contains(limits::LIMIT_STOP) {
+                    // встал по подсказке про лимит — разбудить после сброса; сброс неизвестен — через час
+                    let until = self.limits.reset_of("claude").unwrap_or(now + 3600);
+                    self.watch.limited(&session, until);
+                    self.registry.set_health(&session, &self.watch.health(&session));
+                }
             }
             "codex-notify" => {
                 let thread = p["thread-id"].as_str().unwrap_or_default().to_string();
@@ -1086,6 +1221,11 @@ impl State {
         // сообщения — в ленту и на пересказ: дословно агенты не звучат
         let now = (self.now_secs)();
         for line in lines {
+            if self.cfg.agents_voice {
+                for w in limits::from_codex(&line) {
+                    self.limits.sample(w, now);
+                }
+            }
             let blocks = match agent {
                 Agent::Claude => claude::parse_line(&line),
                 Agent::Codex => codex::parse_line(&line),
@@ -1098,12 +1238,97 @@ impl State {
         }
         self.push_agents();
     }
+
+    /// Раз в watch_every: факты всех агентов → сторож → действия, фразы, подсказки про лимит, здоровье в окне.
+    fn watch_tick(&mut self) {
+        let now = (self.now_secs)();
+        let facts: Vec<Facts> = self.registry.entries().iter().map(|e| (self.facts_of)(e, self.activity.get(&e.id).copied().unwrap_or(0))).collect();
+        let panes: HashMap<String, Pane> = facts.iter().filter_map(|f| f.pane.clone().map(|p| (f.id.clone(), p))).collect();
+        let ctx = Ctx { now, idle: now.saturating_sub(self.presence.last_input(now)), hung_after: self.cfg.hung_after * 60, remind_after: self.cfg.remind_after * 60 };
+        let shell_idle = &self.shell_idle;
+        let acts = self.watch.check(&ctx, facts, |pid| shell_idle(pid));
+        for a in acts {
+            self.on_act(a, &panes);
+        }
+        self.hint_limits(now);
+        self.refresh_health();
+    }
+
+    fn on_act(&mut self, a: Act, panes: &HashMap<String, Pane>) {
+        match a {
+            Act::Say { session, text, urgent } => self.watch_say(&session, &text, if urgent { Class::Urgent } else { Class::Restore }),
+            Act::Remind { session, text } => self.watch_say(&session, &text, Class::Question),
+            Act::Judge { session, text } => {
+                // экран — CLI мультиплексора, до 10 с: в своём потоке, затем задание модели
+                let (digest, pane, screen) = (self.digest.clone(), panes.get(&session).cloned(), self.screen);
+                let project = self.registry.get(&session).map(|e| e.project.clone()).unwrap_or_default();
+                std::thread::spawn(move || {
+                    let text = match pane.as_ref().and_then(screen) {
+                        Some(sc) => {
+                            let lines: Vec<&str> = sc.lines().collect();
+                            format!("{text}\nЭкран:\n{}", lines[lines.len().saturating_sub(SCREEN_LINES)..].join("\n"))
+                        }
+                        None => text,
+                    };
+                    let _ = digest.send(Job { session, project, ask: Ask::Hung, text, context: String::new(), fallback: Some("нет ответа модели".into()) });
+                });
+            }
+            Act::Run(job) => {
+                let _ = self.act.send(job);
+            }
+        }
+    }
+
+    /// Фраза сторожа: пузырь всегда, вне тишины — на доску. Не агент из реестра (лимит, закрывшийся) — пузырь Омы.
+    fn watch_say(&mut self, session: &str, text: &str, class: Class) {
+        let known = self.registry.get(session).map(|e| e.title.clone());
+        let who = known.clone().unwrap_or_else(|| "Ома".into());
+        let kind = if class == Class::Question { "question" } else { "status" };
+        self.bubble(if known.is_some() { session } else { "" }, &format!("watch-{session}"), &who, text, kind);
+        if !self.quiet() {
+            self.board.push(News { session: session.into(), class, say: text.into(), born: (self.now_secs)() });
+        }
+    }
+
+    /// Исход действия в терминале: фраза пользователю и здоровье в окне.
+    fn on_acted(&mut self, d: mux::Done) {
+        if let Some(a) = self.watch.done(&d.session, d.what, d.err, (self.now_secs)()) {
+            self.on_act(a, &HashMap::new());
+        }
+        self.refresh_health();
+    }
+
+    /// Плохой прогноз — факты агентам того же аккаунта через хук; хороший — подсказки убрать.
+    fn hint_limits(&mut self, now: u64) {
+        let bad = self.limits.forecast(now, self.cfg.limit_threshold as f64);
+        self.limits_bad = !bad.is_empty();
+        let mut hinted = std::collections::HashSet::new();
+        for f in &bad {
+            let agent = f.key.split(':').next().unwrap_or_default();
+            let text = limits::hint(f);
+            for e in self.registry.entries().iter().filter(|e| e.agent == agent) {
+                limits::put_hint(&self.hints, &e.id, &text);
+                hinted.insert(e.id.clone());
+            }
+        }
+        limits::clear_hints(&self.hints, |s| hinted.contains(s));
+    }
+
+    fn refresh_health(&mut self) {
+        let ids: Vec<String> = self.registry.entries().iter().map(|e| e.id.clone()).collect();
+        for id in ids {
+            let h = self.watch.health(&id);
+            self.registry.set_health(&id, &h);
+        }
+        self.push_agents();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::text::terms::Terms;
+    use crate::watch::What;
 
     fn test_state() -> State {
         let shared = Arc::new(Shared::new(Queue::new(), "xenia".into(), "medium".into()));
@@ -1141,7 +1366,153 @@ mod tests {
             night_keep: false,
             facts_src: Box::new(|| None), // снимка нет — как без сервиса присутствия
             speakers: Box::new(|| "speakers".into()),
+            watch: Watch::default(),
+            limits: Limits::default(),
+            limits_bad: false,
+            act: mpsc::channel().0, // терминалы в тестах не трогаются
+            next_watch: Instant::now() + Duration::from_secs(86_400), // tick сторожа не зовёт: тесты зовут watch_tick сами
+            activity: HashMap::new(),
+            hints: std::env::temp_dir().join(format!("agent-speak-hints-{}-{}", std::process::id(), HINTS_N.fetch_add(1, Ordering::SeqCst))),
+            facts_of: Box::new(blank_facts),
+            screen: |_| None,
+            shell_idle: Box::new(|_| false),
+            trouble_sent: 0,
         }
+    }
+
+    static HINTS_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn acts(st: &mut State) -> mpsc::Receiver<mux::Job> {
+        let (tx, rx) = mpsc::channel();
+        st.act = tx;
+        rx
+    }
+
+    fn herdr_pane() -> Option<mux::Pane> {
+        Some(mux::Pane { mux: "herdr", id: "w1:p1".into(), via: "/s".into() })
+    }
+
+    fn statusline(st: &mut State, pct: f64, resets_at: u64) {
+        st.on_hook("statusline", &serde_json::json!({"session_id": "a", "rate_limits": {"five_hour": {"used_percentage": pct, "resets_at": resets_at}}}));
+    }
+
+    #[test]
+    fn watch_tick_runs_actions_and_speaks_outcome() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let rx = acts(&mut st);
+        st.facts_of = Box::new(|e, a| Facts { active_at: 1, call: Some(serde_json::json!({"name": "Agent", "input": {}})), pane: herdr_pane(), ..blank_facts(e, a) });
+        st.watch_tick();
+        assert_eq!(rx.try_recv().unwrap().what, What::Interrupt);
+        assert_eq!(st.registry.get("a").unwrap().health, "завис");
+        let mut r = sub(&mut st);
+        st.on_acted(mux::Done { session: "a".into(), what: What::Interrupt, err: None });
+        let b = bubbles(&mut r);
+        assert_eq!((b.len(), b[0]["agent"].as_str(), b[0]["text"].as_str()), (1, Some("a"), Some("a: сабагент завис — прервала, агент перезапустит.")));
+        assert_eq!(st.board.take(2000, None, true).unwrap(), "a: сабагент завис — прервала, агент перезапустит.");
+    }
+
+    #[test]
+    fn urgent_speaks_while_busy_not_while_away() {
+        let mut st = test_state();
+        snap(&mut st, serde_json::json!({"at": 1000, "camera": true}));
+        st.board.push(News { session: "f".into(), class: Class::Final, say: "Фича готова.".into(), born: 1 });
+        st.board.push(News { session: "u".into(), class: Class::Urgent, say: "Агент завис, посмотри сам.".into(), born: 2 });
+        st.speak_news();
+        assert_eq!(texts(&st), ["Агент завис, посмотри сам."]);
+        assert!(st.listen_after.is_none(), "занятому микрофон не открываем");
+        snap(&mut st, serde_json::json!({"at": 1000, "locked": true}));
+        st.board.push(News { session: "u".into(), class: Class::Urgent, say: "Агент снова завис.".into(), born: 3 });
+        st.speak_news();
+        assert!(texts(&st).is_empty(), "нет на месте — в пустую комнату не говорим");
+    }
+
+    #[test]
+    fn statusline_forecast_writes_hints_and_mutes_progress() {
+        let mut st = test_state();
+        st.cfg.progress_digest = true;
+        with_agents(&mut st, &["a", "b"]);
+        let now = Arc::new(Mutex::new(1000u64));
+        let n = now.clone();
+        st.now_secs = Box::new(move || *n.lock().unwrap());
+        statusline(&mut st, 93.0, 99_999);
+        *now.lock().unwrap() = 1300;
+        statusline(&mut st, 96.0, 99_999);
+        st.watch_tick();
+        let hint = std::fs::read_to_string(st.hints.join("b")).unwrap();
+        assert!(hint.contains("96%") && hint.contains("Остановился по лимиту"), "{hint}");
+        md(&mut st, "a", "Делаю экран. ");
+        assert!(st.progress.is_empty(), "плохой прогноз — промежуточное не копим");
+        *now.lock().unwrap() = 1400;
+        statusline(&mut st, 10.0, 200_000);
+        st.watch_tick();
+        assert!(!st.hints.join("b").exists() && !st.limits_bad);
+        let _ = std::fs::remove_dir_all(&st.hints);
+    }
+
+    #[test]
+    fn stop_with_limit_line_marks_limited() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let rx = jobs(&mut st);
+        statusline(&mut st, 96.0, 99_999);
+        stop(&mut st, "a", "Записал в доку, что осталось.\nОстановился по лимиту");
+        assert!(st.registry.get("a").unwrap().health.starts_with("лимит до "));
+        assert_eq!(rx.try_recv().unwrap().ask, Ask::Final, "итог по-прежнему пересказывается");
+    }
+
+    #[test]
+    fn hung_digest_goes_to_watch_not_board() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let (rx, arx) = (jobs(&mut st), acts(&mut st));
+        st.facts_of = Box::new(|e, a| Facts { active_at: 1, call: Some(serde_json::json!({"name": "Bash", "input": {"command": "cargo build"}})), pane: herdr_pane(), ..blank_facts(e, a) });
+        st.screen = |_| Some("Compiling agent-speak".into());
+        st.watch_tick();
+        let job = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!((job.ask, job.session.as_str()), (Ask::Hung, "a"));
+        assert!(job.text.contains("cargo build") && job.text.contains("Экран:\nCompiling agent-speak"), "{}", job.text);
+        st.on_digest(dg("a", Ask::Hung, true, "висит"));
+        assert!(st.board.is_empty());
+        st.watch_tick();
+        assert_eq!(arx.try_recv().unwrap().what, What::Interrupt);
+    }
+
+    #[test]
+    fn agents_voice_off_stops_watch_and_clears_hints() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let rx = acts(&mut st);
+        st.facts_of = Box::new(|e, a| Facts { active_at: 1, call: Some(serde_json::json!({"name": "Agent", "input": {}})), pane: herdr_pane(), ..blank_facts(e, a) });
+        crate::limits::put_hint(&st.hints, "a", "лимит");
+        st.cfg.agents_voice = false;
+        st.apply();
+        assert!(!st.hints.join("a").exists());
+        st.next_watch = Instant::now();
+        st.tick();
+        assert!(rx.try_recv().is_err(), "сторож выключен вместе со слежкой");
+    }
+
+    #[test]
+    fn trouble_in_status_line() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        st.facts_of = Box::new(|e, a| Facts { active_at: 1, call: Some(serde_json::json!({"name": "Bash", "input": {"command": "git push"}})), pane: herdr_pane(), ..blank_facts(e, a) });
+        let mut r = sub(&mut st);
+        st.watch_tick();
+        let lines = drain(&mut r);
+        assert!(lines.iter().any(|v| v["running"] == true && v["trouble"] == 1), "{lines:?}");
+        assert_eq!(st.board.take(2000, None, true).unwrap(), "a: агент завис посреди push — не трогаю, посмотри сам.");
+    }
+
+    #[test]
+    fn hooks_count_as_activity_statusline_not() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        statusline(&mut st, 10.0, 99_999);
+        assert!(!st.activity.contains_key("a"));
+        md(&mut st, "a", "Делаю. ");
+        assert_eq!(st.activity.get("a"), Some(&1000));
     }
 
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1212,7 +1583,7 @@ mod tests {
         let st = test_state();
         assert_eq!(
             st.status_line(),
-            "{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":true,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0}\n"
+            "{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":true,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0,\"trouble\":0}\n"
         );
     }
 

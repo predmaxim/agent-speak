@@ -22,7 +22,6 @@ pub enum What {
 #[derive(Clone, Debug)]
 pub struct Facts {
     pub id: String,
-    pub agent: &'static str,
     pub project: String,
     pub state: State,
     pub since: u64,
@@ -291,7 +290,8 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, ctx: &Ctx, f: &Facts) -> V
         };
     }
     let quiet = now.saturating_sub(f.active_at);
-    if f.state == State::Working && quiet >= ctx.hung_after {
+    // active_at 0 — ни транскрипта, ни хуков: судить о тишине не по чему
+    if f.state == State::Working && f.active_at > 0 && quiet >= ctx.hung_after {
         return hang(t, ctx, f, quiet);
     }
     if f.state == State::Waiting {
@@ -482,7 +482,7 @@ mod tests {
 
     fn f(id: &str) -> Facts {
         Facts {
-            id: id.into(), agent: "claude", project: "p".into(), state: State::Working, since: 0, status: String::new(), active_at: 0,
+            id: id.into(), project: "p".into(), state: State::Working, since: 0, status: String::new(), active_at: 1,
             helpers: 0, call: None, error: None, pane: Some(Pane { mux: "herdr", id: "w1:p1".into(), via: "/s".into() }), shell: Some(1),
             resume: "claude --resume id".into(),
         }
@@ -577,7 +577,7 @@ mod tests {
         w.judged("a", false, 805);
         assert!(w.check(&ctx(1000, 999), vec![a.clone()], |_| true).is_empty());
         assert!(matches!(&w.check(&ctx(1600, 999), vec![a.clone()], |_| true)[..], [Act::Judge { .. }]), "срок «долгой» вышел — спросить снова");
-        assert_eq!(run_of(&w.check(&ctx(3 * 720, 999), vec![a], |_| true)[0]).unwrap().what, What::Interrupt);
+        assert_eq!(run_of(&w.check(&ctx(3 * 720 + 1, 999), vec![a], |_| true)[0]).unwrap().what, What::Interrupt);
     }
 
     #[test]
@@ -593,7 +593,7 @@ mod tests {
     #[test]
     fn three_attempts_an_hour_then_gives_up() {
         let mut w = Watch::default();
-        let mut t = 0;
+        let mut t = 1;
         for i in 0..3 {
             let a = Facts { call: Some(json!({"name": "Agent", "input": {}})), active_at: t, ..f("a") };
             assert_eq!(run_of(&w.check(&ctx(t + 800, 999), vec![a], |_| true)[0]).unwrap().what, What::Interrupt, "попытка {i}");
@@ -725,6 +725,15 @@ mod tests {
         assert_eq!(resume_cmd("claude", "id1", &argv, "Продолжай."), "'/bin/sh' '--dangerously-skip-permissions' '--model' 'opus' '--effort=high' '--resume' 'id1' 'Продолжай.'");
         assert_eq!(resume_cmd("claude", "id1", &["/nonexistent/claude".into()], "x"), "'claude' '--resume' 'id1' 'x'");
         assert_eq!(resume_cmd("codex", "t1", &["codex".into(), "--yolo".into()], "Дальше. Это 'важно'"), "'codex' 'resume' 't1' '--yolo' 'Дальше. Это '\\''важно'\\'''");
+    }
+
+    #[test]
+    fn unknown_activity_is_not_hung() {
+        let mut w = Watch::default();
+        let a = Facts { active_at: 0, call: Some(json!({"name": "Agent", "input": {}})), ..f("a") };
+        let mut w2 = Watch::default();
+        assert!(!w2.check(&ctx(800, 999), vec![Facts { active_at: 1, ..a.clone() }], |_| true).is_empty());
+        assert!(w.check(&ctx(800, 999), vec![a], |_| true).is_empty(), "ни транскрипта, ни хуков — судить не по чему");
     }
 
     impl Facts {

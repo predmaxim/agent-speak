@@ -171,10 +171,6 @@ impl Board {
         if parts.is_empty() { None } else { Some(format!("Пока тебя не было: {}.", parts.join(", "))) }
     }
 
-    pub fn has_urgent(&self) -> bool {
-        self.items.iter().any(|i| i.class == Class::Urgent)
-    }
-
     /// Только срочное — пока пользователь занят; в журнал: не услышал — повторится по возвращении.
     pub fn take_urgent(&mut self, now: u64) -> Option<String> {
         let got = self.drain(Class::Urgent);
@@ -508,9 +504,8 @@ mod tests {
         let mut b = Board::default();
         b.push(n("f", Class::Final, "F.", 1));
         b.push(n("u", Class::Urgent, "U.", 2));
-        assert!(b.has_urgent());
         assert_eq!(b.take_urgent(10).unwrap(), "U.");
-        assert!(!b.has_urgent() && b.take_urgent(11).is_none());
+        assert!(b.take_urgent(11).is_none());
         assert_eq!(b.take(12, None, true).unwrap(), "F.");
         b.push(n("u", Class::Urgent, "U.", 3));
         b.take_urgent(1100);

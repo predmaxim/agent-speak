@@ -45,6 +45,9 @@ pub struct Entry {
     pub feed: VecDeque<Line>,
     #[serde(skip)]
     pub heard: bool, // хук уже говорил об этом агенте — файл сессии меняет состояние, только если он новее
+    #[serde(skip)]
+    pub pid: u32, // процесс агента: по нему сторож находит его терминал
+    pub health: String, // сторож: «завис», «лимит до 15:20»…; пусто — в порядке
 }
 
 /// Живая сессия, найденная на диске / в /proc.
@@ -345,7 +348,7 @@ impl Registry {
         for l in live {
             let transcript = l.transcript.to_string_lossy().into_owned();
             if let Some(e) = self.entries.iter_mut().find(|e| e.id == l.id) {
-                (e.title, e.project, e.cwd, e.transcript) = (l.title, folder(&l.cwd), l.cwd, transcript);
+                (e.title, e.project, e.cwd, e.transcript, e.pid) = (l.title, folder(&l.cwd), l.cwd, transcript, l.pid);
                 // после хуков файл главнее, только если обновлён позже последнего события: разрешение одобрено
                 // в терминале и Esc хуков не шлют; «простаивает» не стирает «готово»
                 let state = if l.state == State::Idle && e.state == State::Done { State::Done } else { l.state };
@@ -356,7 +359,7 @@ impl Registry {
                 changed = true;
                 self.entries.push(Entry {
                     id: l.id, agent: l.agent, title: l.title, project: folder(&l.cwd), cwd: l.cwd, transcript,
-                    state: l.state, status: String::new(), since: now, focused: false, heard: false,
+                    state: l.state, status: String::new(), since: now, focused: false, heard: false, pid: l.pid, health: String::new(),
                     // агент впервые на глазах (и после перезапуска демона): лента начинается с его истории
                     feed: if l.agent == "claude" { history(&l.transcript, &images_dir()) } else { VecDeque::new() },
                 });
@@ -372,6 +375,17 @@ impl Registry {
 
     pub fn get(&self, id: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.id == id)
+    }
+
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    /// Здоровье агента от сторожа; true — изменилось.
+    pub fn set_health(&mut self, id: &str, h: &str) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.id == id).filter(|e| e.health != h) else { return false };
+        e.health = h.to_string();
+        true
     }
 
     fn event(&mut self, id: &str, kind: &'static str, text: &str, state: State, status: Option<String>, now: u64) -> bool {
@@ -711,5 +725,18 @@ mod tests {
         assert!(v["agents"][0].get("heard").is_none());
         assert!(r.sync(vec![live("a", true)], 40) && r.get("b").is_none());
         assert!(!r.sync(vec![live("a", true)], 50));
+    }
+
+    #[test]
+    fn pid_follows_live_and_health_reaches_line() {
+        let mut r = Registry::new();
+        r.sync(vec![Live { pid: 7, ..live("a", true) }], 0);
+        assert_eq!(r.get("a").unwrap().pid, 7);
+        r.sync(vec![Live { pid: 9, ..live("a", true) }], 1); // --resume: та же сессия, новый процесс
+        assert_eq!((r.get("a").unwrap().pid, r.entries().len()), (9, 1));
+        assert!(r.set_health("a", "завис") && !r.set_health("a", "завис") && !r.set_health("чужой", "x"));
+        let v: serde_json::Value = serde_json::from_str(&r.line()).unwrap();
+        assert_eq!(v["agents"][0]["health"], "завис");
+        assert!(v["agents"][0].get("pid").is_none());
     }
 }

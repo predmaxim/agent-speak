@@ -35,7 +35,7 @@ pub fn session_of(path: &Path) -> Option<(Agent, String)> {
     }
 }
 
-fn ppid(pid: u32) -> Option<u32> {
+pub(crate) fn ppid(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
 }
