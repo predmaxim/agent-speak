@@ -97,6 +97,7 @@ class Ear:
         self._cut = False
         self.seq = 0
         self.audio = {}  # номер речи → её звук, пока Ома его не забрала
+        self.echo = False  # слух на входе с эхоподавлением: Ома говорит в динамики
         self._proc = self._vad = self._tasks = None
 
     @property
@@ -122,7 +123,9 @@ class Ear:
                 return
             await self._load_vad()
             # shortcut: микрофон выбирается при включении слуха; наушники вынули посреди разговора — слух на прежнем до следующего включения
-            cmd = rec_cmd(self.cmd, await asyncio.to_thread(self._mic))
+            target = await asyncio.to_thread(self._mic)
+            self.echo = target.startswith("mic_aec")
+            cmd = rec_cmd(self.cmd, target)
             proc = self._proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
             phrases = asyncio.Queue()
             self._tasks = [asyncio.create_task(self._recognize(phrases)),

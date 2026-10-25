@@ -1424,3 +1424,49 @@ def test_single_phrase_not_retranscribed_and_dropped_audio_forgotten():
         await oma.event(("tick",))
     run(go())
     assert heard == [] and oma.brain.texts == ["который час"] and oma.ear.audio == {}
+
+
+def _speaking_through_speakers(text):
+    clk = Clock()
+    cv = Conversation(clock=clk)
+    cv.echo = True  # Ома говорит в динамики, слух — через эхоподавление: её голос всё равно просачивается
+    cv.talk()
+    cv.ask("что ты умеешь")
+    cv.delta(text)
+    cv.done()
+    cv.audio(True)
+    return clk, cv
+
+
+def test_own_voice_through_speakers_is_not_barge_in():
+    clk, cv = _speaking_through_speakers("Могу смотреть, что делают твои агенты, и запускать новых.")
+    assert cv.speech_start(1) == [], "её же голос в микрофоне — не повод обрывать её"
+    assert cv.phrase("Могу смотреть.", 1) == [] and cv.draft == ""
+    acts = cv.audio(False)
+    clk.t += 1
+    assert cv.phrase("и запускать новых", 2) in ([], [("drop_draft",)]), "хвост её голоса после конца речи — тоже эхо"
+    clk.t += SEND_PAUSE
+    assert not any(a[0] == "send" for a in cv.tick())
+
+
+def test_real_barge_in_through_speakers_still_stops():
+    clk, cv = _speaking_through_speakers("Могу смотреть, что делают твои агенты.")
+    assert cv.speech_start(1) == []
+    acts = cv.phrase("стоп, расскажи про почту", 1)
+    assert ("stop",) in acts and cv.draft == "стоп, расскажи про почту"
+
+
+def test_oma_learns_echo_from_ear():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    oma.ear.echo = True
+    run(oma.command({"do": "talk"}))
+    assert oma.conv.echo
+
+
+def test_echo_words_table():
+    from agent_voice.conversation import is_echo
+    assert is_echo("Не совсем понимаю.", "Не совсем поняла. Ты хочешь, чтобы я посмотрела?")
+    assert is_echo("Могу смотреть.", "Могу смотреть, что делают твои агенты.")
+    assert not is_echo("расскажи про почту", "Могу смотреть, что делают твои агенты.")
+    assert not is_echo("да", "")

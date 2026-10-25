@@ -19,6 +19,8 @@ WINDOW_END = 5     # с тишины после ответа Омы в разг�
 ACKS = {"ок", "окей", "ok", "okay", "понял", "поняла", "ясно", "спасибо", "хорошо", "угу", "ага", "принято"}
 YES = {"да", "тут", "здесь", "я", "ага", "угу", "слушаю"}
 CANCEL = ("отбо", "отмен", "стоп")  # основы: whisper пишет любую форму — «отмену», «отменить», «отбою»
+ECHO_WINDOW = 3     # с после её речи: хвост её голоса из динамиков ещё в микрофоне
+ECHO_SHARE = 0.6    # доля слов фразы из её же речи, с которой фраза — эхо
 
 
 def words(text):
@@ -33,6 +35,13 @@ def is_ack(text):
 def is_yes(text):
     w = words(text)
     return 1 <= len(w) <= 3 and all(x in YES for x in w)
+
+
+def is_echo(text, said):
+    """Фраза — её же голос из динамиков: почти все слова (по основам) — из того, что она сейчас сказала.
+    whisper слышит эхо неточно («Не совсем понимаю» вместо «Не совсем поняла»), поэтому по основам, а не дословно."""
+    w, s = words(text), {x[:4] for x in words(said)}
+    return bool(w) and bool(s) and sum(x[:4] in s for x in w) / len(w) >= ECHO_SHARE
 
 
 def is_cancel(text):
@@ -55,6 +64,9 @@ class Conversation:
         self.send_at = None    # когда отправить черновик
         self.quiet_at = None   # когда закончить разговор от тишины
         self.window = None     # разговор открыт окном ответа: {kind, said, first, close}
+        self.echo = False      # слух — через эхоподавление (Ома в динамиках): её голос просачивается в микрофон
+        self.said = ""         # что она сказала в этом ответе — по нему узнаётся эхо
+        self.spoke_at = None   # когда смолк её звук
         self.voiced = False    # последняя реплика сказана голосом, не набрана: опасное по ней — только с подтверждением
 
     @property
@@ -94,7 +106,7 @@ class Conversation:
         return acts
 
     def _send(self, text, ctx="", voiced=True):
-        self.turn, self.voiced = True, voiced
+        self.turn, self.voiced, self.said = True, voiced, ""
         self.chunker.reset()
         return [("send", text, ctx)] + self._to("thinking")
 
@@ -168,8 +180,16 @@ class Conversation:
             return []
         return self._stop_turn() + self._drop() + self._send(t, voiced=False)
 
+    def _echoing(self):
+        """Её голос сейчас (или только что) звучит из динамиков, и слух его слышит."""
+        recent = self.spoke_at is not None and self.clock() - self.spoke_at < ECHO_WINDOW
+        return self.echo and bool(self.said) and (self.audio_busy or self.state == "speaking" or recent)
+
     def speech_start(self, n):
         if not self.active or self.state in ("idle", "paused"):
+            return []
+        if self._echoing() and (self.audio_busy or self.state == "speaking"):
+            self.started = n  # её голос или перебив — решит распознанный текст: обрывать её по эху нельзя
             return []
         self.started = n
         self.send_at = self.quiet_at = None
@@ -183,15 +203,21 @@ class Conversation:
 
     def phrase(self, text, n):
         self.heard = max(self.heard, n)
+        pre = []
+        if self._echoing():
+            if is_echo(text, self.said):
+                return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else []
+            if self.state == "speaking" and len(text.strip()) >= 2:
+                pre = self._stop_turn() + self._to("listening")  # не её слова — перебивает пользователь
         if n <= self.cut or self.state != "listening":
-            return []
+            return pre
         t = text.strip()
         if len(t) < 2:
             return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else [("drop_draft",)]
         self.draft = f"{self.draft} {t}".strip()
         self.send_at = self.clock() + SEND_PAUSE
         self.quiet_at = self.clock() + self.silence
-        return [("draft", self.draft, self.hearing)]
+        return pre + [("draft", self.draft, self.hearing)]
 
     def tick(self):
         now = self.clock()
@@ -217,6 +243,7 @@ class Conversation:
             acts.append(("show", s))
             if not self.quiet:
                 acts.append(("say", s))
+                self.said = f"{self.said} {s}"
         if acts and not self.quiet:
             acts += self._to("speaking")
         return acts
@@ -239,6 +266,8 @@ class Conversation:
 
     def audio(self, busy):
         self.audio_busy = busy
+        if not busy:
+            self.spoke_at = self.clock()
         if not busy and self.state == "speaking":
             return self.end() if self._closing() else self._after_sound()
         return []

@@ -206,6 +206,7 @@ class Oma:
             if k == "ear":
                 if a[1]:
                     await self.ear.start()
+                    self.conv.echo = getattr(self.ear, "echo", False)  # в динамиках её голос просачивается в слух
                     if not self.whisper.ready:  # от батареи: грузится по первому включению слуха
                         self.warm()
                 else:
