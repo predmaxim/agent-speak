@@ -1111,21 +1111,26 @@ def test_mic_picks_clear_input_by_where_oma_speaks():
     from agent_voice.context import pick_mic, buds_out
     srcs = "43\tmic_aec\tPipeWire\n46\tmic_denoise\tPipeWire\n67\talsa_input.pci-0000_00_1f.3.analog-stereo\tPipeWire\n80\tbluez_input.00_11_22_33_44_55.0\tPipeWire\n"
     raw, buds = "alsa_input.pci-0000_00_1f.3.analog-stereo", "bluez_output.00_11_22_33_44_55.1"
-    # Ома в наушниках — эха нет: сырой микрофон (шумодав съедает слова под вентиляторами)
-    assert pick_mic("mic_denoise", buds, srcs, out=False) == raw
-    # Ома в динамиках (наушников нет) — эхоподавление без шумодава
-    assert pick_mic("mic_denoise", "alsa_output.pci-x", srcs, out=False) == "mic_aec"
-    # наушники на столе — Ома в динамиках: mic_aec, даже если вход по умолчанию — гарнитура
-    assert pick_mic("bluez_input.00_11_22_33_44_55.0", buds, srcs, out=True) == "mic_aec"
+    # сырой микрофон ноутбука, как у voxtype: шумодав режет слова, эхоподавление webrtc их портит (docs/recognition.md)
+    # Ома в наушниках — эха нет
+    assert pick_mic("mic_denoise", buds, srcs, out=False) == (raw, False)
+    # Ома в динамиках — тоже сырой, но её голос в нём есть: echo — эхо отсекает разговор по тексту
+    assert pick_mic("mic_denoise", "alsa_output.pci-x", srcs, out=False) == (raw, True)
+    # наушники на столе — Ома в динамиках, даже если вход по умолчанию — гарнитура
+    assert pick_mic("bluez_input.00_11_22_33_44_55.0", buds, srcs, out=True) == (raw, True)
     # гарнитура в ушах — её микрофон, вход по умолчанию
-    assert pick_mic("bluez_input.00_11_22_33_44_55.0", buds, srcs, out=False) == ""
-    # динамики без mic_aec — сырой ноутбука; ничего нет — вход по умолчанию
-    assert pick_mic("x", "alsa_output.x", "1\talsa_input.pci-x\tPipeWire\n", out=False) == "alsa_input.pci-x"
-    assert pick_mic("x", "alsa_output.x", "", out=False) == ""
+    assert pick_mic("bluez_input.00_11_22_33_44_55.0", buds, srcs, out=False) == ("", False)
+    assert pick_mic("x", "alsa_output.x", "", out=False) == ("", True)
     assert buds_out('{"at": 1000, "buds": "out"}', 1050)
     assert not buds_out('{"at": 1000, "buds": "out"}', 1091)  # снимок устарел — сервиса нет
     assert not buds_out('{"at": 1000, "buds": "in"}', 1010)
     assert not buds_out("{", 1010)
+
+
+def test_music_caption_is_whisper_hallucination():
+    from agent_voice.ear import HALLUCINATION
+    assert HALLUCINATION.search("Играет музыка.") and HALLUCINATION.search("[музыка]")
+    assert not HALLUCINATION.search("включи музыку в наушниках")
 
 
 def test_rec_cmd_targets_mic_before_stdout():
@@ -1518,8 +1523,8 @@ def test_mic_target_forced_to_speakers(monkeypatch):
         out = {"get-default-source": "bluez_input.x\n", "get-default-sink": "bluez_output.x\n",
                "list": "1\tmic_aec\tx\n2\talsa_input.pci\tx\n"}[args[1]]
         return SimpleNamespace(stdout=out)
-    assert context.mic_target(fake_run) == "", "наушники в ушах — их микрофон"
-    assert context.mic_target(fake_run, out=True) == "mic_aec", "спросила в динамики — эхоподавление"
+    assert context.mic_target(fake_run) == ("", False), "наушники в ушах — их микрофон"
+    assert context.mic_target(fake_run, out=True) == ("alsa_input.pci", True), "спросила в динамики — сырой ноутбука, её голос в нём есть"
 
 
 def test_barge_in_cut_only_through_echo_canceller(monkeypatch):

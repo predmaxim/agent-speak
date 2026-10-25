@@ -32,7 +32,9 @@ def load_whisper():
 
 
 # Титры YouTube из обучающих данных: whisper уверенно «слышит» их в тишине и шуме, порог no_speech их не ловит.
-HALLUCINATION = re.compile(r"субтитр|dimatorzok|синецкая|продолжение следует|спасибо за просмотр|подпис\w* на( наш)? канал", re.I)
+# «Играет музыка», «[музыка]» — так whisper подписывает звук, в котором не слышит речи
+HALLUCINATION = re.compile(r"субтитр|dimatorzok|синецкая|продолжение следует|спасибо за просмотр|подпис\w* на( наш)? канал"
+                           r"|^\W*играет музыка\W*$|^\W*\[?музыка\]?\W*$", re.I)
 
 
 def transcribe(model, pcm):
@@ -125,8 +127,8 @@ class Ear:
                 return
             await self._load_vad()
             # shortcut: микрофон выбирается при включении слуха; наушники вынули посреди разговора — слух на прежнем до следующего включения
-            target = await asyncio.to_thread(self._mic) if self.speakers is None else await asyncio.to_thread(lambda: self._mic(out=self.speakers))
-            self.echo = target.startswith("mic_aec")
+            got = await asyncio.to_thread(self._mic) if self.speakers is None else await asyncio.to_thread(lambda: self._mic(out=self.speakers))
+            target, self.echo = got if isinstance(got, tuple) else (got, False)  # подделки в тестах отдают только имя
             print(f"agent_voice: слух: вход {target or 'по умолчанию'}", file=sys.stderr, flush=True)
             cmd = rec_cmd(self.cmd, target)
             proc = self._proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
