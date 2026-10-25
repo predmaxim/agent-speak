@@ -83,8 +83,8 @@ impl Board {
     }
 
     /// Фраза следующей пачки; взятое с доски снимается. skip — агент в фокусе: его итог и
-    /// промежуточное снимаются без речи, вопрос остаётся. sure — пользователь точно слышит: журнал не ведём.
-    pub fn take(&mut self, now: u64, skip: Option<&str>, sure: bool) -> Option<String> {
+    /// промежуточное снимаются без речи, вопрос остаётся. Сказанное — в журнал: не услышал — повторится после возвращения.
+    pub fn take(&mut self, now: u64, skip: Option<&str>) -> Option<String> {
         self.drop_focused(skip);
         let mut waiting = self.waiting(now);
         if !waiting {
@@ -120,10 +120,8 @@ impl Board {
         if let Some(m) = more {
             say = format!("{say} {m}"); // вопрос в пачке последний: после него ничего не берётся
         }
-        if !sure {
-            // при повторе счёт «ещё N» будет свежий
-            self.spoken.extend(taken.into_iter().map(|i| (i, now)));
-        }
+        // при повторе счёт «ещё N» будет свежий
+        self.spoken.extend(taken.into_iter().map(|i| (i, now)));
         Some(say)
     }
 
@@ -239,19 +237,15 @@ mod tests {
 
     fn n(session: &str, class: Class, say: &str, born: u64) -> News { News { session: session.into(), class, say: say.into(), born } }
 
-    fn sp(b: &mut Board, now: u64) -> Option<String> { b.take(now, None, false) }
+    fn sp(b: &mut Board, now: u64) -> Option<String> { b.take(now, None) }
 
     #[test]
-    fn take_logs_spoken_unless_sure() {
+    fn take_logs_spoken() {
         let mut b = Board::default();
-        b.push(n("s", Class::Final, "s готов.", 1));
-        b.take(10, None, true);
-        b.returned(0, true);
-        assert_eq!(b.take(100, None, true), None);
         b.push(n("s", Class::Final, "s готов.", 1));
         sp(&mut b, 1000);
         b.returned(0, true);
-        assert_eq!(b.take(2000, None, true).unwrap(), "s готов.");
+        assert_eq!(b.take(2000, None).unwrap(), "s готов.");
     }
 
     #[test]
@@ -263,8 +257,8 @@ mod tests {
         b.asked = None;
         sp(&mut b, 1050);
         b.returned(1000, true);
-        assert_eq!(b.take(5000, None, true).unwrap(), "Q?");
-        assert_eq!(b.take(5001, None, true), None);
+        assert_eq!(b.take(5000, None).unwrap(), "Q?");
+        assert_eq!(b.take(5001, None), None);
     }
 
     #[test]
@@ -273,9 +267,9 @@ mod tests {
         b.push(n("f", Class::Final, "F.", 1));
         sp(&mut b, 1100);
         b.returned(1000, false);
-        assert_eq!(b.take(2000, None, true), None);
+        assert_eq!(b.take(2000, None), None);
         b.returned(1000, true);
-        assert_eq!(b.take(2000, None, true), None);
+        assert_eq!(b.take(2000, None), None);
     }
 
     #[test]
@@ -285,8 +279,8 @@ mod tests {
         sp(&mut b, 1100);
         b.push(n("s", Class::Final, "новый", 2));
         b.returned(1000, true);
-        assert_eq!(b.take(2000, None, true).unwrap(), "новый");
-        assert_eq!(b.take(2001, None, true), None);
+        assert_eq!(b.take(2000, None).unwrap(), "новый");
+        assert_eq!(b.take(2001, None), None);
     }
 
     #[test]
@@ -296,10 +290,10 @@ mod tests {
         b.push(n("b", Class::Question, "B?", 2));
         assert_eq!(sp(&mut b, 1100).unwrap(), "A? После этого ещё один вопрос.");
         b.returned(1000, true);
-        assert_eq!(b.take(5000, None, true).unwrap(), "A? После этого ещё один вопрос."); // A вернулась, B ещё на доске
+        assert_eq!(b.take(5000, None).unwrap(), "A? После этого ещё один вопрос."); // A вернулась, B ещё на доске
         b.answered("b");
         b.unask();
-        assert_eq!(b.take(5001, None, true).unwrap(), "A?");
+        assert_eq!(b.take(5001, None).unwrap(), "A?");
     }
 
     #[test]
@@ -319,7 +313,7 @@ mod tests {
         sp(&mut b, 1100);
         b.answered("q");
         b.returned(1000, true);
-        assert_eq!(b.take(2000, None, true), None);
+        assert_eq!(b.take(2000, None), None);
     }
 
     #[test]
@@ -329,7 +323,7 @@ mod tests {
         sp(&mut b, 1100);
         b.retain_sessions(|_| false);
         b.returned(1000, true);
-        assert_eq!(b.take(2000, None, true), None);
+        assert_eq!(b.take(2000, None), None);
     }
 
     #[test]
@@ -337,7 +331,7 @@ mod tests {
         let mut b = Board::default();
         b.push(n(SUMMARY, Class::Final, "Сводка.", 1));
         b.retain_sessions(|_| false);
-        assert_eq!(b.take(10, None, true).unwrap(), "Сводка.");
+        assert_eq!(b.take(10, None).unwrap(), "Сводка.");
     }
 
     #[test]
@@ -345,9 +339,9 @@ mod tests {
         let mut b = Board::default();
         b.push(n("f", Class::Final, "F готов.", 1));
         b.push(n("f", Class::Question, "F?", 2));
-        assert_eq!(b.take(10, Some("f"), true), None);
-        assert_eq!(b.take(10, None, true).unwrap(), "F?");
-        assert_eq!(b.take(11, None, true), None);
+        assert_eq!(b.take(10, Some("f")), None);
+        assert_eq!(b.take(10, None).unwrap(), "F?");
+        assert_eq!(b.take(11, None), None);
     }
 
     #[test]
@@ -359,11 +353,11 @@ mod tests {
         b.push(n("q", Class::Question, "Q?", 2));
         b.push(n("d", Class::Final, "D готов.", 3));
         assert!(b.sayable(10, Some("f")));
-        assert_eq!(b.take(10, Some("f"), true).unwrap(), "Q?");
+        assert_eq!(b.take(10, Some("f")).unwrap(), "Q?");
         assert!(!b.sayable(11, Some("f")), "итог ждёт ответа на вопрос");
         b.push(n("r", Class::Restore, "R перезапущен.", 4));
         assert!(b.sayable(11, Some("f")));
-        b.take(11, Some("f"), true);
+        b.take(11, Some("f"));
         assert!(b.sayable(10 + ANSWER_WAIT, Some("f")));
     }
 
@@ -372,7 +366,7 @@ mod tests {
         let mut b = Board::default();
         b.push(n("f", Class::Final, "F готов.", 1));
         assert!(!b.sayable(10, Some("f")));
-        assert_eq!(b.take(10, None, true).unwrap(), "F готов.", "проверка доску не меняет");
+        assert_eq!(b.take(10, None).unwrap(), "F готов.", "проверка доску не меняет");
     }
 
     #[test]
@@ -380,10 +374,10 @@ mod tests {
         let mut b = Board::default();
         b.push(n("q", Class::Question, "Q?", 1));
         b.push(n("d", Class::Final, "D готов.", 2));
-        assert_eq!(b.take(10, None, true).unwrap(), "Q?");
+        assert_eq!(b.take(10, None).unwrap(), "Q?");
         b.unask();
         assert_eq!(b.asked(), None);
-        assert_eq!(b.take(11, None, true).unwrap(), "Q?");
+        assert_eq!(b.take(11, None).unwrap(), "Q?");
     }
 
     #[test]
@@ -410,12 +404,12 @@ mod tests {
         b.push(n("a", Class::Restore, "A: агент повис — перезапустила.", 4));
         b.push(n("b", Class::Restore, "B: сабагент повис — перезапустила.", 5));
         b.push(n("f", Class::Urgent, "F: агент завис посреди push — не трогаю, посмотри сам.", 6));
-        assert_eq!(b.take(10, None, true).unwrap(), "F: агент завис посреди push — не трогаю, посмотри сам. A: агент повис — перезапустила. B: сабагент повис — перезапустила. C: что делаем с мёртвым кодом?");
-        assert_eq!(b.take(20, None, true), None);                 // ждём ответа на вопрос
+        assert_eq!(b.take(10, None).unwrap(), "F: агент завис посреди push — не трогаю, посмотри сам. A: агент повис — перезапустила. B: сабагент повис — перезапустила. C: что делаем с мёртвым кодом?");
+        assert_eq!(b.take(20, None), None);                 // ждём ответа на вопрос
         b.answered("c");
-        assert_eq!(b.take(21, None, true).unwrap(), "D: фича готова.");
-        assert_eq!(b.take(22, None, true).unwrap(), "E: нашёл утечку."); // промежуточное — когда больше нечего
-        assert_eq!(b.take(23, None, true), None);
+        assert_eq!(b.take(21, None).unwrap(), "D: фича готова.");
+        assert_eq!(b.take(22, None).unwrap(), "E: нашёл утечку."); // промежуточное — когда больше нечего
+        assert_eq!(b.take(23, None), None);
     }
 
     #[test]
@@ -424,9 +418,9 @@ mod tests {
         b.push(n("y", Class::Question, "Y?", 2));
         b.push(n("x", Class::Question, "X?", 1));
         b.push(n("z", Class::Question, "Z?", 3));
-        assert_eq!(b.take(10, None, true).unwrap(), "X? После этого ещё 2 вопроса.");
+        assert_eq!(b.take(10, None).unwrap(), "X? После этого ещё 2 вопроса.");
         b.answered("x");
-        assert_eq!(b.take(11, None, true).unwrap(), "Y? После этого ещё один вопрос.");
+        assert_eq!(b.take(11, None).unwrap(), "Y? После этого ещё один вопрос.");
     }
 
     #[test]
@@ -434,9 +428,9 @@ mod tests {
         let mut b = Board::default();
         b.push(n("c", Class::Question, "C?", 1));
         b.push(n("d", Class::Final, "D готов.", 1));
-        assert_eq!(b.take(10, None, true).unwrap(), "C?");
-        assert_eq!(b.take(10 + ANSWER_WAIT - 1, None, true), None);
-        assert_eq!(b.take(10 + ANSWER_WAIT, None, true).unwrap(), "D готов.");
+        assert_eq!(b.take(10, None).unwrap(), "C?");
+        assert_eq!(b.take(10 + ANSWER_WAIT - 1, None), None);
+        assert_eq!(b.take(10 + ANSWER_WAIT, None).unwrap(), "D готов.");
     }
 
     #[test]
@@ -444,7 +438,7 @@ mod tests {
         let mut b = Board::default();
         b.push(n("c", Class::Question, "C?", 1));
         b.answered("c");                               // ответили в терминале раньше Омы
-        assert_eq!(b.take(10, None, true), None);
+        assert_eq!(b.take(10, None), None);
     }
 
     #[test]
@@ -452,7 +446,7 @@ mod tests {
         let mut b = Board::default();
         b.push(n("a", Class::Progress, "старое", 1));
         b.push(n("a", Class::Progress, "новое", 2));
-        assert_eq!(b.take(10, None, true).unwrap(), "новое");
+        assert_eq!(b.take(10, None).unwrap(), "новое");
     }
 
     #[test]
@@ -463,9 +457,9 @@ mod tests {
         b.push(n("q", Class::Question, "Q?", 1));
         b.retain_sessions(|s| s != "gone");
         b.retain_classes(&[Class::Restore, Class::Question]); // agents_voice выключен
-        assert_eq!(b.take(10, None, true).unwrap(), "Q?");
+        assert_eq!(b.take(10, None).unwrap(), "Q?");
         b.answered("q");
-        assert_eq!(b.take(11, None, true), None);
+        assert_eq!(b.take(11, None), None);
     }
 
     #[test]
@@ -474,9 +468,9 @@ mod tests {
         b.push(n("a", Class::Progress, "A: шаг закрыт.", 1));
         b.push(n("b", Class::Progress, "B: нашла утечку.", 1));
         b.push(n("a", Class::Final, "A: готово.", 2));
-        assert_eq!(b.take(10, None, true).unwrap(), "A: готово.");
-        assert_eq!(b.take(11, None, true).unwrap(), "B: нашла утечку."); // чужое промежуточное остаётся
-        assert_eq!(b.take(12, None, true), None);
+        assert_eq!(b.take(10, None).unwrap(), "A: готово.");
+        assert_eq!(b.take(11, None).unwrap(), "B: нашла утечку."); // чужое промежуточное остаётся
+        assert_eq!(b.take(12, None), None);
     }
 
     #[test]
@@ -484,9 +478,9 @@ mod tests {
         let mut b = Board::default();
         b.push(n("q", Class::Question, "Q?", 1));
         b.push(n("d", Class::Final, "D готов.", 1));
-        assert_eq!(b.take(10, None, true).unwrap(), "Q?");
+        assert_eq!(b.take(10, None).unwrap(), "Q?");
         b.retain_sessions(|s| s != "q");               // спросивший агент закрыт — ответа не будет
-        assert_eq!(b.take(11, None, true).unwrap(), "D готов.");
+        assert_eq!(b.take(11, None).unwrap(), "D готов.");
     }
 
     #[test]
@@ -506,7 +500,7 @@ mod tests {
         b.push(n("r", Class::Restore, "R перезапущен.", 2));
         b.push(n("u", Class::Urgent, "U завис посреди push.", 3));
         b.retain_sessions(|s| s == "q");
-        assert_eq!(b.take(10, None, true).unwrap(), "U завис посреди push. R перезапущен. Q?");
+        assert_eq!(b.take(10, None).unwrap(), "U завис посреди push. R перезапущен. Q?");
     }
 
     #[test]
@@ -516,21 +510,21 @@ mod tests {
         b.push(n("u", Class::Urgent, "U.", 2));
         assert_eq!(b.take_urgent(10).unwrap(), "U.");
         assert!(b.take_urgent(11).is_none());
-        assert_eq!(b.take(12, None, true).unwrap(), "F.");
+        assert_eq!(b.take(12, None).unwrap(), "F.");
         b.push(n("u", Class::Urgent, "U.", 3));
         b.take_urgent(1100);
         b.returned(1000, true);
-        assert_eq!(b.take(2000, None, true).unwrap(), "U.", "срочное при «занят» — в журнал: не услышал — повторится");
+        assert_eq!(b.take(2000, None).unwrap(), "U.", "срочное при «занят» — в журнал: не услышал — повторится");
     }
 
     #[test]
     fn urgent_sayable_while_waiting_for_answer() {
         let mut b = Board::default();
         b.push(n("q", Class::Question, "Q?", 1));
-        b.take(10, None, true);
+        b.take(10, None);
         b.push(n("u", Class::Urgent, "U.", 2));
         assert!(b.sayable(11, None));
-        assert_eq!(b.take(11, None, true).unwrap(), "U.");
+        assert_eq!(b.take(11, None).unwrap(), "U.");
     }
 
     #[test]
@@ -541,6 +535,6 @@ mod tests {
         b.push(n("c", Class::Restore, "C: оборвалась связь — попросила агента продолжить.", 3));
         b.push(n("d", Class::Final, "D: готово.", 4));
         b.push(n("e", Class::Final, "E: готово.", 5));
-        assert_eq!(b.take(10, None, true).unwrap(), "A, B: лимит сброшен — разбудила агента. C: оборвалась связь — попросила агента продолжить. D: готово. E: готово.");
+        assert_eq!(b.take(10, None).unwrap(), "A, B: лимит сброшен — разбудила агента. C: оборвалась связь — попросила агента продолжить. D: готово. E: готово.");
     }
 }

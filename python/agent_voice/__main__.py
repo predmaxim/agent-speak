@@ -104,6 +104,7 @@ class Oma:
     async def command(self, cmd):
         do, c = cmd.get("do"), self.conv
         if do == "talk":
+            self.ear.speakers = None  # разговор по клику — вход по тому, куда она говорит
             await self.act(c.talk())
         elif do == "cancel":
             await self.act(c.cancel())
@@ -112,6 +113,7 @@ class Oma:
         elif do == "listen":
             # экран заблокирован или микрофон держит чужой (conv.mic при закрытом слухе не знает: pid нет) — не открываем
             if not await asyncio.to_thread(locked) and not foreign_capture(await asyncio.to_thread(mic_outputs), set()):
+                self.ear.speakers = True if cmd.get("speakers") else None  # «Ты тут?» в динамики — и слушать ноутбуком
                 key = cmd.get("key")  # окно после вопроса — ответ в чат спросившего агента
                 if key and key != self.brain.key and c.state == "idle":
                     await self.switch(key)

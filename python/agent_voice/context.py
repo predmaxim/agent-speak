@@ -117,14 +117,16 @@ def pick_mic(source: str, sink: str, sources: str, out: bool) -> str:
     return ""
 
 
-def mic_target(run=subprocess.run) -> str:
-    """Куда слушать — по тому, куда Ома говорит (pick_mic); сбой — вход по умолчанию."""
+def mic_target(run=subprocess.run, out=None) -> str:
+    """Куда слушать — по тому, куда Ома говорит (pick_mic); out=True — она говорит в динамики («Ты тут?» без ответа
+    в наушники); сбой — вход по умолчанию."""
     try:
-        try:
-            with open(PRESENCE) as f:
-                out = buds_out(f.read(), time.time())
-        except OSError:
-            out = False  # сервиса присутствия нет
+        if out is None:
+            try:
+                with open(PRESENCE) as f:
+                    out = buds_out(f.read(), time.time())
+            except OSError:
+                out = False  # сервиса присутствия нет
         q = lambda *a: run(["pactl", *a], capture_output=True, text=True, timeout=2).stdout
         return pick_mic(q("get-default-source").strip(), q("get-default-sink").strip(), q("list", "short", "sources"), out)
     except Exception:

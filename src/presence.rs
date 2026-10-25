@@ -74,9 +74,6 @@ impl Presence {
         if f.mic || f.camera || f.video || self.busy_until > now {
             return Mode::Busy;
         }
-        if f.buds == Buds::In {
-            return Mode::Here;
-        }
         if self.buds_dropped {
             return Mode::Unsure;
         }
@@ -100,9 +97,11 @@ impl Presence {
         let before = self.mode_at(now, false);
         let old = self.facts.take().unwrap_or_default();
         let was_in = old.buds == Buds::In;
-        let typed = (old.idle_since != 0 && f.idle_since == 0) || (old.locked && !f.locked);
+        // вставил наушники — действие, как движение мыши; само «в ушах» — нет: так же читается наушник, лёгший на стол датчиком вниз
+        let put_in = old.buds == Buds::Out && f.buds == Buds::In; // «неизвестно → в ушах» бывает и без человека: датчик переподключился
+        let typed = (old.idle_since != 0 && f.idle_since == 0) || (old.locked && !f.locked) || put_in;
         let absence = now.saturating_sub(self.last_input);
-        if f.idle_since == 0 {
+        if f.idle_since == 0 || put_in {
             // непрерывный ввод тоже снимает away и «наушники вынуты»; typed — только для возврата
             self.input(now);
         } else {
@@ -167,9 +166,6 @@ impl Presence {
         self.facts.as_ref().map_or(Buds::Unknown, |f| f.buds)
     }
 
-    pub fn sure(&self) -> bool {
-        self.facts.as_ref().is_some_and(|f| f.buds == Buds::In)
-    }
 }
 
 #[cfg(test)]
@@ -228,13 +224,25 @@ mod tests {
     }
 
     #[test]
-    fn buds_in_beats_idle() {
+    fn buds_in_does_not_beat_idle() {
+        // датчик FreeBuds читает «в ушах» и у наушника, лёгшего на стол датчиком вниз: на «в ушах» не полагаемся
         let mut p = Presence::default();
-        let mut f = facts(1700, 1000);
+        let mut f = facts(1070, 1000);
         f.buds = Buds::In;
-        p.apply(f, 1700);
-        assert_eq!(p.mode(1700), Mode::Here);
-        assert!(p.sure());
+        p.apply(f, 1070);
+        assert_eq!(p.mode(1070), Mode::Unsure);
+    }
+
+    #[test]
+    fn putting_buds_in_counts_as_input() {
+        let mut p = Presence::default();
+        let mut f = facts(1070, 1000);
+        f.buds = Buds::Out;
+        p.apply(f.clone(), 1070);
+        assert_eq!(p.mode(1070), Mode::Unsure);
+        f.buds = Buds::In;
+        assert_eq!(p.apply(f, 1075), Some(75), "вставил наушники — он тут, как от движения мыши");
+        assert_eq!(p.mode(1075), Mode::Here);
     }
 
     #[test]
@@ -246,7 +254,6 @@ mod tests {
         f.buds = Buds::Out;
         p.apply(f, 1010);
         assert_eq!(p.mode(1010), Mode::Unsure);
-        assert!(!p.sure());
         let mut f = facts(1020, 0);
         f.buds = Buds::Out;
         p.apply(f, 1020);

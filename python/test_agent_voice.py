@@ -1470,3 +1470,26 @@ def test_echo_words_table():
     assert is_echo("Могу смотреть.", "Могу смотреть, что делают твои агенты.")
     assert not is_echo("расскажи про почту", "Могу смотреть, что делают твои агенты.")
     assert not is_echo("да", "")
+
+
+def test_listen_through_speakers_uses_echo_mic(monkeypatch):
+    from agent_voice import __main__ as main_mod
+    monkeypatch.setattr(main_mod, "locked", lambda: False)
+    monkeypatch.setattr(main_mod, "mic_outputs", lambda: [])
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    run(oma.command({"do": "listen", "secs": 5, "kind": "here", "said": "Эй, ты тут?", "speakers": True}))
+    assert oma.ear.speakers is True, "спросила в динамики — слушать через эхоподавление"
+    run(oma.command({"do": "talk"}))
+    assert oma.ear.speakers is None, "обычный разговор — вход по тому, куда она говорит"
+
+
+def test_mic_target_forced_to_speakers(monkeypatch):
+    from agent_voice import context
+    calls = []
+    def fake_run(args, **kw):
+        out = {"get-default-source": "bluez_input.x\n", "get-default-sink": "bluez_output.x\n",
+               "list": "1\tmic_aec\tx\n2\talsa_input.pci\tx\n"}[args[1]]
+        return SimpleNamespace(stdout=out)
+    assert context.mic_target(fake_run) == "", "наушники в ушах — их микрофон"
+    assert context.mic_target(fake_run, out=True) == "mic_aec", "спросила в динамики — эхоподавление"
