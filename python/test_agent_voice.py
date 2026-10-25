@@ -1161,9 +1161,30 @@ def test_cancel_word_stops_everything_and_ends_conversation():
     assert cv.state == "idle" and not cv.active
 
 
+def test_stop_word_silences_and_keeps_listening():
+    # «стоп» — замолчи и слушай дальше; конец разговора — «отбой»
+    clk, cv = _conv()
+    cv.talk()
+    cv.ask("расскажи про агентов")
+    cv.delta("Агент правит Ому. "); cv.audio(True)
+    cv.speech_start(1)
+    cv.phrase("Стоп.", 1)
+    clk.t += SEND_PAUSE
+    acts = cv.tick()
+    assert ("halt",) in acts and ("ear", False) not in acts and not any(a[0] == "send" for a in acts)
+    assert cv.active and cv.state == "listening"
+    assert any(a[0] == "send" for a in _say(clk, cv, "расскажи только про почту", n=2))
+
+
+def test_stop_words_table():
+    from agent_voice.conversation import is_hold
+    assert is_hold("Стоп.") and is_hold("хватит") and is_hold("Подожди!") and is_hold("стоп, стоп")
+    assert not is_hold("стоп, а что там с тестами") and not is_hold("отбой")
+
+
 def test_cancel_words_table():
     from agent_voice.conversation import is_cancel
-    assert is_cancel("Отмена!") and is_cancel("отбой, отбой") and is_cancel("Стоп.") and is_cancel("отмени")
+    assert is_cancel("Отмена!") and is_cancel("отбой, отбой") and is_cancel("отмени") and not is_cancel("Стоп.")
     assert is_cancel("отмену.") and is_cancel("Отменить") and is_cancel("отбою")  # whisper пишет любую форму слова
     assert not is_cancel("отмена встречи в пятницу") and not is_cancel("отменить встречу") and not is_cancel("стоп, а что там с тестами") and not is_cancel("")
 

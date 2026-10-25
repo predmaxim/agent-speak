@@ -18,7 +18,8 @@ SILENCE_END = 30   # с тишины до конца разговора
 WINDOW_END = 5     # с тишины после ответа Омы в разговоре из окна ответа
 ACKS = {"ок", "окей", "ok", "okay", "понял", "поняла", "ясно", "спасибо", "хорошо", "угу", "ага", "принято"}
 YES = {"да", "тут", "здесь", "я", "ага", "угу", "слушаю"}
-CANCEL = ("отбо", "отмен", "стоп")  # основы: whisper пишет любую форму — «отмену», «отменить», «отбою»
+CANCEL = ("отбо", "отмен")  # конец разговора; основы: whisper пишет любую форму — «отмену», «отменить», «отбою»
+HOLD = ("стоп", "хватит", "подожд")  # замолчи и слушай дальше
 # Похоже на ответ на «Эй, ты тут?»: остальная речь в комнате (ребёнок, гости) — не пользователь Оме
 ANSWER_WORDS = {"да", "ага", "угу", "ок", "окей", "тут", "я", "что", "как", "нет", "не", "ну", "щас", "через"}
 ANSWER_MAX = 8  # слов: ответ Оме короткий; длинное — разговор в комнате, в нём «да» и «нет» есть всегда
@@ -52,6 +53,11 @@ def is_echo(text, said):
     whisper слышит эхо неточно («Не совсем понимаю» вместо «Не совсем поняла»), поэтому по основам, а не дословно."""
     w, s = words(text), {x[:4] for x in words(said)}
     return bool(w) and bool(s) and sum(x[:4] in s for x in w) / len(w) >= ECHO_SHARE
+
+
+def is_hold(text):
+    w = words(text)
+    return 1 <= len(w) <= 3 and all(x.startswith(HOLD) for x in w)
 
 
 def is_cancel(text):
@@ -247,6 +253,8 @@ class Conversation:
             text = self.draft.strip()
             if is_cancel(text):  # «отбой» — не реплика: оборвать всё, что звучит (и чтение), и закончить разговор
                 return [("halt",)] + self.end()
+            if is_hold(text):  # «стоп» — оборвать всё, что звучит, и слушать дальше
+                return [("halt",)] + self._stop_turn() + self._drop() + self._to(self._rest())
             acts = ([("stop",)] if self.audio_busy else []) + self._drop()  # статус агента, что звучит, обрываем
             return acts + (self._window_send(text) if self.window else self._send(text))
         if self.quiet_at is not None and now >= self.quiet_at and not self.hearing and self.state in ("listening", "paused"):
