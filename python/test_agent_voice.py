@@ -291,6 +291,15 @@ def test_are_you_there_other_goes_to_brain():
     assert ("send", "через минуту", "Ома спросила: «Эй, ты тут? Есть новости». ") in _say(clk, cv, "через минуту")
 
 
+def test_are_you_there_ignores_talk_not_to_oma():
+    clk, cv = _conv()
+    cv.listen(5, "here", "Эй, ты тут?")
+    acts = _say(clk, cv, "Бабы, бабы, бабы.")
+    assert not any(a[0] in ("send", "presence") for a in acts) and cv.active, "ребёнок в комнате — не ответ Оме, слушаем дальше"
+    acts = _say(clk, cv, "да, я тут", n=2)
+    assert ("presence", "here") in acts
+
+
 def test_click_conversation_ack_still_sent():
     clk, cv = _conv()
     cv.talk()
