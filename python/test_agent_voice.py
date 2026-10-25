@@ -1222,3 +1222,78 @@ def test_cli_error_reaches_brain_and_projects_listed():
     assert run(o.tell(E[0], "Привет", "привет")) == "Не передано: агент не в Orca и не в herdr — передать не могу. Скажи пользователю коротко, что не вышло."
     o, _ = _orders(out="/p/mail\n/home/u/Projects/agent-speak\n")
     assert run(o.projects()) == "mail — /p/mail\nagent-speak — /home/u/Projects/agent-speak"
+
+
+class FakeOrders:
+    def __init__(self):
+        self.told, self.voiced = [], False
+
+    async def tell(self, entry, text, gist, option=0):
+        self.told.append((entry["id"], text, gist, option))
+        return "Передано"
+
+
+def _tool(name, entries, orders):
+    from agent_voice import brain
+    return next(t for t in brain.oma_tools(lambda: entries, None, orders) if t.name == name)
+
+
+def test_tell_refuses_ambiguous_agent():
+    two = [E[0], dict(E[0], id="s3", title="Почта: тесты")]
+    o = FakeOrders()
+    r = run(_tool("tell", two, o).handler({"agent": "mail", "text": "Привет", "gist": "привет"}))["content"][0]["text"]
+    assert "несколько агентов" in r and "s1" in r and "s3" in r and o.told == []
+    run(_tool("tell", two, o).handler({"agent": "s3", "text": "Привет", "gist": "привет", "option": 2}))
+    run(_tool("tell", E, o).handler({"text": "Дальше", "gist": "дальше"}))
+    assert o.told == [("s3", "Привет", "привет", 2), ("s2", "Дальше", "дальше", 0)], "точный id; пусто — агент в фокусе"
+
+
+def _voice(oma, clk, text, n):
+    async def go():
+        await oma.event(("start", n))
+        await oma.event(("phrase", text, n))
+        clk.t += SEND_PAUSE
+        await oma.event(("tick",))
+    run(go())
+
+
+def test_typed_order_needs_no_confirmation():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    run(oma.command({"do": "ask", "text": "удали старую ветку"}))
+    assert oma.orders.voiced is False and oma.orders.heard == "удали старую ветку"
+    run(oma.command({"do": "talk"}))
+    _voice(oma, clk, "удали старую ветку", 1)
+    assert oma.orders.voiced is True
+
+
+def test_oma_confirmation_skips_brain():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    oma.orders, calls = _orders(clk)
+    oma.brain.texts = []
+    oma.orders.turn(True, "запушь")
+    run(oma.orders.tell(E[0], "Запушь", "запушить"))
+    run(oma.command({"do": "talk"}))
+    _voice(oma, clk, "подтверждаю пуш", 1)
+    assert oma.brain.texts == [] and calls == [("tell", "s1", "0", "Запушь")]
+    oma_said = [e["line"]["bubble"]["text"] for e in emitted if e["line"].get("bubble", {}).get("kind") == "oma"]
+    assert oma_said == ["Передала проекту omarchy-mail: запушить."]
+    states = [c["state"] for c in sent if c["cmd"] == "voice_state"]
+    assert states[-1] != "thinking", states
+    run(oma.event(("audio", True)))
+    run(oma.event(("audio", False)))
+    _voice(oma, clk, "что дальше", 2)
+    assert oma.brain.texts == ["(Пользователь подтвердил голосом, Ома сама: Передала проекту omarchy-mail: запушить.) что дальше"]
+
+
+def test_format_agents_shows_question_options():
+    waiting = dict(E[0], ask="Ждёт ответа на AskUserQuestion: Какой цвет? Варианты: Красный; Синий")
+    assert format_agents([waiting], now=1000).endswith("; ждёт ответа: Ждёт ответа на AskUserQuestion: Какой цвет? Варианты: Красный; Синий")
+
+
+def test_prompt_knows_orders():
+    from agent_voice import brain
+    assert all(w in brain.OMA_PROMPT for w in ("tell", "launch", "projects")) and "пока не умеешь" not in brain.OMA_PROMPT
+    assert {"mcp__oma__tell", "mcp__oma__projects", "mcp__oma__launch"} <= set(brain.OMA_TOOLS)
+    assert 'tell("s1"' in agent_prompt(E[0])

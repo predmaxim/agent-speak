@@ -9,12 +9,13 @@ from claude_agent_sdk import (ClaudeAgentOptions, ClaudeSDKClient, create_sdk_mc
                               list_sessions, tag_session, tool)
 
 from .context import _blocks, selection, transcript_tail
+from .orders import Orders
 
 OMA_DIR = os.path.expanduser("~/.local/share/agent-speak/oma")
 MODEL = "claude-sonnet-5-5"
 TOOLS = ["Read", "Glob", "Grep", "WebSearch"]  # без WebFetch: наружу Ома ничего не отправляет
 OMA_TOOLS = ["mcp__oma__agents", "mcp__oma__agent_feed", "mcp__oma__agent_tail", "mcp__oma__selection",
-             "mcp__oma__presence"]
+             "mcp__oma__presence", "mcp__oma__tell", "mcp__oma__projects", "mcp__oma__launch"]
 STALE_HOURS = 2
 OMA_PROMPT = ("Ты — Ома, голосовой заместитель пользователя. Следишь за его ИИ-агентами (Claude Code, Codex) в терминалах "
               "и отвечаешь на его вопросы. Отвечай по-русски и как можно короче: текст звучит голосом, лишнее утомляет. "
@@ -25,8 +26,13 @@ OMA_PROMPT = ("Ты — Ома, голосовой заместитель пол
               "оговорок, советов и вопросов «что-нибудь ещё?»; подробности — только когда попросят. Без вступлений, "
               "markdown, списков и кода. "
               "Состояние агентов — инструментами agents и agent_feed; конец переписки агента — agent_tail (пустой аргумент — "
-              "агент в фокусе); «это», «тут», «эта ошибка» — сначала selection, затем agent_tail. Ты только читаешь: ничего "
-              "не меняешь и не передаёшь агентам; если просят передать или сделать — скажи, что пока не умеешь. Не понятно, "
+              "агент в фокусе); «это», «тут», «эта ошибка» — сначала selection, затем agent_tail. Файлы ты только читаешь. "
+              "Передать агенту ответ или задание — tell: разверни короткую просьбу в полное задание от лица пользователя (что "
+              "сделать, где искать, что вернуть), фактов не выдумывай; ответ на вопрос агента передай полностью, с нужными "
+              "деталями. Агент ждёт ответа с вариантами (в agents — «ждёт ответа: … Варианты: …») — option с номером варианта по "
+              "порядку, если ответ ровно один из них, иначе свой ответ текстом. Новый агент — projects, затем launch с заданием. "
+              "После tell или launch скажи пользователю одной фразой смысл и кому, не текст задания. Инструмент просит "
+              "подтверждения — скажи пользователю ровно то, что он велит, и больше ничего не передавай. Не понятно, "
               "о чём речь, — коротко переспроси. "
               "Если пользователь просит сейчас не говорить или отложить («не сейчас», «давай потом», «замолчи» и т. п.) — "
               "вызови presence с busy; говорит, что уходит, — away; просит новости или говорит, что вернулся, — here. "
@@ -39,7 +45,9 @@ STATES = {"working": "работает", "waiting": "ждёт ответа", "do
 
 def agent_prompt(entry: dict) -> str:
     return (OMA_PROMPT + f'\nЭтот чат — про агента «{entry["title"]}» (папка {entry["cwd"]}). '
-            f'Его лента — agent_feed("{entry["id"]}"), конец переписки — agent_tail("{entry["id"]}").')
+            f'Его лента — agent_feed("{entry["id"]}"), конец переписки — agent_tail("{entry["id"]}"). '
+            f'Реплика пользователя после вопроса этого агента — обычно ответ ему: tell("{entry["id"]}", …); '
+            f'вопрос к тебе самой передавать не надо.')
 
 
 def claude_events(msg, st):
@@ -98,6 +106,7 @@ def format_agents(entries, now) -> str:
     return "\n".join(f'{e["title"]} ({e["project"]}, id {e["id"]}{", в фокусе" if e.get("focused") else ""}) — '
                      f'{STATES.get(e["state"], e["state"])}, {_ago(int(now - e["since"]))}: {e["status"]}'
                      + (f'; сторож: {e["health"]}' if e.get("health") else "")
+                     + (f'; ждёт ответа: {e["ask"]}' if e.get("ask") else "")
                      for e in entries) or "Агентов нет."
 
 
@@ -114,8 +123,26 @@ def _text(t: str) -> dict:
     return {"content": [{"type": "text", "text": t}]}
 
 
-def oma_tools(snapshot, send) -> list:
-    """Инструменты Омы поверх снимка агентов демона."""
+def pick_agent(entries, query: str):
+    """Агент для передачи: точный id, иначе единственный по части названия или проекта; пусто — в фокусе.
+    (агент, None) или (None, ответ мозгу) — задание не уходит случайному из двух."""
+    q = (query or "").strip()
+    if not q:
+        e = next((x for x in entries if x.get("focused")), None)
+        return (e, None) if e else (None, "Нет агента в фокусе — назови, какому.")
+    e = next((x for x in entries if x["id"] == q), None)
+    if e:
+        return e, None
+    hits = [x for x in entries if q.lower() in x["title"].lower() or q.lower() in x["project"].lower()]
+    if len(hits) > 1:
+        return None, ("Под это подходят несколько агентов: " + "; ".join(f'{x["title"]} (id {x["id"]})' for x in hits)
+                      + ". Спроси пользователя, какому.")
+    return (hits[0], None) if hits else (None, "Агент не найден.")
+
+
+def oma_tools(snapshot, send, orders=None) -> list:
+    """Инструменты Омы поверх снимка агентов демона; передачу агентам ведёт orders."""
+    orders = orders or Orders()
     @tool("agents", "Агенты пользователя: название, проект, id, в фокусе ли, состояние, давность, последний статус.", {})
     async def agents(args):
         return _text(format_agents(snapshot(), time.time()))
@@ -151,15 +178,37 @@ def oma_tools(snapshot, send) -> list:
         send({"cmd": "presence", "state": state})
         return _text("ок")
 
-    return [agents, agent_feed, agent_tail, sel, presence]
+    @tool("tell", "Передать агенту ответ или задание. agent — id из agents (или часть названия/проекта; пусто — агент в "
+                  "фокусе); text — полное задание или ответ от лица пользователя; gist — смысл для пользователя, несколько "
+                  "слов; option — номер варианта, если агент ждёт ответа с вариантами и ответ ровно один из них (у плана: "
+                  "1 — одобрить), иначе 0.",
+          {"type": "object", "properties": {"agent": {"type": "string"}, "text": {"type": "string"},
+                                            "gist": {"type": "string"}, "option": {"type": "integer"}},
+           "required": ["text", "gist"]})
+    async def tell(args):
+        e, why = pick_agent(snapshot(), args.get("agent", ""))
+        if not e:
+            return _text(why)
+        return _text(await orders.tell(e, args.get("text", ""), args.get("gist", ""), int(args.get("option") or 0)))
+
+    @tool("projects", "Проекты, где можно запустить нового агента: название и папка.", {})
+    async def projects(args):
+        return _text(await orders.projects())
+
+    @tool("launch", "Запустить нового агента Claude в проекте. path — папка из projects; task — полное задание; "
+                    "gist — смысл для пользователя.", {"path": str, "task": str, "gist": str})
+    async def launch(args):
+        return _text(await orders.launch(args.get("path", ""), args.get("task", ""), args.get("gist", "")))
+
+    return [agents, agent_feed, agent_tail, sel, presence, tell, projects, launch]
 
 
 class Brain:
     """Текущий чат Омы: key — "new", "chat:<id сессии>" или "agent:<id агента>"."""
 
-    def __init__(self, events: asyncio.Queue, snapshot, send=None):
+    def __init__(self, events: asyncio.Queue, snapshot, send=None, orders=None):
         os.makedirs(OMA_DIR, exist_ok=True)
-        self.events, self.snapshot, self.tools = events, snapshot, oma_tools(snapshot, send)
+        self.events, self.snapshot, self.tools = events, snapshot, oma_tools(snapshot, send, orders)
         self.key, self.sid, self.client, self.reader = "new", None, None, None
         self.st, self.used, self.turns = {"skip": False}, time.time(), 0  # turns: запросов без ResultMessage
 

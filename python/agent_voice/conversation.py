@@ -55,6 +55,7 @@ class Conversation:
         self.send_at = None    # когда отправить черновик
         self.quiet_at = None   # когда закончить разговор от тишины
         self.window = None     # разговор открыт окном ответа: {kind, said, first, close}
+        self.voiced = False    # последняя реплика сказана голосом, не набрана: опасное по ней — только с подтверждением
 
     @property
     def silence(self):
@@ -92,8 +93,8 @@ class Conversation:
         self.send_at = None
         return acts
 
-    def _send(self, text, ctx=""):
-        self.turn = True
+    def _send(self, text, ctx="", voiced=True):
+        self.turn, self.voiced = True, voiced
         self.chunker.reset()
         return [("send", text, ctx)] + self._to("thinking")
 
@@ -165,7 +166,7 @@ class Conversation:
         t = text.strip()
         if len(t) < 2:
             return []
-        return self._stop_turn() + self._drop() + self._send(t)
+        return self._stop_turn() + self._drop() + self._send(t, voiced=False)
 
     def speech_start(self, n):
         if not self.active or self.state in ("idle", "paused"):

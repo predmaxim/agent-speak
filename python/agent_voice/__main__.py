@@ -14,6 +14,7 @@ import traceback
 from . import link
 from .context import foreign_capture, locked, mic_outputs, on_ac
 from .conversation import Conversation
+from .orders import Orders
 
 
 # Хвост звука после конца речи демона — speaker::TAIL: pw-cat ещё доигрывает свой буфер.
@@ -49,8 +50,9 @@ def kill_children():
 class Oma:
     """Связывает разговор, слух, мозг и демона: команды и события → действия Conversation → исполнение."""
 
-    def __init__(self, conv, ear, brain, whisper, send=link.send, notify=notify, clock=time.monotonic):
+    def __init__(self, conv, ear, brain, whisper, send=link.send, notify=notify, clock=time.monotonic, orders=None):
         self.conv, self.ear, self.brain, self.whisper, self.send = conv, ear, brain, whisper, send
+        self.orders = orders or Orders()
         self.notify, self.clock = notify, clock
         self.history = []  # текущий чат, как его видит окно: история из open() + реплики этого процесса
         self.n = 0         # номер ответа: пузырь oma-<pid>-<n>
@@ -174,7 +176,7 @@ class Oma:
                 await self.act(c.done())
 
     async def act(self, acts):
-        failed = None
+        failed = said = None
         for a in acts:
             k = a[0]
             if k == "ear":
@@ -186,10 +188,15 @@ class Oma:
                     await self.ear.stop()
             elif k == "send":
                 key = self.brain.key
-                try:
-                    await self.brain.send(a[2] + a[1])
-                except Exception as e:
-                    failed = e
+                self.orders.turn(self.conv.voiced, a[1])
+                if self.conv.voiced:
+                    said = await self.orders.confirm(a[1])  # «подтверждаю …» сверяет код, мозг не зовём
+                if said is None:
+                    note, self.orders.note = self.orders.note, ""
+                    try:
+                        await self.brain.send(note + a[2] + a[1])
+                    except Exception as e:
+                        failed = e
                 if key.startswith("chat:") and self.brain.key == "new":  # устаревший чат сменился новым: реплика — первая в нём
                     self.history = []
                 self.n += 1
@@ -217,6 +224,9 @@ class Oma:
                 self.send({"cmd": "voice_state", "state": s, "talking": self.conv.active})
         if failed:  # после всех действий: ход уже в «thinking», done() вернёт в покой
             await self.event(("error", f"Claude: {failed}"))
+        if said is not None:  # фраза кода вместо ответа мозга — как его ход: после «thinking» из этого же списка
+            await self.event(("delta", said))
+            await self.event(("done", None))
 
 
 async def serve(oma, events, reader):
@@ -266,7 +276,9 @@ async def main():
 
         loop = asyncio.get_running_loop()
         whisper = Whisper()
-        oma = Oma(Conversation(), Ear(events, whisper), Brain(events, lambda: agents, send=link.send), whisper)
+        orders = Orders()  # один на мозг и Ому: ждущее подтверждения опасное видят оба
+        oma = Oma(Conversation(), Ear(events, whisper), Brain(events, lambda: agents, send=link.send, orders=orders), whisper,
+                  orders=orders)
 
         def on_agents(lst):
             agents[:] = lst  # снимок для инструментов мозга
