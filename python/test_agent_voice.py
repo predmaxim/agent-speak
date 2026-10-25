@@ -1197,7 +1197,7 @@ def test_negative_answer_needs_no_confirmation():
 
 def test_confirm_only_same_kind_in_time():
     clk = Clock()
-    for heard, wait, sent in (("подтверждаю пуш", 1, True), ("Подтверждаю, push.", 1, True),
+    for heard, wait, sent in (("подтверждаю пуш", 1, True), ("Подтверждаю, push.", 1, True), ("Подтверждаю душ.", 1, True),
                               ("подтверждаю удаление", 1, False), ("подтверждаю пуш", 61, False),
                               ("ну я вроде подтверждаю этот пуш наверное", 1, False)):
         o, calls = _orders(clk)
@@ -1206,8 +1206,16 @@ def test_confirm_only_same_kind_in_time():
         clk.t += wait
         said = run(o.confirm(heard))
         assert bool(calls) == sent and (said == "Передала проекту omarchy-mail: запушить.") == sent, heard
-        assert o.pending is None
+    o, calls = _armed(clk)
+    run(o.confirm("подтверждаю пуш"))
     assert run(o.confirm("подтверждаю пуш")) is None, "ожидание одно: после ответа его нет"
+
+
+def test_missed_confirmation_keeps_waiting():
+    # whisper ослышался в слове — пользователь повторит; ожидание не пропадает, мозг не зовётся
+    o, calls = _armed()
+    assert run(o.confirm("подтверждаю удаление")) == "Не расслышала. Скажи: подтверждаю пуш." and o.pending and not calls
+    assert run(o.confirm("подтверждаю пуш")) == "Передала проекту omarchy-mail: запушить." and calls
 
 
 def test_confirmed_order_leaves_note_for_brain():
@@ -1319,7 +1327,7 @@ def _armed(clk=None):
 def test_confirm_rejects_negation():
     for heard in ("не подтверждаю пуш", "нет, не подтверждаю пуш"):
         o, calls = _armed()
-        assert run(o.confirm(heard)) is None and calls == [], heard
+        assert run(o.confirm(heard)) == "Хорошо, не передаю." and calls == [] and o.pending is None, heard
 
 
 PUSH_MENU = "Ждёт ответа на AskUserQuestion: Запушить сейчас? Варианты: Запушить — сразу на GitHub; Нет — потом"

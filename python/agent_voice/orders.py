@@ -44,9 +44,22 @@ def unnegated(text):
     return " ".join(w for i, w in enumerate(ws) if i == 0 or ws[i - 1] != "не")
 
 
+def _near(a, b):
+    """Одна буква не та, лишняя или пропущена: whisper слышит «подтверждаю душ» вместо «пуш»."""
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) <= 1
+    short, long = sorted((a, b), key=len)
+    return any(long[:i] + long[i + 1:] == short for i in range(len(long)))
+
+
 def confirms(text, d):
+    """«Подтверждаю <слово>» в 2–4 словах; слово — с точностью до буквы: ослышка «подтверждаю …» из ничего не бывает."""
     ws = words(text)
-    return 2 <= len(ws) <= 4 and _has(ws, ("подтвержд",)) and _has(ws, d[3]) and not NO & set(ws)  # «не подтверждаю» — отказ
+    if not 2 <= len(ws) <= 4 or NO & set(ws) or not _has(ws, ("подтвержд",)):  # «не подтверждаю» — отказ
+        return False
+    return any(w.startswith(c) or (len(c) >= 3 and _near(w[:len(c)], c)) for w in ws if not w.startswith("подтвержд") for c in d[3])
 
 
 def asked(entry):
@@ -145,11 +158,20 @@ class Orders:
         return "\n".join(f"{_name(l)} — {l}" for l in out.splitlines() if l.strip()) or "Проектов нет."
 
     async def confirm(self, text):
-        """Реплика голосом, пока опасное ждёт: фраза совпала — передать и вернуть фразу Омы; иначе None.
-        Ожидание снимается в любом случае: подтверждает только следующая реплика."""
-        p, self.pending = self.pending, None
-        if not p or self.clock() > p["until"] or not confirms(text, p["what"]):
+        """Реплика голосом, пока опасное ждёт: фраза совпала — передать и вернуть фразу Омы. Попытка подтвердить
+        не тем словом — переспросить, ожидание держится; «не подтверждаю» — отказ. Другая реплика снимает ожидание: None."""
+        p = self.pending
+        ws = words(text)
+        if not p or self.clock() > p["until"] or not _has(ws, ("подтвержд",)):
+            self.pending = None
             return None
+        if NO & set(ws):
+            self.pending = None
+            self.note = "(Пользователь не подтвердил — Ома ничего не передала.) "
+            return "Хорошо, не передаю."
+        if not confirms(text, p["what"]):
+            return f"Не расслышала. Скажи: подтверждаю {p['what'][1]}."
+        self.pending = None
         ok, out = await self.run(*p["args"])
         said = p["said"] if ok else f"Не вышло: {out}."
         self.note = f"(Пользователь подтвердил голосом, Ома сама: {said}) "
