@@ -10,15 +10,17 @@ from .conversation import words
 
 CONFIRM_WAIT = 60  # с: «подтверждаю …» позже — не подтверждение
 DANGER = (  # (что, слово фразы «подтверждаю …», основы слов в тексте, основы в подтверждении)
-    ("пуш", "пуш", ("push", "пуш", "запуш", "отпуш"), ("пуш", "push")),
-    ("удаление", "удаление", ("удал", "delete", "rm", "сотри", "стери", "снеси"), ("удален",)),
+    ("пуш", "пуш", ("push", "пуш", "запуш", "отпуш", "залей", "залить", "залил"), ("пуш", "push")),
+    ("удаление", "удаление", ("удал", "delete", "rm", "сотри", "стер", "снеси", "убер", "убра", "remov", "clean", "почист",
+                              "очист"), ("удален",)),
     ("деплой", "деплой", ("deploy", "депло", "задепло", "выкат", "release", "релиз", "publish", "опублик"), ("депло", "deploy")),
     ("миграция", "миграцию", ("migrat", "миграц"), ("миграц",)),
-    ("сброс", "сброс", ("reset", "сброс", "сбрось"), ("сброс",)),
+    ("сброс", "сброс", ("reset", "сброс", "сбрось", "откат", "revert", "rebase"), ("сброс",)),
     ("force", "форс", ("force", "форс"), ("форс", "force")),
-    ("запись в базу", "запись", ("drop", "truncate", "insert", "базу", "бд"), ("запис",)),
+    ("запись в базу", "запись", ("drop", "truncate", "insert", "update", "базу", "базе", "база", "database", "бд"), ("запис",)),
 )
-NEGATIVE = {"нет", "не", "отмена", "стоп"}
+NO = {"нет", "не"}
+NEGATIVE = ("отмен", "стоп", "отлож", "пропуст", "позже", "потом")  # начала отказа и в вариантах меню («Отложить»)
 
 
 def _has(ws, stems):
@@ -33,24 +35,41 @@ def danger(text):
 
 def negative(text):
     ws = words(text or "")
-    return bool(ws) and ws[0] in NEGATIVE
+    return bool(ws) and (ws[0] in NO or ws[0].startswith(NEGATIVE))
+
+
+def unnegated(text):
+    """Слова без тех, что стоят сразу после «не»: в «нет, не пушь» опасного нет, в «не пушь, а удали» — есть."""
+    ws = words(text or "")
+    return " ".join(w for i, w in enumerate(ws) if i == 0 or ws[i - 1] != "не")
 
 
 def confirms(text, d):
     ws = words(text)
-    return 2 <= len(ws) <= 4 and _has(ws, ("подтвержд",)) and _has(ws, d[3])
+    return 2 <= len(ws) <= 4 and _has(ws, ("подтвержд",)) and _has(ws, d[3]) and not NO & set(ws)  # «не подтверждаю» — отказ
 
 
 def asked(entry):
     """Вопрос агента, на который отвечают: варианты из снимка, иначе последнее «…?» его последней реплики."""
-    if entry.get("ask"):
-        return entry["ask"]
+    ask = entry.get("ask") or ""
+    if ask:
+        i = ask.rfind("Ждёт ответа на")  # перед ним — последняя реплика агента: «всё запушено» — не вопрос
+        return ask[i:] if i >= 0 else ask
     last = next((l for l in reversed(entry.get("feed") or []) if l["kind"] in ("question", "final")), None)
     q = re.findall(r"[^.!?]*\?", last["text"]) if last else []
     return q[-1].strip() if q else ""
 
 
-async def cli(*args, timeout=40):
+def chosen(ask, option):
+    """Вариант option («метка — описание») из единственного вопроса с вариантами; иначе пусто."""
+    parts = ask.split("Варианты: ")
+    if option < 1 or len(parts) != 2:
+        return ""
+    items = parts[1].strip().split("; ")
+    return items[option - 1] if option <= len(items) else ""
+
+
+async def cli(*args, timeout=90):
     """`agent-speak <args>`: (успех, stdout) или (False, stderr — строка ошибки по-русски)."""
     try:
         p = await asyncio.create_subprocess_exec(os.environ.get("AGENT_SPEAK_BIN", "agent-speak"), *args,
@@ -61,7 +80,9 @@ async def cli(*args, timeout=40):
         out, err = await asyncio.wait_for(p.communicate(), timeout)
     except asyncio.TimeoutError:
         p.kill()
-        return False, "терминал не ответил"
+        await p.wait()
+        # вызов мультиплексора мог успеть: повтор дал бы второй пуш или второго агента
+        return False, "терминал не ответил — не знаю, дошло ли; проверь, прежде чем повторять"
     return (True, out.decode().strip()) if p.returncode == 0 else (False, err.decode().strip() or f"код {p.returncode}")
 
 
@@ -76,22 +97,28 @@ class Orders:
         self.run, self.clock = run, clock
         self.voiced, self.heard = False, ""
         self.pending = None  # опасное ждёт фразы: {args, what, said, until}
+        self.tripped = False  # в этом ходе мозга уже было опасное: до следующей реплики не уходит ничего
         self.note = ""       # мозгу — в начало следующей реплики: подтверждённое Ома передала сама
 
     def turn(self, voiced, heard):
-        self.voiced, self.heard = voiced, heard
+        self.voiced, self.heard, self.tripped = voiced, heard, False
 
-    def gate(self, sent, ask=""):
-        """Опасное, сказанное голосом: строка DANGER; набранное в окне и отказ («нет, не пушь») — None."""
+    def gate(self, sent, ask="", option=0):
+        """Опасное, сказанное голосом: строка DANGER; набранное в окне и отказ («нет, не пушь») — None.
+        Проверяется то, что уйдёт: при option — сам вариант; одобрение плана (вариантов нет) отказом не считается."""
         if not self.voiced:
             return None
-        d = danger(self.heard) or danger(sent) or danger(ask)
-        if d and negative(self.heard) and negative(sent) and not danger(self.heard):
-            return None
-        return d
+        label = chosen(ask, option)
+        d = danger(self.heard) or danger(sent) or danger(label) or danger(ask)
+        refusal = negative(self.heard) and not danger(self.heard) and (option == 0 or label) and all(
+            negative(x) and not danger(unnegated(x)) for x in (sent, label.split(" — ")[0]) if x)
+        return None if d and refusal else d
 
     async def _order(self, args, d, said, ok_reply):
+        if self.tripped:  # мозг перефразировал опасное в том же ходе — словарь мог его не узнать
+            return "Не передано: опасное уже ждёт подтверждения. Скажи пользователю фразу подтверждения и больше ничего не передавай."
         if d:
+            self.tripped = True
             self.pending = {"args": args, "what": d, "said": said, "until": self.clock() + CONFIRM_WAIT}
             return (f"Не передано: это {d[0]}, такое уходит только после подтверждения голосом. "
                     f"Скажи пользователю ровно: «Это {d[0]}. Скажи: подтверждаю {d[1]}».")
@@ -100,7 +127,7 @@ class Orders:
 
     async def tell(self, entry, text, gist, option=0):
         p = entry["project"]
-        return await self._order(("tell", entry["id"], str(option), text), self.gate(text, asked(entry)),
+        return await self._order(("tell", entry["id"], str(option), text), self.gate(text, asked(entry), option),
                                  f"Передала проекту {p}: {gist}.",
                                  f"Передано проекту {p}. Скажи пользователю одной фразой, кому и что: "
                                  f"«Передала проекту {p}: …» — смысл, не текст задания.")

@@ -1297,3 +1297,72 @@ def test_prompt_knows_orders():
     assert all(w in brain.OMA_PROMPT for w in ("tell", "launch", "projects")) and "пока не умеешь" not in brain.OMA_PROMPT
     assert {"mcp__oma__tell", "mcp__oma__projects", "mcp__oma__launch"} <= set(brain.OMA_TOOLS)
     assert 'tell("s1"' in agent_prompt(E[0])
+
+
+def _armed(clk=None):
+    o, calls = _orders(clk)
+    o.turn(True, "запушь")
+    run(o.tell(E[0], "Запушь", "запушить"))
+    return o, calls
+
+
+def test_confirm_rejects_negation():
+    for heard in ("не подтверждаю пуш", "нет, не подтверждаю пуш"):
+        o, calls = _armed()
+        assert run(o.confirm(heard)) is None and calls == [], heard
+
+
+PUSH_MENU = "Ждёт ответа на AskUserQuestion: Запушить сейчас? Варианты: Запушить — сразу на GitHub; Нет — потом"
+
+
+def test_option_gated_by_chosen_variant():
+    agent = dict(E[0], ask="Агент: тесты прошли.\n\n" + PUSH_MENU)
+    o, calls = _orders()
+    o.turn(True, "нет")
+    assert "подтверждаю пуш" in run(o.tell(agent, "Нет", "не пушить", option=1)), "уходит вариант 1 — пуш, а не текст"
+    o.turn(True, "нет")
+    assert run(o.tell(agent, "", "не пушить", option=2)).startswith("Передано") and calls
+    plan = dict(E[0], ask="Ждёт ответа на ExitPlanMode: 1. тесты 2. git push")
+    o.turn(True, "нет")
+    assert "подтверждаю пуш" in run(o.tell(plan, "Нет", "одобрить", option=1)), "одобрение плана — без поблажки отказу"
+
+
+def test_refusal_does_not_cover_added_danger():
+    o, calls = _orders()
+    for sent in ("Нет, вместо этого сделай git reset --hard", "Не пушь, а удали ветку", "Нет, сначала прогони тесты, потом запушь"):
+        o.turn(True, "нет")
+        assert "подтверждаю" in run(o.tell(E[0], sent, "нет")), sent
+    o.turn(True, "нет")
+    assert run(o.tell(E[0], "Нет, не пушь", "не пушить")).startswith("Передано")
+
+
+def test_asked_is_only_the_question_part():
+    agent = dict(E[0], ask="Всё запушено, старые логи удалил.\n\nЖдёт ответа на AskUserQuestion: Взяться за тесты? Варианты: Да; Нет")
+    assert asked(agent) == "Ждёт ответа на AskUserQuestion: Взяться за тесты? Варианты: Да; Нет"
+    o, calls = _orders()
+    o.turn(True, "да")
+    assert run(o.tell(agent, "Да", "взяться за тесты")).startswith("Передано")
+
+
+def test_danger_dictionary_gaps():
+    for text, what in (("убери старую ветку", "удаление"), ("remove the old branch", "удаление"), ("git clean -fdx", "удаление"),
+                       ("почисти логи", "удаление"), ("стереть кэш", "удаление"), ("откати последний коммит", "сброс"),
+                       ("git rebase -i", "сброс"), ("git revert HEAD", "сброс"), ("залей на гитхаб", "пуш"),
+                       ("UPDATE users SET a=1", "запись в базу"), ("запиши в базе", "запись в базу")):
+        assert (danger(text) or ("",))[0] == what, text
+
+
+def test_same_turn_after_danger_sends_nothing():
+    o, calls = _orders()
+    o.turn(True, "пусть отправит изменения на гитхаб")  # опасное слово — только в тексте мозга
+    assert "подтверждаю пуш" in run(o.tell(E[0], "Запушь изменения", "запушить"))
+    assert run(o.tell(E[0], "Отправь изменения на GitHub", "отправить")).startswith("Не передано") and calls == []
+    o.turn(True, "займись тестами")
+    assert run(o.tell(E[0], "Займись тестами", "тесты")).startswith("Передано")
+
+
+def test_cli_timeout_warns_it_may_have_arrived(monkeypatch):
+    from agent_voice.orders import cli
+    monkeypatch.setenv("AGENT_SPEAK_BIN", "sleep")
+    ok, out = run(cli("5", timeout=0.2))
+    assert not ok and "не знаю, дошло ли" in out
