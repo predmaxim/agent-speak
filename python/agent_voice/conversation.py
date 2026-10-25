@@ -18,7 +18,7 @@ SILENCE_END = 30   # с тишины до конца разговора
 WINDOW_END = 5     # с тишины после ответа Омы в разговоре из окна ответа
 ACKS = {"ок", "окей", "ok", "okay", "понял", "поняла", "ясно", "спасибо", "хорошо", "угу", "ага", "принято"}
 YES = {"да", "тут", "здесь", "я", "ага", "угу", "слушаю"}
-CANCEL = {"отбой", "отмена", "отмени", "стоп"}
+CANCEL = ("отбо", "отмен", "стоп")  # основы: whisper пишет любую форму — «отмену», «отменить», «отбою»
 
 
 def words(text):
@@ -37,7 +37,7 @@ def is_yes(text):
 
 def is_cancel(text):
     w = words(text)
-    return 1 <= len(w) <= 3 and all(x in CANCEL for x in w)
+    return 1 <= len(w) <= 3 and all(x.startswith(CANCEL) for x in w)
 
 
 class Conversation:

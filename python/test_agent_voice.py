@@ -1134,4 +1134,5 @@ def test_cancel_word_stops_everything_and_keeps_listening():
 def test_cancel_words_table():
     from agent_voice.conversation import is_cancel
     assert is_cancel("Отмена!") and is_cancel("отбой, отбой") and is_cancel("Стоп.") and is_cancel("отмени")
-    assert not is_cancel("отмена встречи в пятницу") and not is_cancel("стоп, а что там с тестами") and not is_cancel("")
+    assert is_cancel("отмену.") and is_cancel("Отменить") and is_cancel("отбою")  # whisper пишет любую форму слова
+    assert not is_cancel("отмена встречи в пятницу") and not is_cancel("отменить встречу") and not is_cancel("стоп, а что там с тестами") and not is_cancel("")
