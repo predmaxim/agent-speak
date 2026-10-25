@@ -30,8 +30,9 @@ impl Mux for Herdr {
     fn type_text(&self, pane: &Pane, text: &str) -> Result<(), String> {
         ok(&cli(herdr(pane, &["pane", "send-text", &pane.id, text]))?)
     }
-    fn active(&self, pane: &Pane) -> Result<Option<String>, String> {
-        Ok(focused_pane(&cli(herdr(pane, &["pane", "list"]))?))
+    fn shown(&self, env: &HashMap<String, String>) -> Option<bool> {
+        let pane = self.locate(env)?;
+        Some(focused_pane(&cli(herdr(&pane, &["pane", "list"])).ok()?)? == pane.id)
     }
     fn screen(&self, pane: &Pane) -> Result<String, String> {
         cli(herdr(pane, &["pane", "read", &pane.id, "--source", "visible", "--lines", "40"]))

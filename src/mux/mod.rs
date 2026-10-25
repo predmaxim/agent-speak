@@ -44,9 +44,9 @@ pub trait Mux: Sync {
     fn projects(&self) -> Result<Vec<String>, String> {
         Ok(Vec::new())
     }
-    /// Терминал, активный в сессии мультиплексора, где живёт pane (вкладка в фокусе); None — не знает.
-    fn active(&self, _pane: &Pane) -> Result<Option<String>, String> {
-        Ok(None)
+    /// Виден ли сейчас на экране терминал процесса с этим окружением (вкладка Orca, панель herdr); None — не знает.
+    fn shown(&self, _env: &HashMap<String, String>) -> Option<bool> {
+        None
     }
     /// Новый агент Claude в папке cwd с первым сообщением prompt.
     fn launch(&self, _cwd: &str, _prompt: &str) -> Result<(), String> {
@@ -93,6 +93,18 @@ pub fn pick(env: &HashMap<String, String>, host: &str) -> Option<Pane> {
     adapters().iter().find_map(|m| m.locate(env).filter(|_| m.hosts(host)))
 }
 
+/// Окно приложения-мультиплексора (window — его командная строка) держит терминал агента: pty-хост Orca —
+/// потомок systemd, а не окна, и по дереву процессов агенты окна Orca не находятся.
+pub fn app_hosts(window: &str, env: &HashMap<String, String>, host: &str) -> bool {
+    adapters().iter().any(|m| m.hosts(window) && m.locate(env).is_some() && m.hosts(host))
+}
+
+/// Агент pid — в окне win мультиплексора.
+pub fn in_app_window(win: u32, pid: u32) -> bool {
+    let raw = std::fs::read(format!("/proc/{win}/cmdline")).unwrap_or_default();
+    app_hosts(&String::from_utf8_lossy(&raw).replace('\0', " "), &environ(pid), &host_cmdline(pid))
+}
+
 /// Терминал агента с этим pid.
 pub fn locate(pid: u32) -> Option<Pane> {
     pick(&environ(pid), &host_cmdline(pid))
@@ -102,17 +114,16 @@ fn adapter(pane: &Pane) -> Result<&'static dyn Mux, String> {
     adapters().into_iter().find(|m| m.name() == pane.mux).ok_or_else(|| format!("нет адаптера {}", pane.mux))
 }
 
-/// Агент (pid) в активном терминале, среди агентов под одним окном (Orca держит всех в одном окне).
+/// Агент (pid) в видимом терминале, среди агентов под одним окном (Orca держит всех в одном окне).
 pub fn active_among(pids: &[u32]) -> Option<u32> {
-    let panes: Vec<(u32, Pane)> = pids.iter().filter_map(|&p| locate(p).map(|pane| (p, pane))).collect();
-    among(&panes, |pane| adapter(pane).ok()?.active(pane).ok().flatten())
+    among(pids, |pid| {
+        let (env, host) = (environ(pid), host_cmdline(pid));
+        adapters().into_iter().find(|m| m.locate(&env).is_some() && m.hosts(&host))?.shown(&env)
+    })
 }
 
-/// Чей терминал активен: спрашиваем сессию первого терминала, она у агентов одного окна общая.
-fn among(panes: &[(u32, Pane)], active: impl Fn(&Pane) -> Option<String>) -> Option<u32> {
-    let (_, first) = panes.first()?;
-    let id = active(first)?;
-    panes.iter().find(|(_, p)| p.mux == first.mux && p.via == first.via && p.id == id).map(|(pid, _)| *pid)
+fn among(pids: &[u32], shown: impl Fn(u32) -> Option<bool>) -> Option<u32> {
+    pids.iter().copied().find(|&p| shown(p) == Some(true))
 }
 
 pub fn screen(pane: &Pane) -> Result<String, String> {
@@ -270,12 +281,9 @@ mod tests {
     }
 
     #[test]
-    fn active_pane_picks_its_agent() {
-        let p = |id: &str| Pane { mux: "orca", id: id.into(), via: "/o".into() };
-        let panes = [(1, p("t1")), (2, p("t2"))];
-        assert_eq!(among(&panes, |_| Some("t2".into())), Some(2));
-        assert_eq!(among(&panes, |_| None), None, "мультиплексор не ответил — фокус неизвестен");
-        assert_eq!(among(&[], |_| panic!("терминалов нет")), None);
+    fn shown_terminal_picks_its_agent() {
+        assert_eq!(among(&[1, 2, 3], |p| Some(p == 2)), Some(2));
+        assert_eq!(among(&[1, 2], |_| None), None, "мультиплексор не знает — фокус неизвестен");
     }
 
     #[test]
@@ -298,6 +306,16 @@ mod tests {
         assert_eq!(pick(&env, "/home/u/.cache/orca/appimage/a/b/resources/node-runtime/bin/node /home/u/.cache/orca/x.js").unwrap().mux, "orca");
         assert_eq!(pick(&env, "foot --app-id=org.omarchy.agent -e claude"), None, "окно, запущенное из терминала Orca, наследует ORCA_* — но это не его терминал");
         assert_eq!(pick(&HashMap::new(), "herdr server"), None);
+    }
+
+    #[test]
+    fn orca_window_owns_agents_of_its_pty_host() {
+        // pty-хост Orca — потомок systemd, а не окна: агента окна Orca узнаём по мультиплексору, а не по дереву процессов
+        let env = HashMap::from([("ORCA_TERMINAL_HANDLE".to_string(), "term_1".to_string()), ("ORCA_CLI_BIN_DIR".into(), "/x".into())]);
+        let host = "/home/u/.cache/orca/appimage/a/b/resources/node-runtime/bin/node /home/u/.cache/orca/x.js";
+        assert!(app_hosts("/tmp/.mount_Orca.Ab/orca-ide", &env, host));
+        assert!(!app_hosts("/usr/bin/ghostty", &env, host), "агент Orca — не в чужом окне");
+        assert!(!app_hosts("/tmp/.mount_Orca.Ab/orca-ide", &HashMap::new(), "bash"), "агент вне Orca — не в окне Orca");
     }
 
     #[test]

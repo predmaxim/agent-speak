@@ -61,9 +61,8 @@ pub fn project_of(pid: u32) -> String {
         .unwrap_or_default()
 }
 
-/// Агент окна в фокусе. Несколько агентов под одним окном (Orca, herdr) — без precise фокус неизвестен,
-/// с precise — спрашиваем мультиплексор, чей терминал активен (CLI Orca — полсекунды процессора).
-pub fn focused(precise: bool) -> Option<SessionRef> {
+/// Агент окна в фокусе; несколько агентов под одним окном (Orca, herdr) — чей терминал виден, говорит мультиплексор.
+pub fn focused() -> Option<SessionRef> {
     // timeout: зависший hyprctl не должен вешать цикл событий
     let out = Command::new("timeout").args(["2", "hyprctl", "activewindow", "-j"]).output().ok()?;
     let win = serde_json::from_slice::<Value>(&out.stdout).ok().and_then(|v| v["pid"].as_u64());
@@ -72,7 +71,7 @@ pub fn focused(precise: bool) -> Option<SessionRef> {
         let w = win? as u32;
         let mut all = claude_under(w);
         all.extend(codex_under(w));
-        return pick(all, precise, crate::mux::active_among);
+        return pick(all, crate::mux::active_among);
     }
     eprintln!("agent-speak: hyprctl: нет pid окна ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim());
     None
@@ -80,13 +79,10 @@ pub fn focused(precise: bool) -> Option<SessionRef> {
 
 static NO_WINDOW: AtomicBool = AtomicBool::new(false);
 
-/// Агент из кандидатов (pid, сессия): один — он; несколько — по активному терминалу, и только если precise.
-fn pick(all: Vec<(u32, SessionRef)>, precise: bool, active: impl Fn(&[u32]) -> Option<u32>) -> Option<SessionRef> {
+/// Агент из кандидатов (pid, сессия): один — он; несколько — по видимому терминалу (Orca — одно окно на всех).
+fn pick(all: Vec<(u32, SessionRef)>, active: impl Fn(&[u32]) -> Option<u32>) -> Option<SessionRef> {
     if all.len() <= 1 {
         return all.into_iter().next().map(|(_, s)| s);
-    }
-    if !precise {
-        return None;
     }
     let pid = active(&all.iter().map(|(p, _)| *p).collect::<Vec<_>>())?;
     all.into_iter().find(|(p, _)| *p == pid).map(|(_, s)| s)
@@ -99,7 +95,7 @@ fn claude_under(win: u32) -> Vec<(u32, SessionRef)> {
         let Ok(s) = std::fs::read_to_string(f.path()) else { continue };
         let Ok(v) = serde_json::from_str::<Value>(&s) else { continue };
         let (Some(pid), Some(sid)) = (v["pid"].as_u64(), v["sessionId"].as_str()) else { continue };
-        if !under(pid as u32, win) {
+        if !under(pid as u32, win) && !crate::mux::in_app_window(win, pid as u32) {
             continue;
         }
         let name = format!("{sid}.jsonl");
@@ -135,7 +131,7 @@ fn codex_under(win: u32) -> Vec<(u32, SessionRef)> {
     let Ok(dir) = std::fs::read_dir("/proc") else { return out };
     for p in dir.flatten() {
         let Some(pid) = p.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
-        if !std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "codex") || !under(pid, win) {
+        if !std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "codex") || !(under(pid, win) || crate::mux::in_app_window(win, pid)) {
             continue;
         }
         if let Some((id, transcript)) = codex_rollout(pid) {
@@ -162,10 +158,10 @@ mod tests {
     fn several_agents_under_one_window_need_the_mux() {
         let r = |id: &str| SessionRef { agent: Agent::Claude, id: id.into(), transcript: PathBuf::new(), project: String::new() };
         let two = vec![(1, r("a")), (2, r("b"))];
-        assert_eq!(pick(two.clone(), false, |_| panic!("дешёвый путь CLI не зовёт")), None, "Orca — одно окно на всех: первый попавшийся — не фокус");
-        assert_eq!(pick(two, true, |p| (p == [1, 2]).then_some(2)).unwrap().id, "b");
-        assert_eq!(pick(vec![(1, r("a"))], false, |_| panic!("один агент — спрашивать нечего")).unwrap().id, "a");
-        assert_eq!(pick(Vec::new(), true, |_| panic!("нет агентов")), None);
+        assert_eq!(pick(two.clone(), |p| (p == [1, 2]).then_some(2)).unwrap().id, "b", "Orca — одно окно на всех: не первый попавшийся");
+        assert_eq!(pick(two, |_| None), None, "мультиплексор не знает — фокус неизвестен");
+        assert_eq!(pick(vec![(1, r("a"))], |_| panic!("один агент — спрашивать нечего")).unwrap().id, "a");
+        assert_eq!(pick(Vec::new(), |_| panic!("нет агентов")), None);
     }
 
     use super::*;

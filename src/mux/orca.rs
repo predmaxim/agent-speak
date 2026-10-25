@@ -40,11 +40,14 @@ impl Mux for Orca {
         let out = cli(orca(pane, &["read", "--screen"]))?;
         screen_text(&out).ok_or_else(|| error_of(&out))
     }
-    fn active(&self, pane: &Pane) -> Result<Option<String>, String> {
-        let mut c = Command::new(&pane.via);
-        // без --terminal CLI берёт активный терминал; из папки вне worktree — во всём окне, а не в worktree папки
-        c.args(["terminal", "show", "--json"]).current_dir("/");
-        Ok(active_handle(&cli(c)?))
+    fn shown(&self, env: &HashMap<String, String>) -> Option<bool> {
+        // открытую вкладку Orca хранит в своей базе (обновляет за секунду); CLI её не знает, а стоит полсекунды процессора
+        let (tab, worktree, data) = (env.get("ORCA_TAB_ID")?, env.get("ORCA_WORKTREE_ID")?, env.get("ORCA_USER_DATA_PATH")?);
+        let index: Value = serde_json::from_str(&std::fs::read_to_string(format!("{data}/orca-profile-index.json")).ok()?).ok()?;
+        let db = format!("file:{data}/profiles/{}/profile-state.db?mode=ro", index["activeProfileId"].as_str()?);
+        let mut c = Command::new("sqlite3");
+        c.args(["-json", "-readonly", &db, SHOWN_QUERY]);
+        tab_shown(&cli(c).ok()?, worktree, tab)
     }
     fn projects(&self) -> Result<Vec<String>, String> {
         let mut c = Command::new(orca_bin());
@@ -78,10 +81,14 @@ fn orca_bin() -> String {
     if std::path::Path::new(&shim).exists() { shim } else { "orca".into() }
 }
 
-/// Ответ `terminal show` без `--terminal`: handle активного терминала.
-fn active_handle(out: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(out).ok()?;
-    v["result"]["terminal"]["handle"].as_str().map(str::to_string)
+const SHOWN_QUERY: &str = "select json_extract(payload,'$.activeWorktreeId') as worktree, json_extract(payload,'$.activeTabIdByWorktree') as tabs from profile_state_documents where domain='workspaceSession'";
+
+/// Ответ базы Orca: открыт ли сейчас worktree агента и в нём — его вкладка.
+fn tab_shown(out: &str, worktree: &str, tab: &str) -> Option<bool> {
+    let rows: Value = serde_json::from_str(out).ok()?;
+    let row = rows.get(0)?;
+    let tabs: Value = serde_json::from_str(row["tabs"].as_str()?).ok()?;
+    Some(row["worktree"] == worktree && tabs[worktree] == tab)
 }
 
 /// Ответ `worktree list`: папки worktree; мусор — пусто.
@@ -142,9 +149,13 @@ mod tests {
     }
 
     #[test]
-    fn active_terminal_reply() {
-        assert_eq!(active_handle(r#"{"ok":true,"result":{"terminal":{"handle":"term_1","title":"x"}}}"#), Some("term_1".into()));
-        assert_eq!(active_handle(r#"{"ok":false,"error":{"message":"no active terminal"}}"#), None);
+    fn shown_tab_from_workspace_session() {
+        // так отвечает sqlite3 -json на запрос к profile-state.db: вкладка, открытая в окне Orca
+        let out = r#"[{"worktree":"w2::/p/b","tabs":"{\"w1::/p/a\":\"tab-a\",\"w2::/p/b\":\"tab-b\"}"}]"#;
+        assert_eq!(tab_shown(out, "w2::/p/b", "tab-b"), Some(true));
+        assert_eq!(tab_shown(out, "w1::/p/a", "tab-a"), Some(false), "вкладка своего worktree, но открыт другой");
+        assert_eq!(tab_shown(out, "w2::/p/b", "tab-x"), Some(false));
+        assert_eq!(tab_shown("[]", "w2::/p/b", "tab-b"), None, "нет сессии — фокус неизвестен");
     }
 
     #[test]
