@@ -164,6 +164,7 @@ struct State {
     night_keep: bool,           // тишина настала, пока пользователя нет: накопленное ждёт утра
     facts_src: Box<dyn Fn() -> Option<String>>, // снимок присутствия при старте; в тестах — подделка
     speakers: Box<dyn Fn() -> String>, // динамики ноутбука для Омы, пока наушники вынуты; в тестах — подделка
+    bt_out: Box<dyn Fn() -> bool>, // звук по умолчанию — в Bluetooth-наушники; в тестах — подделка
     watch: Watch,              // сторож: здоровье агентов и что делать
     limits: Limits,            // проценты лимитов и прогноз
     limits_bad: bool,          // лимит кончится раньше сброса: промежуточное не пересказываем
@@ -336,6 +337,7 @@ pub fn run() {
         night_keep: false,
         facts_src: Box::new(move || std::fs::read_to_string(&facts).ok()),
         speakers: Box::new(crate::audio::speakers),
+        bt_out: Box::new(crate::audio::bluetooth_out),
         watch: Watch::default(),
         limits: Limits::default(),
         limits_bad: false,
@@ -1036,8 +1038,8 @@ impl State {
         if let Some(t) = self.here_ask.filter(|t| secs >= t + HERE_WAIT && !self.oma.talking && self.listen_after.is_none()) {
             // вставил наушники или взял звонок — слушает и молча
             if self.presence.mode(secs) == Mode::Unsure && self.presence.last_input(secs) < t {
-                if !self.here_speakers && self.presence.buds() == presence::Buds::In {
-                    // в наушники не ответил — они, может, лежат на столе: ещё раз в динамики, слушать ноутбуком
+                if !self.here_speakers && self.presence.buds() != presence::Buds::Out && (self.bt_out)() {
+                    // в наушники не ответил — они, может, лежат на столе (датчик путает или молчит): ещё раз в динамики, слушать ноутбуком
                     self.here_speakers = true;
                     self.route();
                     eprintln!("agent-speak: говорю (here, в динамики): {ARE_YOU_THERE}");
@@ -1495,6 +1497,7 @@ mod tests {
             night_keep: false,
             facts_src: Box::new(|| None), // снимка нет — как без сервиса присутствия
             speakers: Box::new(|| "speakers".into()),
+            bt_out: Box::new(|| false),
             watch: Watch::default(),
             limits: Limits::default(),
             limits_bad: false,
@@ -2923,9 +2926,37 @@ mod tests {
     }
 
     #[test]
+    fn bluetooth_out_without_sensor_asks_again_through_speakers() {
+        // датчик молчит («неизвестно»), а звук идёт в Bluetooth-наушники — они могут лежать на столе
+        let (mut st, env) = env_state();
+        st.bt_out = Box::new(|| true);
+        with_agents(&mut st, &["s", "t"]);
+        let now = secs_at(&mut st, 1100);
+        snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000}));
+        final_s(&mut st);
+        st.tick();
+        heard(&mut st, &env);
+        *now.lock().unwrap() += HERE_WAIT;
+        st.tick();
+        assert_eq!(texts(&st).join(" "), ARE_YOU_THERE);
+        assert_eq!(*st.shared.sink.lock().unwrap(), "speakers");
+    }
+
+    #[test]
+    fn laptop_speakers_ask_once() {
+        let (mut st, env, now) = asked_are_you_there(); // звук и так в динамиках ноутбука
+        heard(&mut st, &env);
+        *now.lock().unwrap() += HERE_WAIT;
+        st.tick();
+        assert!(texts(&st).is_empty() && !st.here_speakers, "второй раз спрашивать некуда");
+        assert_eq!(st.presence.mode(*now.lock().unwrap()), Mode::Away);
+    }
+
+    #[test]
     fn buds_in_unanswered_asks_again_through_speakers() {
         let (mut st, env) = env_state();
         with_agents(&mut st, &["s", "t"]);
+        st.bt_out = Box::new(|| true);
         let now = secs_at(&mut st, 1100);
         snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000, "buds": "in"}));
         final_s(&mut st);
@@ -2949,6 +2980,7 @@ mod tests {
     fn answer_to_speakers_ask_returns_to_buds() {
         let (mut st, env) = env_state();
         with_agents(&mut st, &["s", "t"]);
+        st.bt_out = Box::new(|| true);
         let now = secs_at(&mut st, 1100);
         snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000, "buds": "in"}));
         final_s(&mut st);

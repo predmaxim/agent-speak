@@ -61,6 +61,11 @@ pub fn speakers() -> String {
     Command::new("pactl").args(["list", "short", "sinks"]).output().map(|o| pick_speakers(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default()
 }
 
+/// Звук по умолчанию идёт в Bluetooth-наушники.
+pub fn bluetooth_out() -> bool {
+    Command::new("pactl").arg("get-default-sink").output().is_ok_and(|o| o.stdout.starts_with(b"bluez_"))
+}
+
 fn needs_respawn(has_child: bool, spawned_sink: &str, sink: &str) -> bool {
     !has_child || spawned_sink != sink
 }
