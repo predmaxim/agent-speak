@@ -126,7 +126,7 @@ class Conversation:
         if first and w["kind"] == "here":
             if is_yes(text):
                 return acts + self.end()
-            ctx = "Ома спросила: «Ты тут? Есть новости». "
+            ctx = "Ома спросила: «Эй, ты тут? Есть новости». "
         elif first:
             if w["kind"] == "news" and is_ack(text):
                 return acts + self.end()

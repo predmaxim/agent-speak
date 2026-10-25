@@ -288,7 +288,7 @@ def test_are_you_there_yes_closes():
 def test_are_you_there_other_goes_to_brain():
     clk, cv = _conv()
     cv.listen(5, "here", "Ты тут?")
-    assert ("send", "через минуту", "Ома спросила: «Ты тут? Есть новости». ") in _say(clk, cv, "через минуту")
+    assert ("send", "через минуту", "Ома спросила: «Эй, ты тут? Есть новости». ") in _say(clk, cv, "через минуту")
 
 
 def test_click_conversation_ack_still_sent():
