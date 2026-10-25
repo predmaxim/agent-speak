@@ -12,7 +12,7 @@ use crate::news::{Board, Class, News, SUMMARY};
 use crate::notice::notify as notice;
 use crate::presence::{self, Mode, Presence};
 use crate::queue::{Item, Kind, Queue};
-use crate::source::{claude, codex, tail::Tailer};
+use crate::source::{claude, codex, tail::{tail_of, Tailer}};
 use crate::speaker::{self, Shared};
 use crate::text::{prepare, terms::Terms};
 use crate::tts::Tts;
@@ -369,17 +369,6 @@ fn final_message(p: &serde_json::Value, transcript: &Path) -> Option<String> {
     }
     std::thread::sleep(Duration::from_millis(300));
     claude::last_turn(&std::fs::read_to_string(transcript).unwrap_or_default()).pop()
-}
-
-/// Хвост транскрипта: последний вызов инструмента всегда в конце, весь файл (мегабайты) читать незачем.
-fn tail_of(path: &str) -> String {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut buf = Vec::new();
-    if let Ok(mut f) = std::fs::File::open(path) {
-        let _ = f.seek(SeekFrom::End(-256 * 1024)).or_else(|_| f.seek(SeekFrom::Start(0)));
-        let _ = f.read_to_end(&mut buf);
-    }
-    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Факты о агенте без чтения диска: то, что знает реестр.

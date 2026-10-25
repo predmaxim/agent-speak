@@ -4,6 +4,16 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+/// Хвост транскрипта: последний вызов инструмента всегда в конце, весь файл (мегабайты) читать незачем.
+pub fn tail_of(path: &str) -> String {
+    let mut buf = Vec::new();
+    if let Ok(mut f) = std::fs::File::open(path) {
+        let _ = f.seek(SeekFrom::End(-256 * 1024)).or_else(|_| f.seek(SeekFrom::Start(0)));
+        let _ = f.read_to_end(&mut buf);
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 pub struct Tailer {
     offsets: HashMap<PathBuf, (u64, Vec<u8>)>,
 }

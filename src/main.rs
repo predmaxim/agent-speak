@@ -11,6 +11,7 @@ mod limits;
 mod news;
 mod mux;
 mod notice;
+mod orders;
 mod presence;
 mod queue;
 mod source;
@@ -32,6 +33,10 @@ fn main() {
         Some("pause") => Msg::Pause,
         Some("voice") => Msg::Oma { action: serde_json::json!({"do": "talk"}) },
         Some("statusline") => return statusline(&args[1..]),
+        // Ома передаёт агентам ответы и задания: исход её мозгу нужен сразу — без демона
+        Some("tell") if args.len() == 4 => return done(args[2].parse().map_err(|_| "option — число".to_string()).and_then(|o| orders::tell(&args[1], o, &args[3]))),
+        Some("launch") if args.len() == 3 => return done(orders::launch(&args[1], &args[2])),
+        Some("projects") => return println!("{}", orders::projects().join("\n")),
         Some("hook") => {
             // вложенные вызовы моделей словаря не должны озвучиваться
             if std::env::var_os("AGENT_SPEAK").is_some() {
@@ -58,13 +63,21 @@ fn main() {
             Msg::Hook { kind, payload: serde_json::from_str(&raw).unwrap_or_default() }
         }
         _ => {
-            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | hook <kind> [json] | statusline [команда …]");
+            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> | launch <path> <text> | projects");
             std::process::exit(2);
         }
     };
     let read = matches!(msg, Msg::Read);
     if !ipc::send(&msg) && read {
         eprintln!("agent-speak: сервис озвучки не запущен (systemctl --user start agent-speakd)");
+    }
+}
+
+/// Исход команды Омы: ошибка — одна строка в stderr (её дословно получает мозг), код 1.
+fn done(r: Result<(), String>) {
+    if let Err(e) = r {
+        eprintln!("{e}");
+        std::process::exit(1);
     }
 }
 
