@@ -47,6 +47,9 @@ const SCAN_EVERY: Duration = Duration::from_secs(2);
 /// Текст работающего агента копится столько, затем уходит на пересказ промежуточного.
 const PROGRESS_EVERY: Duration = Duration::from_secs(60);
 
+/// Точный фокус (вкладка Orca) держится столько: вопрос агента в фокусе стоит на доске, и речь проверяет его каждый тик.
+const PRECISE_FOCUS_TTL: Duration = Duration::from_secs(5);
+
 /// После новостей Ома слушает ответ столько секунд.
 const LISTEN_SECS: u64 = 5;
 
@@ -133,7 +136,8 @@ struct State {
     asm: Assembler,
     tail: Tailer,
     focus_cache: Option<(Instant, Option<SessionRef>)>, // None — устарел
-    focus_src: Box<dyn FnMut() -> Option<SessionRef>>, // окно в фокусе; в тестах — подделка
+    focus_precise: Option<(Instant, Option<SessionRef>)>, // точный — со своим сроком: CLI Orca дорог
+    focus_src: Box<dyn FnMut(bool) -> Option<SessionRef>>, // агент в фокусе (точно — true); в тестах — подделка
     clock: Box<dyn Fn() -> Instant>,
     subs: Vec<UnixStream>,
     projects: HashMap<String, String>, // сессия → имя папки проекта (из хуков и окна в фокусе)
@@ -155,6 +159,7 @@ struct State {
     listen_at: Option<Instant>, // новости смолкли: окно ответа — когда доиграет хвост pw-cat
     presence: Presence,         // слушает ли пользователь: снимки сервиса оболочки и его слова
     here_ask: Option<u64>,      // «Ты тут?» спрошен: ответа ждём HERE_WAIT с открытия окна ответа
+    seen_mode: Option<Mode>,    // режим присутствия прошлого тика — смену пишем в журнал
     welcome: bool,              // вернулся после долгого отсутствия: следующие новости — с приветствием и обзором
     night_keep: bool,           // тишина настала, пока пользователя нет: накопленное ждёт утра
     facts_src: Box<dyn Fn() -> Option<String>>, // снимок присутствия при старте; в тестах — подделка
@@ -292,6 +297,7 @@ pub fn run() {
         tail: Tailer::new(),
         focus_cache: None,
         focus_src: Box::new(focus::focused),
+        focus_precise: None,
         clock: Box::new(Instant::now),
         subs: Vec::new(),
         projects: HashMap::new(),
@@ -322,6 +328,7 @@ pub fn run() {
         listen_at: None,
         presence: Presence::default(),
         here_ask: None,
+        seen_mode: None,
         welcome: false,
         night_keep: false,
         facts_src: Box::new(move || std::fs::read_to_string(&facts).ok()),
@@ -521,16 +528,18 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
 }
 
 impl State {
-    fn focused(&mut self) -> Option<SessionRef> {
+    /// Агент в фокусе; precise — и среди вкладок одного окна (Orca), только перед речью и чтением.
+    fn focused(&mut self, precise: bool) -> Option<SessionRef> {
         let now = (self.clock)();
-        if !self.focus_cache.as_ref().is_some_and(|(t, _)| now.saturating_duration_since(*t) < Duration::from_millis(500)) {
-            let f = (self.focus_src)();
+        let (cache, ttl) = if precise { (&mut self.focus_precise, PRECISE_FOCUS_TTL) } else { (&mut self.focus_cache, Duration::from_millis(500)) };
+        if !cache.as_ref().is_some_and(|(t, _)| now.saturating_duration_since(*t) < ttl) {
+            let f = (self.focus_src)(precise);
             if let Some(f) = &f {
                 self.projects.insert(f.id.clone(), f.project.clone());
             }
-            self.focus_cache = Some((now, f));
+            *(if precise { &mut self.focus_precise } else { &mut self.focus_cache }) = Some((now, f));
         }
-        self.focus_cache.as_ref().and_then(|(_, f)| f.clone())
+        (if precise { &self.focus_precise } else { &self.focus_cache }).as_ref().and_then(|(_, f)| f.clone())
     }
 
     fn quiet(&self) -> bool {
@@ -680,7 +689,7 @@ impl State {
     /// в фокусе пузырей не даёт — пользователь и так смотрит на него.
     fn bubble(&mut self, session: &str, id: &str, who: &str, text: &str, kind: &str) {
         let alone = self.registry.only().is_some_and(|e| e.id == session);
-        if alone && self.focused().is_some_and(|f| f.id == session) {
+        if alone && self.focused(false).is_some_and(|f| f.id == session) {
             return;
         }
         let text = crate::text::clean::plain(text); // разметка markdown пузырю не нужна
@@ -744,6 +753,7 @@ impl State {
             return;
         }
         let who = e.title.clone();
+        eprintln!("agent-speak: пересказ {:?} {} ({}): {}", d.ask, e.project, &d.session[..8.min(d.session.len())], d.say);
         self.registry.summary(&d.session, &d.say);
         let kind = match d.ask {
             Ask::Final | Ask::Summary => Some("final"),
@@ -782,13 +792,14 @@ impl State {
             // занят — срочное сторожа всё равно звучит, без окна ответа: микрофон ему ни к чему
             if mode == Mode::Busy {
                 if let Some(t) = self.board.take_urgent(now) {
+                    eprintln!("agent-speak: говорю (срочное, {mode:?}): {}", t.chars().take(200).collect::<String>());
                     self.enqueue(Agent::Claude, "news", &t, Kind::News);
                 }
             }
             return;
         }
         // hyprctl — только когда есть что сказать
-        let focused = if self.board.is_empty() { None } else { self.focused().map(|f| f.id) };
+        let focused = if self.board.is_empty() { None } else { self.focused(true).map(|f| f.id) };
         let (kind, text) = if mode == Mode::Unsure {
             if !self.board.sayable(now, focused.as_deref()) {
                 return; // «Есть новости» не врёт: после «да» прозвучит хоть что-то
@@ -816,6 +827,7 @@ impl State {
             }
             (if self.board.asked().is_some() { "question" } else { "news" }, parts.join(" "))
         };
+        eprintln!("agent-speak: говорю ({kind}, {mode:?}): {}", text.chars().take(200).collect::<String>());
         if self.enqueue(Agent::Claude, "news", &text, Kind::News) > 0 {
             self.oma_send(&serde_json::json!({"do": "warm"}));
             self.listen_after = Some((kind, text));
@@ -993,7 +1005,7 @@ impl State {
             self.next_scan = now + SCAN_EVERY;
             self.rescan();
             self.registry.tick((self.now_secs)());
-            let focused = self.focused().map(|f| f.id);
+            let focused = self.focused(false).map(|f| f.id);
             self.registry.set_focused(focused.as_deref());
             self.push_agents();
         }
@@ -1014,6 +1026,10 @@ impl State {
                 self.presence.unanswered();
             }
             self.here_ask = None;
+        }
+        let mode = self.presence.mode(secs);
+        if self.seen_mode.replace(mode).is_some_and(|m| m != mode) {
+            eprintln!("agent-speak: присутствие: {mode:?}");
         }
         self.speak_news(); // раньше окна ответа: новые новости встают перед ним, а не поверх
         self.listen_if_due(now);
@@ -1106,6 +1122,7 @@ impl State {
     /// Долгое отсутствие — приветствие, обзор и повтор неуслышанного; короткое — журнал сказанного забыт.
     fn on_back(&mut self, absence: Option<u64>) {
         let Some(a) = absence else { return };
+        eprintln!("agent-speak: присутствие: вернулся, не было {a} с");
         self.here_ask = None;
         let long = a >= presence::BACK_AFTER;
         self.welcome |= long;
@@ -1120,8 +1137,8 @@ impl State {
             eprintln!("agent-speak: read: остановлено");
             return;
         }
-        self.focus_cache = None; // ручное чтение — по свежему фокусу
-        let Some(s) = self.focused() else {
+        (self.focus_cache, self.focus_precise) = (None, None); // ручное чтение — по свежему фокусу
+        let Some(s) = self.focused(true) else {
             eprintln!("agent-speak: read: нет агента в фокусе");
             notice("В фокусе нет агента", "");
             return;
@@ -1319,6 +1336,7 @@ impl State {
 
     /// Фраза сторожа: пузырь всегда, вне тишины — на доску. Не агент из реестра (лимит, закрывшийся) — пузырь Омы.
     fn watch_say(&mut self, session: &str, text: &str, class: Class) {
+        eprintln!("agent-speak: сторож {class:?} ({}): {text}", &session[..8.min(session.len())]);
         let known = self.registry.get(session).map(|e| e.title.clone());
         let who = known.clone().unwrap_or_else(|| "Ома".into());
         let kind = if class == Class::Question { "question" } else { "status" };
@@ -1386,7 +1404,8 @@ mod tests {
             asm: Assembler::new(),
             tail: Tailer::new(),
             focus_cache: None,
-            focus_src: Box::new(|| None), // hyprctl в тестах не зовётся
+            focus_precise: None,
+            focus_src: Box::new(|_| None), // hyprctl в тестах не зовётся
             clock: Box::new(Instant::now),
             subs: Vec::new(),
             projects: HashMap::new(),
@@ -1408,6 +1427,7 @@ mod tests {
             listen_at: None,
             presence: Presence::default(),
             here_ask: None,
+            seen_mode: None,
             welcome: false,
             night_keep: false,
             facts_src: Box::new(|| None), // снимка нет — как без сервиса присутствия
@@ -2022,7 +2042,7 @@ mod tests {
         let focus: Arc<Mutex<Option<SessionRef>>> = Default::default();
         let now = Arc::new(Mutex::new(Instant::now()));
         let (f, n) = (focus.clone(), now.clone());
-        st.focus_src = Box::new(move || f.lock().unwrap().clone());
+        st.focus_src = Box::new(move |_| f.lock().unwrap().clone());
         st.clock = Box::new(move || *n.lock().unwrap());
         (st, (focus, now))
     }
@@ -2063,6 +2083,25 @@ mod tests {
         let line = serde_json::json!({"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text": text}]}});
         std::fs::write(&path, line.to_string()).unwrap();
         *env.0.lock().unwrap() = Some(SessionRef { transcript: path, ..sref(id) });
+    }
+
+    #[test]
+    fn speaking_asks_precise_focus_scanning_does_not() {
+        // точный фокус в Orca — вызов CLI на полсекунды процессора: только перед речью, не на каждом сканировании
+        let mut st = test_state();
+        let asked: Arc<Mutex<Vec<bool>>> = Default::default();
+        let a = asked.clone();
+        st.focus_src = Box::new(move |precise| {
+            a.lock().unwrap().push(precise);
+            None
+        });
+        with_agents(&mut st, &["s"]);
+        st.next_scan = Instant::now();
+        st.tick();
+        assert_eq!(*asked.lock().unwrap(), [false], "сканирование — дёшево");
+        st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
+        st.speak_news();
+        assert_eq!(asked.lock().unwrap().last(), Some(&true), "перед речью — точно");
     }
 
     #[test]
@@ -2687,7 +2726,7 @@ mod tests {
         ask(&mut st);
         assert!(bubbles(&mut r).is_empty());
         *env.0.lock().unwrap() = None; // фокус ушёл на не-агента
-        *env.1.lock().unwrap() += Duration::from_secs(1); // прежний фокус в кэше устарел
+        *env.1.lock().unwrap() += PRECISE_FOCUS_TTL; // прежний фокус в кэше устарел
         ask(&mut st);
         let b = bubbles(&mut r);
         assert_eq!((b.len(), b[0]["agent"].as_str()), (1, Some("s1")));
@@ -2948,7 +2987,7 @@ mod tests {
         st.tick();
         assert!(texts(&st).is_empty(), "вопрос ждёт, пока агент в фокусе");
         *env.0.lock().unwrap() = None;
-        *env.1.lock().unwrap() += Duration::from_secs(1); // прежний фокус в кэше устарел
+        *env.1.lock().unwrap() += PRECISE_FOCUS_TTL; // прежний фокус в кэше устарел
         st.tick();
         assert_eq!(texts(&st), ["плуг: Удалить старый код?"]); // итог снят без речи
     }
@@ -2987,8 +3026,8 @@ mod tests {
 
     #[test]
     fn news_spoken_into_void_repeated_on_return() {
-        let (mut st, now) = presence_state(1060);
-        snap(&mut st, serde_json::json!({"at": 1060, "idle_since": 1000}));
+        let (mut st, now) = presence_state(1050);
+        snap(&mut st, serde_json::json!({"at": 1050, "idle_since": 1000}));
         final_s(&mut st);
         st.tick();
         assert_eq!(texts(&st), ["плуг: Фича готова."]);
@@ -3000,8 +3039,8 @@ mod tests {
 
     #[test]
     fn listener_sitting_still_hears_no_repeat() {
-        let (mut st, now) = presence_state(1070);
-        snap(&mut st, serde_json::json!({"at": 1070, "idle_since": 1000}));
+        let (mut st, now) = presence_state(1050);
+        snap(&mut st, serde_json::json!({"at": 1050, "idle_since": 1000}));
         final_s(&mut st);
         st.tick();
         assert_eq!(texts(&st), ["плуг: Фича готова."]);

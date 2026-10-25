@@ -44,6 +44,10 @@ pub trait Mux: Sync {
     fn projects(&self) -> Result<Vec<String>, String> {
         Ok(Vec::new())
     }
+    /// Терминал, активный в сессии мультиплексора, где живёт pane (вкладка в фокусе); None — не знает.
+    fn active(&self, _pane: &Pane) -> Result<Option<String>, String> {
+        Ok(None)
+    }
     /// Новый агент Claude в папке cwd с первым сообщением prompt.
     fn launch(&self, _cwd: &str, _prompt: &str) -> Result<(), String> {
         Err(format!("{} не запускает агентов", self.name()))
@@ -96,6 +100,19 @@ pub fn locate(pid: u32) -> Option<Pane> {
 
 fn adapter(pane: &Pane) -> Result<&'static dyn Mux, String> {
     adapters().into_iter().find(|m| m.name() == pane.mux).ok_or_else(|| format!("нет адаптера {}", pane.mux))
+}
+
+/// Агент (pid) в активном терминале, среди агентов под одним окном (Orca держит всех в одном окне).
+pub fn active_among(pids: &[u32]) -> Option<u32> {
+    let panes: Vec<(u32, Pane)> = pids.iter().filter_map(|&p| locate(p).map(|pane| (p, pane))).collect();
+    among(&panes, |pane| adapter(pane).ok()?.active(pane).ok().flatten())
+}
+
+/// Чей терминал активен: спрашиваем сессию первого терминала, она у агентов одного окна общая.
+fn among(panes: &[(u32, Pane)], active: impl Fn(&Pane) -> Option<String>) -> Option<u32> {
+    let (_, first) = panes.first()?;
+    let id = active(first)?;
+    panes.iter().find(|(_, p)| p.mux == first.mux && p.via == first.via && p.id == id).map(|(pid, _)| *pid)
 }
 
 pub fn screen(pane: &Pane) -> Result<String, String> {
@@ -250,6 +267,15 @@ mod tests {
         let pane = Pane { mux: "rec", id: "x".into(), via: String::new() };
         perform_on(&m, &pane, &[Step::Key(Key::Digit(3)), Step::Type("зелёный".into()), Step::Key(Key::Enter)]).unwrap();
         assert_eq!(*m.0.lock().unwrap(), ["Digit(3)", "type:зелёный", "Enter"], "поле меню: Ctrl+U там не нужен");
+    }
+
+    #[test]
+    fn active_pane_picks_its_agent() {
+        let p = |id: &str| Pane { mux: "orca", id: id.into(), via: "/o".into() };
+        let panes = [(1, p("t1")), (2, p("t2"))];
+        assert_eq!(among(&panes, |_| Some("t2".into())), Some(2));
+        assert_eq!(among(&panes, |_| None), None, "мультиплексор не ответил — фокус неизвестен");
+        assert_eq!(among(&[], |_| panic!("терминалов нет")), None);
     }
 
     #[test]

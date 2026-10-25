@@ -40,6 +40,12 @@ impl Mux for Orca {
         let out = cli(orca(pane, &["read", "--screen"]))?;
         screen_text(&out).ok_or_else(|| error_of(&out))
     }
+    fn active(&self, pane: &Pane) -> Result<Option<String>, String> {
+        let mut c = Command::new(&pane.via);
+        // без --terminal CLI берёт активный терминал; из папки вне worktree — во всём окне, а не в worktree папки
+        c.args(["terminal", "show", "--json"]).current_dir("/");
+        Ok(active_handle(&cli(c)?))
+    }
     fn projects(&self) -> Result<Vec<String>, String> {
         let mut c = Command::new(orca_bin());
         c.args(["worktree", "list", "--json"]);
@@ -70,6 +76,12 @@ fn orca_bin() -> String {
     let config = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{}/.config", std::env::var("HOME").unwrap_or_default()));
     let shim = format!("{config}/orca/linux-orca-cli-shim/orca");
     if std::path::Path::new(&shim).exists() { shim } else { "orca".into() }
+}
+
+/// Ответ `terminal show` без `--terminal`: handle активного терминала.
+fn active_handle(out: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(out).ok()?;
+    v["result"]["terminal"]["handle"].as_str().map(str::to_string)
 }
 
 /// Ответ `worktree list`: папки worktree; мусор — пусто.
@@ -127,6 +139,12 @@ mod tests {
         assert!(accepted(r#"{"ok":true,"result":{"send":{"accepted":false}}}"#).is_err());
         assert_eq!(screen_text(r#"{"ok":true,"result":{"terminal":{"tail":["a","b"]}}}"#).unwrap(), "a\nb");
         assert_eq!(screen_text("мусор"), None);
+    }
+
+    #[test]
+    fn active_terminal_reply() {
+        assert_eq!(active_handle(r#"{"ok":true,"result":{"terminal":{"handle":"term_1","title":"x"}}}"#), Some("term_1".into()));
+        assert_eq!(active_handle(r#"{"ok":false,"error":{"message":"no active terminal"}}"#), None);
     }
 
     #[test]

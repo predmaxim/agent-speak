@@ -30,9 +30,19 @@ impl Mux for Herdr {
     fn type_text(&self, pane: &Pane, text: &str) -> Result<(), String> {
         ok(&cli(herdr(pane, &["pane", "send-text", &pane.id, text]))?)
     }
+    fn active(&self, pane: &Pane) -> Result<Option<String>, String> {
+        Ok(focused_pane(&cli(herdr(pane, &["pane", "list"]))?))
+    }
     fn screen(&self, pane: &Pane) -> Result<String, String> {
         cli(herdr(pane, &["pane", "read", &pane.id, "--source", "visible", "--lines", "40"]))
     }
+}
+
+/// Ответ `pane list`: панель в фокусе.
+fn focused_pane(out: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(out.trim()).ok()?;
+    let panes = v["result"]["panes"].as_array()?;
+    panes.iter().find(|p| p["focused"] == true)?["pane_id"].as_str().map(str::to_string)
 }
 
 /// Отказ `agent prompt` — повод послать текст командой; агент в диалоге (agent_blocked) — нет: Enter выбрал бы пункт.
@@ -88,6 +98,13 @@ mod tests {
     fn blocked_agent_gets_no_command_fallback() {
         assert!(!as_command("agent w1:p1 is blocked and requires interactive input"), "текст с Enter в диалог — выбор пункта");
         assert!(as_command("agent target w1:p1 not found"), "herdr не распознал агента — команда в оболочку");
+    }
+
+    #[test]
+    fn focused_pane_reply() {
+        let out = r#"{"result":{"panes":[{"pane_id":"w1:p1","focused":false},{"pane_id":"w1:p2","focused":true}],"type":"pane_list"}}"#;
+        assert_eq!(focused_pane(out), Some("w1:p2".into()));
+        assert_eq!(focused_pane(r#"{"error":{"message":"no server"}}"#), None);
     }
 
     #[test]

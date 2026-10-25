@@ -24,7 +24,7 @@ pub const ANSWER_WAIT: u64 = 120;
 /// Сессия сводки возвращения: не агент, поэтому retain_sessions её не снимает.
 pub const SUMMARY: &str = "summary";
 /// Сказанное позже last_input + столько секунд считается неуслышанным.
-pub const UNHEARD_AFTER: u64 = 60;
+pub const UNHEARD_AFTER: u64 = 30;
 
 #[derive(Default)]
 pub struct Board {

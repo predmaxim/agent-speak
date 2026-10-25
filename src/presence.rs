@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Deserializer};
 
-pub const UNSURE_AFTER: u64 = 90;
+pub const UNSURE_AFTER: u64 = 60;
 pub const AWAY_AFTER: u64 = 600;
 pub const BACK_AFTER: u64 = 180; // отсутствие не короче — приветствие и повтор
 pub const BUSY_FOR: u64 = 900;
@@ -193,7 +193,8 @@ mod tests {
     fn idle_thresholds() {
         let mut p = Presence::default();
         p.apply(facts(1005, 1000), 1005);
-        assert_eq!([p.mode(1089), p.mode(1090)], [Mode::Here, Mode::Unsure]);
+        // минута без ввода — уже «не уверена»: отошёл на пару минут — новости не звучат в пустоту
+        assert_eq!([p.mode(1059), p.mode(1060)], [Mode::Here, Mode::Unsure]);
         p.apply(facts(1595, 1000), 1595);
         assert_eq!([p.mode(1599), p.mode(1600)], [Mode::Unsure, Mode::Away]);
     }
@@ -202,9 +203,9 @@ mod tests {
     fn input_returns_absence_only_after_unsure_or_away() {
         let mut p = Presence::default();
         p.apply(facts(1030, 1000), 1030);
-        assert_eq!(p.apply(facts(1060, 0), 1060), None);
-        p.apply(facts(1230, 1060), 1230);
-        assert_eq!(p.apply(facts(1260, 0), 1260), Some(200));
+        assert_eq!(p.apply(facts(1050, 0), 1050), None);
+        p.apply(facts(1230, 1050), 1230);
+        assert_eq!(p.apply(facts(1260, 0), 1260), Some(210));
     }
 
     #[test]
