@@ -2,6 +2,7 @@
 В очередь out: ("start", n) — начало речи, ("phrase", текст, n) — распознанная фраза;
 n — Ear.seq, номер речи (растёт всегда, при перезапуске слуха не сбрасывается)."""
 import asyncio
+import sys
 import contextlib
 import re
 import time
@@ -126,6 +127,7 @@ class Ear:
             # shortcut: микрофон выбирается при включении слуха; наушники вынули посреди разговора — слух на прежнем до следующего включения
             target = await asyncio.to_thread(self._mic) if self.speakers is None else await asyncio.to_thread(lambda: self._mic(out=self.speakers))
             self.echo = target.startswith("mic_aec")
+            print(f"agent_voice: слух: вход {target or 'по умолчанию'}", file=sys.stderr, flush=True)
             cmd = rec_cmd(self.cmd, target)
             proc = self._proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
             phrases = asyncio.Queue()
@@ -159,6 +161,7 @@ class Ear:
             try:
                 model = await self.whisper.get()
                 text = await asyncio.to_thread(transcribe, model, pcm)
+                print(f"agent_voice: слух: «{text[:120]}»", file=sys.stderr, flush=True)
                 self.audio[n] = pcm  # реплику из нескольких фраз Ома при отправке распознаёт целиком
                 await self.out.put(("phrase", text, n))
             except Exception as e:
