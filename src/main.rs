@@ -8,6 +8,7 @@ mod focus;
 mod ipc;
 mod learn;
 mod news;
+mod mux;
 mod notice;
 mod presence;
 mod queue;
@@ -15,6 +16,7 @@ mod source;
 mod speaker;
 mod text;
 mod tts;
+mod watch;
 
 use ipc::Msg;
 use std::io::Read;
