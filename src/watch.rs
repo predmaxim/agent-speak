@@ -70,7 +70,7 @@ const WAKE_AFTER: u64 = 60;
 const NET_WAIT: u64 = 60;
 const NET_TRIES: usize = 3;
 const NET_WINDOW: u64 = 1800;
-/// Больше стольких попыток поднять зависшего за час — сдаёмся и зовём пользователя.
+/// Больше стольких попыток поднять зависшего за час — зовём пользователя; попытка вышла из часа — пробуем снова.
 const ATTEMPTS: usize = 3;
 const ATTEMPTS_WINDOW: u64 = 3600;
 /// Знаков ввода вызова в вопросе модели о зависании.
@@ -104,7 +104,8 @@ struct Track {
     active: u64, // active_at прошлого тика: сменился — агент ожил
     ladder: Ladder,
     said: bool,   // о нынешней тишине уже сказано (опасное, вне терминала, сдалась)
-    nudged: bool, // помощникам уже написано за эту тишину
+    nudged: u64,  // когда за эту тишину написали агенту про помощника; 0 — не писали
+    gave_up: bool, // попытки за час кончились, пользователю сказано
     sub: bool,    // прерван ход с сабагентом
     attempts: Vec<u64>,
     killed_at: u64, // Ома нажала Ctrl+C: агент, закрывшийся вскоре, поднять и при пользователе за компьютером
@@ -124,7 +125,7 @@ struct Track {
 impl Track {
     /// Агент ожил: тишина и всё, что о ней сказано и сделано, позади.
     fn calm(&mut self) {
-        (self.ladder, self.said, self.nudged, self.alarm) = (Ladder::None, false, false, false);
+        (self.ladder, self.said, self.nudged, self.gave_up, self.alarm) = (Ladder::None, false, 0, false, false);
         self.health = self.limited.map(|(u, _)| limit_health(u)).unwrap_or_default();
     }
 }
@@ -360,20 +361,39 @@ fn outside(t: &mut Track, f: &Facts, now: u64) -> Vec<Act> {
     say(&f.id, format!("{}: агент завис, но он не в herdr или Orca — перезапусти сам.", f.project), true)
 }
 
+/// Попыток за час не осталось — сказать пользователю один раз; None — пробовать можно.
+fn spent(t: &mut Track, f: &Facts, now: u64, what: &str) -> Option<Vec<Act>> {
+    t.attempts.retain(|&x| now.saturating_sub(x) < ATTEMPTS_WINDOW);
+    if t.attempts.len() < ATTEMPTS {
+        return None;
+    }
+    if t.gave_up {
+        return Some(vec![]);
+    }
+    (t.gave_up, t.alarm, t.alarm_at) = (true, true, now);
+    let n = (t.attempts[0] + ATTEMPTS_WINDOW - now).div_ceil(60);
+    Some(say(&f.id, format!("{}: {what}. Через {n} мин попробую снова.", f.project), true))
+}
+
 /// Работает, а событий нет `quiet` секунд: помощники, опасное, лестница Esc → Ctrl+C → перезапуск.
 fn hang(t: &mut Track, ctx: &Ctx, f: &Facts, quiet: u64) -> Vec<Act> {
     let (p, now, n) = (&f.project, ctx.now, quiet / 60);
     if f.helpers > 0 {
         // помощник бывает сервером и молчит часами: писать агенту — только по вердикту модели «висит»
         match t.ladder {
-            _ if t.nudged => return vec![],
-            Ladder::Hung => {
-                t.nudged = true;
-                t.attempts.retain(|&x| now.saturating_sub(x) < ATTEMPTS_WINDOW);
-                if t.attempts.len() >= ATTEMPTS {
-                    (t.said, t.alarm, t.alarm_at) = (true, true, now);
-                    return say(&f.id, format!("{p}: помощник агента снова молчит — посмотри сам."), true);
+            // просьба агента не разбудила — зовём пользователя, один раз
+            _ if t.nudged > 0 => {
+                if now.saturating_sub(t.nudged) < ctx.hung_after || t.said {
+                    return vec![];
                 }
+                (t.said, t.alarm, t.alarm_at) = (true, true, now);
+                return say(&f.id, format!("{p}: агент не ответил на просьбу проверить помощника — посмотри сам."), true);
+            }
+            Ladder::Hung => {
+                if let Some(acts) = spent(t, f, now, "помощник агента снова молчит — посмотри сам") {
+                    return acts;
+                }
+                t.nudged = now;
                 t.attempts.push(now);
             }
             Ladder::Judging => return vec![],
@@ -434,10 +454,8 @@ fn hang(t: &mut Track, ctx: &Ctx, f: &Facts, quiet: u64) -> Vec<Act> {
         return say(&f.id, text, true);
     }
     let Some(pane) = &f.pane else { return outside(t, f, now) };
-    t.attempts.retain(|&x| now.saturating_sub(x) < ATTEMPTS_WINDOW);
-    if t.attempts.len() >= ATTEMPTS {
-        (t.said, t.alarm, t.alarm_at) = (true, true, now);
-        return say(&f.id, format!("{p}: агент снова завис — поднять не получилось, посмотри сам."), true);
+    if let Some(acts) = spent(t, f, now, "агент снова завис — поднять не получилось, посмотри сам") {
+        return acts;
     }
     let sub = matches!(name, "Agent" | "Task");
     // без модели и при долгой тишине — завис; сабагент, молчащий вместе с родителем, — тоже
@@ -664,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn three_attempts_an_hour_then_gives_up() {
+    fn three_attempts_an_hour_then_waits_for_the_window() {
         let mut w = Watch::default();
         let mut t = 1;
         for i in 0..3 {
@@ -673,8 +691,11 @@ mod tests {
             t += 801;
         }
         let a = Facts { call: Some(json!({"name": "Agent", "input": {}})), active_at: t, ..f("a") };
-        let acts = w.check(&ctx(t + 800, 999), vec![a], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент снова завис — поднять не получилось, посмотри сам."), "{acts:?}");
+        let acts = w.check(&ctx(t + 800, 999), vec![a.clone()], |_| true, |_| false);
+        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент снова завис — поднять не получилось, посмотри сам. Через 20 мин попробую снова."), "{acts:?}");
+        assert_eq!(w.trouble(), 1);
+        assert!(w.check(&ctx(4400, 999), vec![a.clone()], |_| true, |_| false).is_empty(), "сказано один раз, попытки ещё в окне");
+        assert_eq!(run_of(&w.check(&ctx(4401, 999), vec![a], |_| true, |_| false)[0]).unwrap().what, What::Interrupt, "первая попытка вышла из часа — не сдаёмся");
     }
 
     #[test]
@@ -880,8 +901,26 @@ mod tests {
         let a = Facts { helpers: 1, active_at: t, ..f("a") };
         w.check(&ctx(t + 800, 0), vec![a.clone()], |_| true, |_| false);
         w.judged("a", true, t + 801);
-        let acts = w.check(&ctx(t + 802, 0), vec![a], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: помощник агента снова молчит — посмотри сам."), "{acts:?}");
+        let acts = w.check(&ctx(t + 802, 0), vec![a.clone()], |_| true, |_| false);
+        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: помощник агента снова молчит — посмотри сам. Через 15 мин попробую снова."), "{acts:?}");
+        assert!(w.check(&ctx(t + 900, 0), vec![a.clone()], |_| true, |_| false).is_empty());
+        assert_eq!(run_of(&w.check(&ctx(803 + 3600, 0), vec![a], |_| true, |_| false)[0]).unwrap().what, What::Nudge, "окно освободилось — пишем снова");
+    }
+
+    #[test]
+    fn unanswered_nudge_calls_the_user() {
+        let mut w = Watch::default();
+        let a = Facts { helpers: 1, ..f("a") };
+        w.check(&ctx(800, 0), vec![a.clone()], |_| true, |_| false);
+        w.judged("a", true, 801);
+        assert_eq!(run_of(&w.check(&ctx(802, 0), vec![a.clone()], |_| true, |_| false)[0]).unwrap().what, What::Nudge);
+        assert!(w.check(&ctx(802 + 719, 0), vec![a.clone()], |_| true, |_| false).is_empty(), "ждём ответа агента");
+        let acts = w.check(&ctx(802 + 720, 0), vec![a.clone()], |_| true, |_| false);
+        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент не ответил на просьбу проверить помощника — посмотри сам."), "{acts:?}");
+        assert!(w.check(&ctx(2000, 0), vec![a.clone()], |_| true, |_| false).is_empty(), "один раз");
+        assert_eq!(w.trouble(), 1);
+        assert!(w.check(&ctx(2100, 0), vec![Facts { active_at: 2050, ..a }], |_| true, |_| false).is_empty());
+        assert_eq!(w.trouble(), 0, "агент ожил — тревога снята");
     }
 
     #[test]

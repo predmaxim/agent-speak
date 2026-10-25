@@ -85,15 +85,31 @@ fn post_tool_use(raw: &str, dir: &std::path::Path) -> Option<String> {
     Some(serde_json::json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}).to_string())
 }
 
-/// Строка статуса Claude Code: проценты лимитов — демону, ввод и вывод — прежней команде строки (chain), её код выхода.
+/// Строка статуса Claude Code: проценты лимитов — демону, ввод и вывод — следующей команде (chain), её код выхода.
+/// Без chain следующая — statusLine пользовательских настроек: обёртка стоит в managed-настройках Claude Code,
+/// пользовательскую строку статуса (у автора — Orca, переписывает её при каждом запуске) не трогает.
 fn statusline(chain: &[String]) {
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
     if std::env::var_os("AGENT_SPEAK").is_none() {
         ipc::send(&Msg::Hook { kind: "statusline".into(), payload: serde_json::from_str(&raw).unwrap_or_default() });
     }
-    let Some((cmd, args)) = chain.split_first() else { return };
-    let child = std::process::Command::new(cmd).args(args).stdin(std::process::Stdio::piped()).spawn();
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude"), Into::into);
+    let user = chain.is_empty().then(|| user_statusline(&dir.join("settings.json"))).flatten();
+    let mut cmd = match (chain.split_first(), user) {
+        (Some((c, args)), _) => {
+            let mut x = std::process::Command::new(c);
+            x.args(args);
+            x
+        }
+        (None, Some(u)) => {
+            let mut x = std::process::Command::new("sh");
+            x.args(["-c", &u]);
+            x
+        }
+        (None, None) => return,
+    };
+    let child = cmd.stdin(std::process::Stdio::piped()).spawn();
     let code = match child {
         Ok(mut c) => {
             if let Some(mut w) = c.stdin.take() {
@@ -103,11 +119,17 @@ fn statusline(chain: &[String]) {
             c.wait().ok().and_then(|s| s.code()).unwrap_or(1)
         }
         Err(e) => {
-            eprintln!("agent-speak statusline: {cmd}: {e}");
+            eprintln!("agent-speak statusline: {:?}: {e}", cmd.get_program());
             1
         }
     };
     std::process::exit(code);
+}
+
+/// Команда statusLine из пользовательских настроек Claude Code; своя обёртка — нет: звала бы сама себя.
+fn user_statusline(settings: &std::path::Path) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(settings).ok()?).ok()?;
+    v["statusLine"]["command"].as_str().filter(|c| !c.contains("agent-speak statusline")).map(String::from)
 }
 
 #[cfg(test)]
@@ -126,5 +148,20 @@ mod tests {
         assert!(post_tool_use(r#"{"session_id":"s1","agent_id":"a1"}"#, &dir).is_some(), "сабагент — свой раз");
         assert_eq!(post_tool_use("мусор", &dir), None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn next_statusline_is_the_users_but_never_itself() {
+        let p = std::env::temp_dir().join(format!("oma-settings-{}.json", std::process::id()));
+        let with = |cmd: &str| {
+            std::fs::write(&p, serde_json::json!({"statusLine": {"type": "command", "command": cmd}}).to_string()).unwrap();
+            user_statusline(&p)
+        };
+        assert_eq!(with("/bin/sh ~/.orca/agent-hooks/claude-statusline.sh").as_deref(), Some("/bin/sh ~/.orca/agent-hooks/claude-statusline.sh"));
+        assert_eq!(with("/home/u/.local/bin/agent-speak statusline /bin/sh x.sh"), None, "своя обёртка — цикл");
+        std::fs::write(&p, "{}").unwrap();
+        assert_eq!(user_statusline(&p), None);
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(user_statusline(&p), None);
     }
 }

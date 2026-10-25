@@ -1349,8 +1349,10 @@ impl State {
             let agent = f.key.split(':').next().unwrap_or_default();
             let text = limits::hint(f);
             for e in self.registry.entries().iter().filter(|e| e.agent == agent) {
-                limits::put_hint(&self.hints, &e.id, &text);
-                hinted.insert(e.id.clone());
+                // два плохих окна — подсказка по первому, как и прежде
+                if hinted.insert(e.id.clone()) {
+                    limits::put_hint(&self.hints, &e.id, &text);
+                }
             }
         }
         limits::clear_hints(&self.hints, |s| hinted.contains(s));

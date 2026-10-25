@@ -131,17 +131,14 @@ fn safe(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Подсказка сессии; уже есть — эпизод начат, текст не меняется.
+/// Подсказка сессии — каждый тик заново: минуты в ней относительные, сабагент читает её позже главного.
 pub fn put_hint(dir: &Path, session: &str, text: &str) {
     if !safe(session) || std::fs::create_dir_all(dir).is_err() {
         return;
     }
-    let path = dir.join(session);
-    if !path.exists() {
-        let tmp = dir.join(format!(".{session}.tmp"));
-        if std::fs::write(&tmp, text).is_ok() {
-            let _ = std::fs::rename(&tmp, &path); // хук не прочтёт половину
-        }
+    let tmp = dir.join(format!(".{session}.tmp"));
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, dir.join(session)); // хук не прочтёт половину
     }
 }
 
@@ -243,12 +240,13 @@ mod tests {
     #[test]
     fn hint_once_per_agent_until_cleared() {
         let dir = std::env::temp_dir().join(format!("oma-hints-{}", std::process::id()));
-        put_hint(&dir, "s", "лимит");
-        put_hint(&dir, "s", "другой"); // эпизод уже начат — текст не меняется
+        put_hint(&dir, "s", "сброс через 40 мин");
         put_hint(&dir, "other", "лимит");
-        assert_eq!(take_hint(&dir, "s", "main").as_deref(), Some("лимит"));
+        assert_eq!(take_hint(&dir, "s", "main").as_deref(), Some("сброс через 40 мин"));
         assert_eq!(take_hint(&dir, "s", "main"), None);
-        assert_eq!(take_hint(&dir, "s", "a81492c2").as_deref(), Some("лимит")); // сабагент — свой раз
+        put_hint(&dir, "s", "сброс через 10 мин"); // тот же эпизод, минуты прошли
+        assert_eq!(take_hint(&dir, "s", "main"), None, "главный уже прочёл");
+        assert_eq!(take_hint(&dir, "s", "a81492c2").as_deref(), Some("сброс через 10 мин"), "сабагент — свой раз и свежие минуты");
         assert_eq!(take_hint(&dir, "нет", "main"), None);
         clear_hints(&dir, |s| s == "other");
         assert_eq!(take_hint(&dir, "s", "main"), None);
