@@ -1082,13 +1082,21 @@ def test_prompt_mentions_presence_and_stress():
     assert "mcp__oma__presence" in brain.OMA_TOOLS
 
 
-def test_mic_while_buds_out_is_the_laptops():
+def test_mic_picks_clear_input_by_where_oma_speaks():
     from agent_voice.context import pick_mic, buds_out
     srcs = "43\tmic_aec\tPipeWire\n46\tmic_denoise\tPipeWire\n67\talsa_input.pci-0000_00_1f.3.analog-stereo\tPipeWire\n80\tbluez_input.00_11_22_33_44_55.0\tPipeWire\n"
-    assert pick_mic("mic_denoise", srcs) == ""  # вход по умолчанию и так ноутбука — без --target
-    assert pick_mic("bluez_input.00_11_22_33_44_55.0", srcs) == "mic_denoise"  # гарнитура на столе — шумодав ноутбука
-    assert pick_mic("bluez_input.x", "1\talsa_input.pci-x\tPipeWire\n2\tbluez_input.x\tPipeWire\n") == "alsa_input.pci-x"
-    assert pick_mic("bluez_input.x", "") == ""
+    raw, buds = "alsa_input.pci-0000_00_1f.3.analog-stereo", "bluez_output.00_11_22_33_44_55.1"
+    # Ома в наушниках — эха нет: сырой микрофон (шумодав съедает слова под вентиляторами)
+    assert pick_mic("mic_denoise", buds, srcs, out=False) == raw
+    # Ома в динамиках (наушников нет) — эхоподавление без шумодава
+    assert pick_mic("mic_denoise", "alsa_output.pci-x", srcs, out=False) == "mic_aec"
+    # наушники на столе — Ома в динамиках: mic_aec, даже если вход по умолчанию — гарнитура
+    assert pick_mic("bluez_input.00_11_22_33_44_55.0", buds, srcs, out=True) == "mic_aec"
+    # гарнитура в ушах — её микрофон, вход по умолчанию
+    assert pick_mic("bluez_input.00_11_22_33_44_55.0", buds, srcs, out=False) == ""
+    # динамики без mic_aec — сырой ноутбука; ничего нет — вход по умолчанию
+    assert pick_mic("x", "alsa_output.x", "1\talsa_input.pci-x\tPipeWire\n", out=False) == "alsa_input.pci-x"
+    assert pick_mic("x", "alsa_output.x", "", out=False) == ""
     assert buds_out('{"at": 1000, "buds": "out"}', 1050)
     assert not buds_out('{"at": 1000, "buds": "out"}', 1091)  # снимок устарел — сервиса нет
     assert not buds_out('{"at": 1000, "buds": "in"}', 1010)

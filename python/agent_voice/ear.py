@@ -12,7 +12,7 @@ from .context import OWN_NODE, mic_target
 from .segment import Segmenter
 
 RATE, FRAME = 16000, 512  # 512 отсчётов = 32 мс
-# Вход по умолчанию: эхоподавление живёт в цепочке микрофона (omarchy-mic-denoise).
+# Вход выбирает context.mic_target: шумодав цепочки omarchy-mic-denoise портит распознавание, эхоподавление — только когда Ома в динамиках.
 REC_CMD = ["pw-record", "-P", "{ node.name = " + OWN_NODE + " }", "--rate", str(RATE), "--channels", "1", "--format", "s16", "-"]
 
 
