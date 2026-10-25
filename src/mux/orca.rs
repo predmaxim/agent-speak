@@ -26,6 +26,7 @@ impl Mux for Orca {
         let out = match key {
             Key::Esc => cli(orca(pane, &["send", "--text", "\x1b"]))?,
             Key::CtrlC => cli(orca(pane, &["send", "--interrupt"]))?,
+            Key::CtrlU => cli(orca(pane, &["send", "--text", "\x15"]))?,
         };
         accepted(&out)
     }

@@ -104,6 +104,11 @@ impl Limits {
         out
     }
 
+    /// Какое-то окно до сброса ещё у порога.
+    pub fn near(&self, now: u64, threshold: f64) -> bool {
+        self.series.values().any(|(w, _)| w.pct >= threshold && w.resets_at > now)
+    }
+
     /// Срок сброса самого полного окна агента (claude | codex).
     pub fn reset_of(&self, agent: &str) -> Option<u64> {
         let prefix = format!("{agent}:");

@@ -453,7 +453,6 @@ fn hang(t: &mut Track, ctx: &Ctx, f: &Facts, quiet: u64) -> Vec<Act> {
         };
         return say(&f.id, text, true);
     }
-    let Some(pane) = &f.pane else { return outside(t, f, now) };
     if let Some(acts) = spent(t, f, now, "агент снова завис — поднять не получилось, посмотри сам") {
         return acts;
     }
@@ -472,6 +471,8 @@ fn hang(t: &mut Track, ctx: &Ctx, f: &Facts, quiet: u64) -> Vec<Act> {
             }
         }
     }
+    // вне мультиплексора — только сказать, и лишь когда зависание подтверждено
+    let Some(pane) = &f.pane else { return outside(t, f, now) };
     t.attempts.push(now);
     (t.sub, t.ladder) = (sub, Ladder::Interrupted(now));
     let text = if sub {
@@ -804,6 +805,19 @@ mod tests {
         let mut w = Watch::default();
         let a = Facts { pane: None, call: Some(json!({"name": "Agent", "input": {}})), ..f("a") };
         let acts = w.check(&ctx(800, 999), vec![a], |_| true, |_| false);
+        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент завис, но он не в herdr или Orca — перезапусти сам."), "{acts:?}");
+    }
+
+    #[test]
+    fn outside_mux_asks_model_before_saying_hung() {
+        let mut w = Watch::default();
+        let a = Facts { pane: None, call: Some(json!({"name": "Bash", "input": {"command": "cargo build --release"}})), ..f("a") };
+        assert!(matches!(&w.check(&ctx(800, 999), vec![a.clone()], |_| true, |_| false)[..], [Act::Judge { .. }]), "долгая сборка вне мультиплексора — сперва модель");
+        w.judged("a", false, 805);
+        assert!(w.check(&ctx(900, 999), vec![a.clone()], |_| true, |_| false).is_empty(), "работа долгая — молчим");
+        assert!(matches!(&w.check(&ctx(1600, 999), vec![a.clone()], |_| true, |_| false)[..], [Act::Judge { .. }]));
+        w.judged("a", true, 1605);
+        let acts = w.check(&ctx(1660, 999), vec![a], |_| true, |_| false);
         assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент завис, но он не в herdr или Orca — перезапусти сам."), "{acts:?}");
     }
 

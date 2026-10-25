@@ -74,6 +74,8 @@ const OMA_BACKOFF: [u64; 4] = [10, 30, 60, 300];
 /// Прожила столько — падение случайное, отсрочка снова с начала.
 const OMA_STABLE: Duration = Duration::from_secs(60);
 
+/// Хороший прогноз у окна, ещё стоящего у порога, кончает эпизод лимита не раньше, чем через столько секунд.
+const LIMIT_HOLD: u64 = 600;
 /// Строк экрана терминала в вопросе модели о зависании.
 const SCREEN_LINES: usize = 25;
 
@@ -160,6 +162,7 @@ struct State {
     watch: Watch,              // сторож: здоровье агентов и что делать
     limits: Limits,            // проценты лимитов и прогноз
     limits_bad: bool,          // лимит кончится раньше сброса: промежуточное не пересказываем
+    limits_good: Option<u64>,  // с этого момента прогноз хороший, а эпизод ещё держится
     act: Sender<mux::Job>,     // действия в терминалах агентов; в тестах — канал без потока
     next_watch: Instant,
     activity: HashMap<String, u64>, // сессия → последний хук, с
@@ -326,6 +329,7 @@ pub fn run() {
         watch: Watch::default(),
         limits: Limits::default(),
         limits_bad: false,
+        limits_good: None,
         act,
         next_watch: Instant::now(),
         activity: HashMap::new(),
@@ -1342,7 +1346,13 @@ impl State {
 
     /// Плохой прогноз — факты агентам того же аккаунта через хук; хороший — подсказки убрать.
     fn hint_limits(&mut self, now: u64) {
-        let bad = self.limits.forecast(now, self.cfg.limit_threshold as f64);
+        let threshold = self.cfg.limit_threshold as f64;
+        let bad = self.limits.forecast(now, threshold);
+        // агент встал — темпа нет, прогноз «хороший»: пока окно у порога, эпизод держим LIMIT_HOLD, иначе подсказки уходят заново
+        if bad.is_empty() && self.limits_bad && self.limits.near(now, threshold) && now < *self.limits_good.get_or_insert(now) + LIMIT_HOLD {
+            return;
+        }
+        self.limits_good = None;
         self.limits_bad = !bad.is_empty();
         let mut hinted = std::collections::HashSet::new();
         for f in &bad {
@@ -1413,6 +1423,7 @@ mod tests {
             watch: Watch::default(),
             limits: Limits::default(),
             limits_bad: false,
+            limits_good: None,
             act: mpsc::channel().0, // терминалы в тестах не трогаются
             next_watch: Instant::now() + Duration::from_secs(86_400), // tick сторожа не зовёт: тесты зовут watch_tick сами
             activity: HashMap::new(),
@@ -1492,6 +1503,29 @@ mod tests {
         statusline(&mut st, 10.0, 200_000);
         st.watch_tick();
         assert!(!st.hints.join("b").exists() && !st.limits_bad);
+        let _ = std::fs::remove_dir_all(&st.hints);
+    }
+
+    #[test]
+    fn paused_agent_keeps_the_limit_episode() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a", "b"]);
+        let now = Arc::new(Mutex::new(1000u64));
+        let n = now.clone();
+        st.now_secs = Box::new(move || *n.lock().unwrap());
+        statusline(&mut st, 93.0, 99_999);
+        *now.lock().unwrap() = 1300;
+        statusline(&mut st, 96.0, 99_999);
+        st.watch_tick();
+        assert!(crate::limits::take_hint(&st.hints, "b", "main").is_some());
+        *now.lock().unwrap() = 2201; // агент встал: процент тот же, темпа нет — прогноз «хороший»
+        statusline(&mut st, 96.0, 99_999);
+        st.watch_tick();
+        assert!(st.limits_bad && st.hints.join("b").exists(), "пауза не кончает эпизод");
+        assert_eq!(crate::limits::take_hint(&st.hints, "b", "main"), None, "и не шлёт подсказку заново");
+        *now.lock().unwrap() = 2201 + 600;
+        st.watch_tick();
+        assert!(!st.limits_bad && !st.hints.join("b").exists(), "хороший прогноз продержался — эпизод кончен");
         let _ = std::fs::remove_dir_all(&st.hints);
     }
 

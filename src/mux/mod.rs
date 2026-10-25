@@ -12,6 +12,8 @@ use std::time::Duration;
 pub enum Key {
     Esc,
     CtrlC,
+    /// стереть строку до начала (Claude Code, bash, zsh); стёртое возвращает Ctrl+Y
+    CtrlU,
 }
 
 /// Терминал агента: какой мультиплексор и адрес в нём; via — у Orca путь к CLI, у herdr сокет сессии.
@@ -111,11 +113,19 @@ pub struct Done {
 }
 
 fn perform(job: &Job) -> Result<(), String> {
-    let m = adapter(&job.pane)?;
+    perform_on(adapter(&job.pane)?, job)
+}
+
+fn perform_on(m: &dyn Mux, job: &Job) -> Result<(), String> {
     for step in &job.steps {
         match step {
             Step::Key(k) => m.key(&job.pane, k)?,
-            Step::Text(t) => m.send(&job.pane, t)?,
+            // недонабранное пользователем иначе ушло бы вместе с текстом Омы — агенту или оболочке командой
+            // shortcut: многострочный черновик Claude Code стирается только в последней строке; станет мешать — читать экран и стирать всё
+            Step::Text(t) => {
+                m.key(&job.pane, &Key::CtrlU)?;
+                m.send(&job.pane, t)?
+            }
             Step::Pause(ms) => std::thread::sleep(Duration::from_millis(*ms)),
         }
     }
@@ -145,10 +155,10 @@ pub fn run(cmd: &mut Command, timeout: Duration) -> Result<String, String> {
     use std::process::Stdio;
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
     // вывод читается в потоках: полный канал иначе держал бы процесс до таймаута
-    let mut so = child.stdout.take().unwrap();
-    let mut se = child.stderr.take().unwrap();
-    let out = std::thread::spawn(move || { let mut s = String::new(); let _ = so.read_to_string(&mut s); s });
-    let err = std::thread::spawn(move || { let mut s = String::new(); let _ = se.read_to_string(&mut s); s });
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (mut so, mut se, tx2) = (child.stdout.take().unwrap(), child.stderr.take().unwrap(), tx.clone());
+    std::thread::spawn(move || { let mut s = String::new(); let _ = so.read_to_string(&mut s); let _ = tx.send((true, s)); });
+    std::thread::spawn(move || { let mut s = String::new(); let _ = se.read_to_string(&mut s); let _ = tx2.send((false, s)); });
     let start = std::time::Instant::now();
     let status = loop {
         if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
@@ -161,7 +171,15 @@ pub fn run(cmd: &mut Command, timeout: Duration) -> Result<String, String> {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    // процесс вышел, а вывод держит его потомок — ждём не дольше общего срока
+    let (mut out, mut err) = (String::new(), String::new());
+    for _ in 0..2 {
+        match rx.recv_timeout(timeout.saturating_sub(start.elapsed()).max(Duration::from_millis(300))) {
+            Ok((true, s)) => out = s,
+            Ok((false, s)) => err = s,
+            Err(_) => return Err(format!("{status}: вывод держат дочерние процессы")),
+        }
+    }
     if status.success() {
         Ok(out)
     } else {
@@ -184,6 +202,29 @@ mod tests {
         assert!(run(Command::new("sleep").arg("5"), Duration::from_millis(200)).unwrap_err().contains("таймаут"));
         assert!(run(Command::new("sh").args(["-c", "echo boom >&2; exit 3"]), Duration::from_secs(2)).unwrap_err().contains("boom"));
         assert_eq!(run(Command::new("echo").arg("hi"), Duration::from_secs(2)).unwrap(), "hi\n");
+        let t = std::time::Instant::now();
+        let held = run(Command::new("sh").args(["-c", "sleep 5 & echo hi"]), Duration::from_secs(1));
+        assert!(t.elapsed() < Duration::from_secs(3) && held.unwrap_err().contains("вывод"), "вывод держит внук — не ждём его");
+    }
+
+    /// Мультиплексор, который только записывает, что ему прислали.
+    struct Rec(std::sync::Mutex<Vec<String>>);
+    impl Mux for Rec {
+        fn name(&self) -> &'static str { "rec" }
+        fn hosts(&self, _: &str) -> bool { false }
+        fn locate(&self, _: &HashMap<String, String>) -> Option<Pane> { None }
+        fn send(&self, _: &Pane, text: &str) -> Result<(), String> { self.0.lock().unwrap().push(text.into()); Ok(()) }
+        fn key(&self, _: &Pane, key: &Key) -> Result<(), String> { self.0.lock().unwrap().push(format!("{key:?}")); Ok(()) }
+        fn screen(&self, _: &Pane) -> Result<String, String> { Ok(String::new()) }
+    }
+
+    #[test]
+    fn text_goes_after_clearing_the_line() {
+        let m = Rec(Default::default());
+        let pane = Pane { mux: "rec", id: "x".into(), via: String::new() };
+        let job = Job { session: "s".into(), pane, steps: vec![Step::Key(Key::Esc), Step::Text("продолжай".into())], what: crate::watch::What::Interrupt };
+        perform_on(&m, &job).unwrap();
+        assert_eq!(*m.0.lock().unwrap(), ["Esc", "CtrlU", "продолжай"], "недонабранное пользователем не уйдёт вместе с текстом Омы");
     }
 
     #[test]

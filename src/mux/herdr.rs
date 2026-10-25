@@ -28,6 +28,7 @@ impl Mux for Herdr {
         let k = match key {
             Key::Esc => "esc",
             Key::CtrlC => "ctrl+c",
+            Key::CtrlU => "ctrl+u",
         };
         ok(&cli(herdr(pane, &["pane", "send-keys", &pane.id, k]))?)
     }
