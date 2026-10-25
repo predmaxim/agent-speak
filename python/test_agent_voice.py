@@ -591,6 +591,12 @@ def test_format_agents_and_find():
     assert format_agents([], 0) == "Агентов нет."
 
 
+def test_format_agents_shows_watch_health():
+    sick = dict(E[1], health="завис")
+    assert format_agents([sick], now=1000).endswith("Запускаю тесты; сторож: завис")
+    assert "сторож" not in format_agents([dict(E[1], health="")], now=1000)
+
+
 def test_tools_read_only_and_agent_by_id():
     from agent_voice import brain
     assert "WebSearch" in brain.TOOLS and "WebFetch" not in brain.TOOLS  # наружу — только поиск

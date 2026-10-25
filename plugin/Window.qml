@@ -523,6 +523,18 @@ Item {
                   maximumLineCount: 2
                   elide: Text.ElideRight
                 }
+
+                // the watch's word on the agent: hung, limit until 15:20, connection lost…
+                Text {
+                  visible: text !== ""
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  text: agentRow.modelData.health || ""
+                  color: Color.urgent
+                  font.family: root.font
+                  font.pixelSize: Style.font.body
+                  elide: Text.ElideRight
+                }
               }
 
               Text {

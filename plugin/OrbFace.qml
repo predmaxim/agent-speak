@@ -16,8 +16,9 @@ Item {
 
   // Own colours (rules.md, the agent-speak section): a theme has no roles for
   // a gradient. At rest and paused: the theme's accent, flat; listening green
-  // to yellow, thinking yellow, speaking blue, waiting red, each with a thin
-  // outline icon in the middle. At rest, paused and waiting the disc stands
+  // to yellow, thinking yellow, speaking blue, waiting red, the watch needing
+  // the user orange, each with a thin outline icon in the middle. At rest,
+  // paused, waiting and trouble the disc stands
   // still: they may last for hours, and a flow repaints every frame.
   // colors: [first, middle, last] across the disc; speed: the flow, °/s;
   // swing: the breath's scale (up to breathMax - 1) and its period, ms.
@@ -29,7 +30,8 @@ Item {
     listening: { colors: ["#e3f27a", "#6fd38c", "#2fae9a"], icon: "mic", speed: 70, swing: 0.06, period: 1800 },
     thinking: { colors: ["#fff09a", "#ffc93d", "#f0971e"], icon: "brain", speed: 120, swing: 0.02, period: 1800 },
     speaking: { colors: ["#8fd3ff", "#3d8bff", "#4b56e8"], icon: "speaker", speed: 80, swing: 0.06, period: 480 },
-    waiting: { colors: ["#ff9a8f", "#e5484d", "#a8262c"], icon: "question", speed: 0, swing: 0, period: 3000 }
+    waiting: { colors: ["#ff9a8f", "#e5484d", "#a8262c"], icon: "question", speed: 0, swing: 0, period: 3000 },
+    trouble: { colors: ["#ffd08a", "#f5a524", "#c26a00"], icon: "alert", speed: 0, swing: 0, period: 3000 }
   })
   readonly property var look: looks[face.mode] || looks.idle
 
@@ -143,7 +145,7 @@ Item {
 
     // Every icon is there, the mode's one shows: a change fades one into the other.
     Repeater {
-      model: ["mic", "brain", "speaker", "pause", "question"]
+      model: ["mic", "brain", "speaker", "pause", "question", "alert"]
 
       Image {
         required property string modelData

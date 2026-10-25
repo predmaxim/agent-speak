@@ -97,6 +97,7 @@ def format_agents(entries, now) -> str:
     """Строка на агента; id — чтобы различать агентов с одинаковым названием."""
     return "\n".join(f'{e["title"]} ({e["project"]}, id {e["id"]}{", в фокусе" if e.get("focused") else ""}) — '
                      f'{STATES.get(e["state"], e["state"])}, {_ago(int(now - e["since"]))}: {e["status"]}'
+                     + (f'; сторож: {e["health"]}' if e.get("health") else "")
                      for e in entries) or "Агентов нет."
 
 

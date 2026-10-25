@@ -7,7 +7,7 @@ var SAMPLE = "Так звучит этот голос."
 
 // No connection to the daemon: the status-line fields, empty.
 var OFFLINE = { running: false, speaking: false, paused: false, speaker: "", rate: "", project: "",
-  oma: "off", talking: false, agents_voice: false, quiet: false, quiet_schedule: false, quiet_from: "", quiet_to: "", orb_pos: "", orb_over_fullscreen: true, progress_digest: false, waiting: 0 }
+  oma: "off", talking: false, agents_voice: false, quiet: false, quiet_schedule: false, quiet_from: "", quiet_to: "", orb_pos: "", orb_over_fullscreen: true, progress_digest: false, waiting: 0, trouble: 0 }
 
 // One socket line -> {type, value}, or null for anything else (a broken line must not blank the state).
 function parseLine(line) {
@@ -30,6 +30,7 @@ function orbMode(st) {
   if (!st || !st.running) return "off"
   if (["loading", "listening", "thinking", "speaking", "paused"].indexOf(st.oma) >= 0) return st.oma
   if (st.speaking) return "speaking"   // news or manual reading: the service speaks, Oma is idle
+  if (st.trouble > 0 && st.agents_voice !== false) return "trouble"   // the watch needs the user, above waiting
   if (st.waiting > 0 && st.agents_voice !== false) return "waiting"   // not watching: no red
   if (st.oma === "off") return "off"
   return st.quiet ? "quiet" : "idle"
@@ -47,6 +48,7 @@ function orbTip(st) {
   var mode = orbMode(st)
   var tips = { off: "Oma is not running", loading: "Oma is loading", listening: "Oma is listening", thinking: "Oma is thinking",
     speaking: "Oma is speaking", paused: "Paused", quiet: "Quiet mode", idle: "Oma" }
+  if (mode === "trouble") return ["%1 need help", st.trouble]
   return mode === "waiting" ? ["%1 waiting", st.waiting] : [tips[mode], ""]
 }
 

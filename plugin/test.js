@@ -36,6 +36,13 @@ assert.strictEqual(M.orbMode(Object.assign({}, st, { speaking: true, waiting: 1 
 assert.strictEqual(M.orbMode(Object.assign({}, st, { oma: "off" })), "off")
 assert.strictEqual(M.orbMode(Object.assign({}, st, { oma: "off", quiet: true })), "off")
 assert.strictEqual(M.orbMode(Object.assign({}, st, { oma: "off", waiting: 1 })), "waiting")
+// The watch needs the user: its own orange, above waiting; not while watching is off, not over speech
+assert.strictEqual(M.orbMode(Object.assign({}, st, { trouble: 1 })), "trouble")
+assert.strictEqual(M.orbMode(Object.assign({}, st, { trouble: 1, waiting: 2 })), "trouble")
+assert.strictEqual(M.orbMode(Object.assign({}, st, { trouble: 1, agents_voice: false })), "idle")
+assert.strictEqual(M.orbMode(Object.assign({}, st, { trouble: 1, speaking: true })), "speaking")
+assert.strictEqual(M.OFFLINE.trouble, 0)
+assert.deepStrictEqual(M.orbTip(Object.assign({}, st, { trouble: 1 })), ["%1 need help", 1])
 let s = []
 for (const id of ["a", "b", "c", "d"]) s = M.pushBubble(s, { id, who: "T", text: id, kind: "status" }, 1000)
 assert.deepStrictEqual(s.map(b => b.id), ["b", "c", "d"])
@@ -110,6 +117,8 @@ for (const n of [0, 100, 600, 7300, 3 * 86400]) keys.add(M.ago(0, n)[0])
 for (const a of ["working", "waiting", "done", "idle", "?"]) keys.add(M.stateLabel(a))
 for (const k of keys) assert.ok(Object.prototype.hasOwnProperty.call(I.TABLES.ru, k), "no ru for " + k)
 assert.strictEqual(ru(...M.orbTip(Object.assign({}, st, { waiting: 2 }))), "Ждут ответа: 2")
+keys.add(M.orbTip(Object.assign({}, st, { trouble: 1 }))[0])
+assert.strictEqual(ru(...M.orbTip(Object.assign({}, st, { trouble: 2 }))), "Нужна помощь: 2")
 // No dead Russian lines: each is a tr() literal or a key above
 // Command lines
 assert.strictEqual(M.cmd("pause"), '{"cmd":"pause"}\n')
