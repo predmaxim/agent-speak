@@ -48,6 +48,8 @@ pub struct Entry {
     #[serde(skip)]
     pub pid: u32, // процесс агента: по нему сторож находит его терминал
     pub health: String, // сторож: «завис», «лимит до 15:20»…; пусто — в порядке
+    /// Вопрос, который ждёт ответа, с вариантами (`claude::question_context`): по нему мозг Омы отвечает агенту.
+    pub ask: String,
 }
 
 /// Живая сессия, найденная на диске / в /proc.
@@ -354,12 +356,15 @@ impl Registry {
                 let state = if l.state == State::Idle && e.state == State::Done { State::Done } else { l.state };
                 if (!e.heard || l.status_at > e.since) && e.state != state {
                     (e.state, e.since) = (state, now);
+                    if state != State::Waiting {
+                        e.ask.clear(); // ответили в терминале: хука нет
+                    }
                 }
             } else {
                 changed = true;
                 self.entries.push(Entry {
                     id: l.id, agent: l.agent, title: l.title, project: folder(&l.cwd), cwd: l.cwd, transcript,
-                    state: l.state, status: String::new(), since: now, focused: false, heard: false, pid: l.pid, health: String::new(),
+                    state: l.state, status: String::new(), since: now, focused: false, heard: false, pid: l.pid, health: String::new(), ask: String::new(),
                     // агент впервые на глазах (и после перезапуска демона): лента начинается с его истории
                     feed: if l.agent == "claude" { history(&l.transcript, &images_dir()) } else { VecDeque::new() },
                 });
@@ -392,6 +397,9 @@ impl Registry {
         let Some(e) = self.entries.iter_mut().find(|e| e.id == id) else { return false };
         e.heard = true;
         (e.state, e.since) = (state, now);
+        if kind != "question" {
+            e.ask.clear(); // агент двинулся дальше — вопрос решён
+        }
         if let Some(s) = status {
             e.status = s;
         }
@@ -446,6 +454,13 @@ impl Registry {
 
     pub fn finished(&mut self, id: &str, text: &str, now: u64) -> bool {
         self.event(id, "final", &shown(text), State::Done, Some(first_sentence(&plain(text))), now)
+    }
+
+    /// Вопрос с вариантами для агента, который ждёт ответа (после `question`).
+    pub fn asking(&mut self, id: &str, text: &str) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
+            e.ask = text.to_string();
+        }
     }
 
     /// Пересказ Омы — строка «что сейчас» в окне; в ленту не пишется: там дословный текст агента.
@@ -504,6 +519,28 @@ mod tests {
     fn live(id: &str, busy: bool) -> Live {
         let state = if busy { State::Working } else { State::Idle };
         Live { id: id.into(), agent: "claude", pid: 1, title: id.into(), cwd: format!("/p/{id}"), transcript: PathBuf::new(), state, status_at: 0 }
+    }
+
+    #[test]
+    fn ask_set_on_question_cleared_by_next_event() {
+        let ask = |r: &Registry| r.get("a").unwrap().ask.clone();
+        let mut r = Registry::new();
+        r.sync(vec![live("a", true)], 100);
+        let menu = "Ждёт ответа на AskUserQuestion: Какой цвет? Варианты: Красный; Синий";
+        r.question("a", "вопрос: Какой цвет?", 110);
+        r.asking("a", menu);
+        assert_eq!(ask(&r), menu);
+        assert!(r.line().contains("Варианты: Красный"), "мозг Омы видит варианты в снимке");
+        r.status("a", "Беру синий", 120);
+        assert_eq!(ask(&r), "");
+        r.question("a", "вопрос", 130);
+        r.asking("a", menu);
+        r.prompt("a", "синий", 140);
+        assert_eq!(ask(&r), "");
+        r.question("a", "вопрос", 150);
+        r.asking("a", menu);
+        r.sync(vec![Live { state: State::Working, status_at: 160, ..live("a", true) }], 161); // ответили в терминале: хука нет
+        assert_eq!(ask(&r), "", "вопрос больше не ждёт — варианты не висят");
     }
 
     #[test]

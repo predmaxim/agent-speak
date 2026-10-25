@@ -890,6 +890,7 @@ impl State {
             .args(&self.voice_cmd[1..])
             .current_dir(&data)
             .env("AGENT_SPEAK", "1") // хуки сессий Омы до демона не доходят
+            .env("AGENT_SPEAK_BIN", std::env::current_exe().unwrap_or_default()) // Ома передаёт агентам через `agent-speak tell`
             .stdin(std::process::Stdio::piped())
             .spawn();
         match child {
@@ -1186,7 +1187,9 @@ impl State {
                     let text = question.as_ref().map_or(msg.clone(), |q| format!("вопрос: {q}"));
                     self.registry.question(&session, &text, now);
                     // модели — суть и совет агента: его текст и ввод вызова; перевод уведомления — запасная фраза
-                    self.ask(&session, Ask::Question, &claude::question_context(&tail), Some(msg));
+                    let context = claude::question_context(&tail);
+                    self.registry.asking(&session, &context); // мозг Омы отвечает по тем же вариантам
+                    self.ask(&session, Ask::Question, &context, Some(msg));
                 }
             }
             "message-display" => {
@@ -2619,6 +2622,7 @@ mod tests {
         let job = rx.try_recv().unwrap();
         assert_eq!(job.text, "Сборка устарела.\n\nЖдёт ответа на Bash: Чищу сборку: rm -rf build");
         assert_eq!(job.fallback.as_deref(), Some("Клоду нужно разрешение на команду"));
+        assert_eq!(st.registry.get("s").unwrap().ask, job.text, "мозг Омы видит то же, что пересказ");
         let _ = std::fs::remove_dir_all(dir);
     }
 
