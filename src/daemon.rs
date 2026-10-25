@@ -39,7 +39,21 @@ enum Event {
     Digest(Digest), // пересказ хода агента от воркеров digest
     Presence(String), // новый снимок сервиса присутствия
     Acted(mux::Done), // поток действий: исход действия сторожа в терминале агента
+    Bt(&'static str, bool), // режим наушников переключён (headset | music) и переключала ли его Ома
 }
+
+/// Микрофон наушников для «Ты тут?»: ушёл в наушниках — ответ услышит только он.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Headset {
+    Off,
+    Switching(u64),
+    /// гарнитура готова; true — включила её Ома (вернуть музыку после)
+    Ready(bool),
+    Asked(bool),
+}
+
+/// Переключение в гарнитуру дольше этого — спросить всё равно.
+const HEADSET_WAIT: u64 = 10;
 
 /// Как часто сверять реестр агентов с диском и /proc.
 const SCAN_EVERY: Duration = Duration::from_secs(2);
@@ -165,6 +179,8 @@ struct State {
     facts_src: Box<dyn Fn() -> Option<String>>, // снимок присутствия при старте; в тестах — подделка
     speakers: Box<dyn Fn() -> String>, // динамики ноутбука для Омы, пока наушники вынуты; в тестах — подделка
     bt_out: Box<dyn Fn() -> bool>, // звук по умолчанию — в Bluetooth-наушники; в тестах — подделка
+    bt: Sender<&'static str>,      // режим наушников (omarchy-bt-mode) — в своём потоке; в тестах — канал без потока
+    headset: Headset,
     watch: Watch,              // сторож: здоровье агентов и что делать
     limits: Limits,            // проценты лимитов и прогноз
     limits_bad: bool,          // лимит кончится раньше сброса: промежуточное не пересказываем
@@ -280,6 +296,15 @@ pub fn run() {
     let facts = runtime.join(presence::FILE);
     let (atx, arx) = mpsc::channel::<mux::Done>();
     let act = mux::spawn(atx);
+    let (bt, brx) = mpsc::channel::<&'static str>();
+    {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for mode in brx {
+                let _ = tx.send(Event::Bt(mode, bt_mode(mode)));
+            }
+        });
+    }
     {
         let tx = tx.clone();
         std::thread::spawn(move || {
@@ -338,6 +363,8 @@ pub fn run() {
         facts_src: Box::new(move || std::fs::read_to_string(&facts).ok()),
         speakers: Box::new(crate::audio::speakers),
         bt_out: Box::new(crate::audio::bluetooth_out),
+        bt,
+        headset: Headset::Off,
         watch: Watch::default(),
         limits: Limits::default(),
         limits_bad: false,
@@ -370,6 +397,7 @@ pub fn run() {
             Event::Digest(d) => st.on_digest(d),
             Event::Presence(t) => st.on_presence(&t),
             Event::Acted(d) => st.on_acted(d),
+            Event::Bt(mode, switched) => st.on_bt(mode, switched),
         }
     }
 }
@@ -504,6 +532,16 @@ fn notification_text(msg: &str, last_tool: impl FnOnce() -> Option<String>) -> S
         _ => msg,
     }
     .into()
+}
+
+/// Режим наушников тем же путём, что селектор HEADPHONES MODE (`omarchy-bt-mode` из dotfiles): headset — только из
+/// режима музыки, true — переключила; music — вернуть. Нет скрипта или наушников — false.
+fn bt_mode(mode: &str) -> bool {
+    let cli = |arg: &str, secs| mux::run(std::process::Command::new("omarchy-bt-mode").arg(arg), Duration::from_secs(secs));
+    if mode == "headset" && cli("status", 5).map_or(true, |o| o.trim() != "music") {
+        return false; // уже гарнитура (её включил пользователь — и вернёт он) или наушников нет
+    }
+    cli(mode, 20).inspect_err(|e| eprintln!("agent-speak: omarchy-bt-mode {mode}: {e}")).is_ok()
 }
 
 /// Команда Оме открыть окно ответа; speakers — спросила в динамики: слушать ноутбуком, через эхоподавление.
@@ -821,6 +859,17 @@ impl State {
             if !self.board.sayable(now, focused.as_deref()) {
                 return; // «Есть новости» не врёт: после «да» прозвучит хоть что-то
             }
+            match self.headset {
+                // ушёл в наушниках — ответ услышит только их микрофон: гарнитура — до вопроса, переключение роняет звук
+                Headset::Off if self.presence.buds() != presence::Buds::Out && (self.bt_out)() => {
+                    self.headset = Headset::Switching(now);
+                    let _ = self.bt.send("headset");
+                    return;
+                }
+                Headset::Switching(t) if now < t + HEADSET_WAIT => return,
+                Headset::Off => {}
+                h => self.headset = Headset::Asked(h == Headset::Ready(true)),
+            }
             self.here_ask = Some(now);
             ("here", ARE_YOU_THERE.to_string())
         } else {
@@ -1063,6 +1112,15 @@ impl State {
         if self.seen_mode.replace(mode).is_some_and(|m| m != mode) {
             eprintln!("agent-speak: присутствие: {mode:?}");
         }
+        // «Ты тут?» решён и разговор кончился — гарнитуру, включённую Омой, — обратно в музыку
+        if let Headset::Asked(switched) = self.headset {
+            if self.here_ask.is_none() && !self.oma.talking && self.listen_after.is_none() {
+                if switched {
+                    let _ = self.bt.send("music");
+                }
+                self.headset = Headset::Off;
+            }
+        }
         self.speak_news(); // раньше окна ответа: новые новости встают перед ним, а не поверх
         self.listen_if_due(now);
     }
@@ -1158,6 +1216,21 @@ impl State {
         let back = self.presence.apply(f, now);
         self.on_back(back);
         self.route();
+    }
+
+    /// Поток режима наушников ответил: гарнитура готова — можно спрашивать; включилась после вопроса — вернуть потом.
+    fn on_bt(&mut self, mode: &str, switched: bool) {
+        if mode != "headset" {
+            return;
+        }
+        self.headset = match self.headset {
+            Headset::Asked(was) => Headset::Asked(was || switched),
+            Headset::Off if switched => {
+                let _ = self.bt.send("music"); // «Ты тут?» уже не нужен — сразу назад
+                Headset::Off
+            }
+            _ => Headset::Ready(switched),
+        };
     }
 
     /// Куда говорит Ома: наушники вынуты, но подключены (звук по умолчанию идёт в них, лежащих на столе),
@@ -1498,6 +1571,8 @@ mod tests {
             facts_src: Box::new(|| None), // снимка нет — как без сервиса присутствия
             speakers: Box::new(|| "speakers".into()),
             bt_out: Box::new(|| false),
+            bt: mpsc::channel().0,
+            headset: Headset::Off,
             watch: Watch::default(),
             limits: Limits::default(),
             limits_bad: false,
@@ -2925,6 +3000,56 @@ mod tests {
         (st, env, now)
     }
 
+    fn bt(st: &mut State) -> mpsc::Receiver<&'static str> {
+        let (tx, rx) = mpsc::channel();
+        st.bt = tx;
+        rx
+    }
+
+    #[test]
+    fn headphones_mic_on_before_asking_and_music_back_after() {
+        // ушёл в наушниках — ответ услышит только их микрофон: гарнитура — до вопроса, переключение роняет звук
+        let (mut st, env) = env_state();
+        st.bt_out = Box::new(|| true);
+        let rx = bt(&mut st);
+        with_agents(&mut st, &["s", "t"]);
+        let now = secs_at(&mut st, 1100);
+        snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000}));
+        final_s(&mut st);
+        st.tick();
+        assert_eq!(rx.try_recv(), Ok("headset"));
+        assert!(texts(&st).is_empty(), "пока гарнитура включается — молчит");
+        st.tick();
+        assert!(rx.try_recv().is_err() && texts(&st).is_empty(), "просит один раз");
+        st.on_bt("headset", true);
+        st.tick();
+        assert_eq!(texts(&st).join(" "), ARE_YOU_THERE);
+        st.bt_out = Box::new(|| false); // в гарнитуре наушники — не Bluetooth-вывод для второго вопроса не важно: проверяем возврат
+        heard(&mut st, &env);
+        *now.lock().unwrap() += HERE_WAIT;
+        st.tick();
+        assert_eq!(st.presence.mode(*now.lock().unwrap()), Mode::Away);
+        assert_eq!(rx.try_recv(), Ok("music"), "вопрос решён — режим музыки обратно");
+        st.tick();
+        assert!(rx.try_recv().is_err(), "один раз");
+    }
+
+    #[test]
+    fn headset_switch_that_never_reports_does_not_hold_the_question() {
+        let (mut st, _env) = env_state();
+        st.bt_out = Box::new(|| true);
+        let rx = bt(&mut st);
+        with_agents(&mut st, &["s", "t"]);
+        let now = secs_at(&mut st, 1100);
+        snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000}));
+        final_s(&mut st);
+        st.tick();
+        assert_eq!(rx.try_recv(), Ok("headset"));
+        *now.lock().unwrap() += HEADSET_WAIT;
+        st.tick();
+        assert_eq!(texts(&st).join(" "), ARE_YOU_THERE, "переключение не ответило — спросить всё равно");
+    }
+
     #[test]
     fn bluetooth_out_without_sensor_asks_again_through_speakers() {
         // датчик молчит («неизвестно»), а звук идёт в Bluetooth-наушники — они могут лежать на столе
@@ -2934,6 +3059,8 @@ mod tests {
         let now = secs_at(&mut st, 1100);
         snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000}));
         final_s(&mut st);
+        st.tick();
+        st.on_bt("headset", false); // гарнитура уже была или наушников нет — спрашивать сразу
         st.tick();
         heard(&mut st, &env);
         *now.lock().unwrap() += HERE_WAIT;
@@ -2961,6 +3088,8 @@ mod tests {
         snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000, "buds": "in"}));
         final_s(&mut st);
         st.tick();
+        st.on_bt("headset", false); // гарнитура уже была или наушников нет — спрашивать сразу
+        st.tick();
         assert_eq!(texts(&st).join(" "), ARE_YOU_THERE, "наушники «в ушах» — тоже спросить: они, может, лежат на столе");
         assert_eq!(*st.shared.sink.lock().unwrap(), "", "сначала — в наушники");
         heard(&mut st, &env);
@@ -2984,6 +3113,8 @@ mod tests {
         let now = secs_at(&mut st, 1100);
         snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000, "buds": "in"}));
         final_s(&mut st);
+        st.tick();
+        st.on_bt("headset", false); // гарнитура уже была или наушников нет — спрашивать сразу
         st.tick();
         heard(&mut st, &env);
         *now.lock().unwrap() += HERE_WAIT;
