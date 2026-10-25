@@ -14,6 +14,9 @@ pub enum Key {
     CtrlC,
     /// стереть строку до начала (Claude Code, bash, zsh); стёртое возвращает Ctrl+Y
     CtrlU,
+    Enter,
+    /// цифра 1–9: пункт меню Claude Code
+    Digit(u8),
 }
 
 /// Терминал агента: какой мультиплексор и адрес в нём; via — у Orca путь к CLI, у herdr сокет сессии.
@@ -33,8 +36,18 @@ pub trait Mux: Sync {
     /// Текст и Enter одной отправкой.
     fn send(&self, pane: &Pane, text: &str) -> Result<(), String>;
     fn key(&self, pane: &Pane, key: &Key) -> Result<(), String>;
+    /// Текст без Enter: поле «свой ответ» в меню Claude Code.
+    fn type_text(&self, pane: &Pane, text: &str) -> Result<(), String>;
     /// Что видно на экране терминала, построчно.
     fn screen(&self, pane: &Pane) -> Result<String, String>;
+    /// Папки, где мультиплексор умеет запустить агента.
+    fn projects(&self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+    /// Новый агент Claude в папке cwd с первым сообщением prompt.
+    fn launch(&self, _cwd: &str, _prompt: &str) -> Result<(), String> {
+        Err(format!("{} не запускает агентов", self.name()))
+    }
 }
 
 /// Вызов CLI мультиплексора дольше этого — завис: поток действий не встаёт.
@@ -93,6 +106,8 @@ pub fn screen(pane: &Pane) -> Result<String, String> {
 pub enum Step {
     Key(Key),
     Text(String),
+    /// текст без Enter и без Ctrl+U перед ним (поле меню)
+    Type(String),
     /// мс
     Pause(u64),
 }
@@ -112,20 +127,22 @@ pub struct Done {
     pub err: Option<String>,
 }
 
-fn perform(job: &Job) -> Result<(), String> {
-    perform_on(adapter(&job.pane)?, job)
+/// Шаги в терминале через адаптер панели; первая ошибка обрывает.
+pub fn perform(pane: &Pane, steps: &[Step]) -> Result<(), String> {
+    perform_on(adapter(pane)?, pane, steps)
 }
 
-fn perform_on(m: &dyn Mux, job: &Job) -> Result<(), String> {
-    for step in &job.steps {
+fn perform_on(m: &dyn Mux, pane: &Pane, steps: &[Step]) -> Result<(), String> {
+    for step in steps {
         match step {
-            Step::Key(k) => m.key(&job.pane, k)?,
+            Step::Key(k) => m.key(pane, k)?,
             // недонабранное пользователем иначе ушло бы вместе с текстом Омы — агенту или оболочке командой
             // shortcut: многострочный черновик Claude Code стирается только в последней строке; станет мешать — читать экран и стирать всё
             Step::Text(t) => {
-                m.key(&job.pane, &Key::CtrlU)?;
-                m.send(&job.pane, t)?
+                m.key(pane, &Key::CtrlU)?;
+                m.send(pane, t)?
             }
+            Step::Type(t) => m.type_text(pane, t)?,
             Step::Pause(ms) => std::thread::sleep(Duration::from_millis(*ms)),
         }
     }
@@ -137,7 +154,7 @@ pub fn spawn(out: Sender<Done>) -> Sender<Job> {
     let (tx, rx) = std::sync::mpsc::channel::<Job>();
     std::thread::spawn(move || {
         for job in rx {
-            let err = perform(&job).err();
+            let err = perform(&job.pane, &job.steps).err();
             if let Some(e) = &err {
                 eprintln!("agent-speak: действие {:?} для {} не вышло: {e}", job.what, job.session);
             }
@@ -215,6 +232,7 @@ mod tests {
         fn locate(&self, _: &HashMap<String, String>) -> Option<Pane> { None }
         fn send(&self, _: &Pane, text: &str) -> Result<(), String> { self.0.lock().unwrap().push(text.into()); Ok(()) }
         fn key(&self, _: &Pane, key: &Key) -> Result<(), String> { self.0.lock().unwrap().push(format!("{key:?}")); Ok(()) }
+        fn type_text(&self, _: &Pane, text: &str) -> Result<(), String> { self.0.lock().unwrap().push(format!("type:{text}")); Ok(()) }
         fn screen(&self, _: &Pane) -> Result<String, String> { Ok(String::new()) }
     }
 
@@ -222,9 +240,16 @@ mod tests {
     fn text_goes_after_clearing_the_line() {
         let m = Rec(Default::default());
         let pane = Pane { mux: "rec", id: "x".into(), via: String::new() };
-        let job = Job { session: "s".into(), pane, steps: vec![Step::Key(Key::Esc), Step::Text("продолжай".into())], what: crate::watch::What::Interrupt };
-        perform_on(&m, &job).unwrap();
+        perform_on(&m, &pane, &[Step::Key(Key::Esc), Step::Text("продолжай".into())]).unwrap();
         assert_eq!(*m.0.lock().unwrap(), ["Esc", "CtrlU", "продолжай"], "недонабранное пользователем не уйдёт вместе с текстом Омы");
+    }
+
+    #[test]
+    fn type_step_has_no_line_clear() {
+        let m = Rec(Default::default());
+        let pane = Pane { mux: "rec", id: "x".into(), via: String::new() };
+        perform_on(&m, &pane, &[Step::Key(Key::Digit(3)), Step::Type("зелёный".into()), Step::Key(Key::Enter)]).unwrap();
+        assert_eq!(*m.0.lock().unwrap(), ["Digit(3)", "type:зелёный", "Enter"], "поле меню: Ctrl+U там не нужен");
     }
 
     #[test]

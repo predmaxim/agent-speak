@@ -25,15 +25,24 @@ impl Mux for Herdr {
         prompted.or_else(|_| cli(herdr(pane, &["pane", "run", &pane.id, text])).and_then(|o| ok(&o)))
     }
     fn key(&self, pane: &Pane, key: &Key) -> Result<(), String> {
-        let k = match key {
-            Key::Esc => "esc",
-            Key::CtrlC => "ctrl+c",
-            Key::CtrlU => "ctrl+u",
-        };
-        ok(&cli(herdr(pane, &["pane", "send-keys", &pane.id, k]))?)
+        ok(&cli(herdr(pane, &["pane", "send-keys", &pane.id, &key_name(key)]))?)
+    }
+    fn type_text(&self, pane: &Pane, text: &str) -> Result<(), String> {
+        ok(&cli(herdr(pane, &["pane", "send-text", &pane.id, text]))?)
     }
     fn screen(&self, pane: &Pane) -> Result<String, String> {
         cli(herdr(pane, &["pane", "read", &pane.id, "--source", "visible", "--lines", "40"]))
+    }
+}
+
+/// Имя клавиши для `pane send-keys`.
+fn key_name(key: &Key) -> String {
+    match key {
+        Key::Esc => "esc".into(),
+        Key::CtrlC => "ctrl+c".into(),
+        Key::CtrlU => "ctrl+u".into(),
+        Key::Enter => "enter".into(),
+        Key::Digit(d) => d.to_string(),
     }
 }
 
@@ -68,5 +77,12 @@ mod tests {
     fn error_reply_is_err() {
         assert!(ok(r#"{"error":{"code":"agent_not_found","message":"agent target w1:p1 not found"},"id":"x"}"#).unwrap_err().contains("not found"));
         assert_eq!(ok(r#"{"id":"x","result":{}}"#), Ok(()));
+    }
+
+    #[test]
+    fn key_names() {
+        assert_eq!(key_name(&Key::Digit(2)), "2");
+        assert_eq!(key_name(&Key::Enter), "enter");
+        assert_eq!(key_name(&Key::Esc), "esc");
     }
 }

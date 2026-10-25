@@ -1,9 +1,13 @@
 //! Orca (MIT): терминалы — через его CLI `orca terminal …`.
 
-use super::{cli, Key, Mux, Pane};
+use super::{cli, run, Key, Mux, Pane};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Command;
+use std::time::Duration;
+
+/// Запуск агента дольше обычного вызова CLI: Orca открывает вкладку и стартует оболочку.
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Orca;
 
@@ -23,17 +27,61 @@ impl Mux for Orca {
         accepted(&cli(orca(pane, &["send", "--text", text, "--enter"]))?)
     }
     fn key(&self, pane: &Pane, key: &Key) -> Result<(), String> {
-        let out = match key {
-            Key::Esc => cli(orca(pane, &["send", "--text", "\x1b"]))?,
-            Key::CtrlC => cli(orca(pane, &["send", "--interrupt"]))?,
-            Key::CtrlU => cli(orca(pane, &["send", "--text", "\x15"]))?,
+        let out = match key_text(key) {
+            Some(t) => cli(orca(pane, &["send", "--text", &t]))?,
+            None => cli(orca(pane, &["send", "--interrupt"]))?,
         };
         accepted(&out)
+    }
+    fn type_text(&self, pane: &Pane, text: &str) -> Result<(), String> {
+        accepted(&cli(orca(pane, &["send", "--text", text]))?)
     }
     fn screen(&self, pane: &Pane) -> Result<String, String> {
         let out = cli(orca(pane, &["read", "--screen"]))?;
         screen_text(&out).ok_or_else(|| error_of(&out))
     }
+    fn projects(&self) -> Result<Vec<String>, String> {
+        let mut c = Command::new(orca_bin());
+        c.args(["worktree", "list", "--json"]);
+        Ok(worktree_paths(&cli(c)?))
+    }
+    fn launch(&self, cwd: &str, prompt: &str) -> Result<(), String> {
+        let mut c = Command::new(orca_bin());
+        let wt = format!("path:{cwd}");
+        // флаги агента Orca берёт из своих настроек — те же, с какими его запускает пользователь
+        c.args(["agent", "launch", "--agent", "claude", "--worktree", &wt, "--surface", "terminal", "--prompt", prompt, "--json"]);
+        succeeded(&run(&mut c, LAUNCH_TIMEOUT)?)
+    }
+}
+
+/// Клавиша — текстом в `terminal send --text`; Ctrl+C — свой флаг `--interrupt` (None).
+fn key_text(key: &Key) -> Option<String> {
+    Some(match key {
+        Key::Esc => "\x1b".into(),
+        Key::CtrlC => return None,
+        Key::CtrlU => "\x15".into(),
+        Key::Enter => "\r".into(),
+        Key::Digit(d) => d.to_string(),
+    })
+}
+
+/// CLI Orca без терминала агента (проекты, запуск): обёртка из его настроек — у служб systemd PATH бывает без неё.
+fn orca_bin() -> String {
+    let config = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{}/.config", std::env::var("HOME").unwrap_or_default()));
+    let shim = format!("{config}/orca/linux-orca-cli-shim/orca");
+    if std::path::Path::new(&shim).exists() { shim } else { "orca".into() }
+}
+
+/// Ответ `worktree list`: папки worktree; мусор — пусто.
+fn worktree_paths(out: &str) -> Vec<String> {
+    let v: Value = serde_json::from_str(out).unwrap_or_default();
+    v["result"]["worktrees"].as_array().into_iter().flatten().filter_map(|w| w["path"].as_str().map(str::to_string)).collect()
+}
+
+/// Ответ команды Orca без особого поля: `ok` — успех.
+fn succeeded(out: &str) -> Result<(), String> {
+    let v: Value = serde_json::from_str(out).map_err(|_| error_of(out))?;
+    if v["ok"] == true { Ok(()) } else { Err(error_of(out)) }
 }
 
 /// `orca terminal <sub> --terminal <id> … --json`.
@@ -79,5 +127,22 @@ mod tests {
         assert!(accepted(r#"{"ok":true,"result":{"send":{"accepted":false}}}"#).is_err());
         assert_eq!(screen_text(r#"{"ok":true,"result":{"terminal":{"tail":["a","b"]}}}"#).unwrap(), "a\nb");
         assert_eq!(screen_text("мусор"), None);
+    }
+
+    #[test]
+    fn keys_as_text() {
+        assert_eq!(key_text(&Key::Enter), Some("\r".into()));
+        assert_eq!(key_text(&Key::Digit(3)), Some("3".into()));
+        assert_eq!(key_text(&Key::Esc), Some("\x1b".into()));
+        assert_eq!(key_text(&Key::CtrlU), Some("\x15".into()));
+        assert_eq!(key_text(&Key::CtrlC), None, "у Ctrl+C — --interrupt");
+    }
+
+    #[test]
+    fn worktrees_and_launch_reply() {
+        assert_eq!(worktree_paths(r#"{"ok":true,"result":{"worktrees":[{"path":"/p/a"},{"path":"/p/b"}]}}"#), ["/p/a", "/p/b"]);
+        assert!(worktree_paths("мусор").is_empty());
+        assert_eq!(succeeded(r#"{"ok":true,"result":{}}"#), Ok(()));
+        assert!(succeeded(r#"{"ok":false,"error":{"message":"selector_not_found"}}"#).unwrap_err().contains("selector_not_found"));
     }
 }
