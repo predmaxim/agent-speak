@@ -158,6 +158,8 @@ struct State {
     here_ask: Option<u64>,      // «Ты тут?» спрошен: ответа ждём HERE_WAIT с открытия окна ответа
     seen_mode: Option<Mode>,    // режим присутствия прошлого тика — смену пишем в журнал
     here_speakers: bool,        // «Ты тут?» в наушники без ответа — спросили ещё раз в динамики: выход — на них, пока не ответит
+    presence_at: u64,           // время прошлого снимка присутствия — перерыв пишем в журнал
+    presence_seen: String,      // прошлые факты снимка словами — смену пишем в журнал
     welcome: bool,              // вернулся после долгого отсутствия: следующие новости — с приветствием и обзором
     night_keep: bool,           // тишина настала, пока пользователя нет: накопленное ждёт утра
     facts_src: Box<dyn Fn() -> Option<String>>, // снимок присутствия при старте; в тестах — подделка
@@ -328,6 +330,8 @@ pub fn run() {
         here_ask: None,
         seen_mode: None,
         here_speakers: false,
+        presence_at: 0,
+        presence_seen: String::new(),
         welcome: false,
         night_keep: false,
         facts_src: Box::new(move || std::fs::read_to_string(&facts).ok()),
@@ -1137,7 +1141,19 @@ impl State {
     /// Снимок сервиса присутствия; битый пропускаем — прежние факты в силе.
     fn on_presence(&mut self, text: &str) {
         let Some(f) = presence::parse_facts(text) else { return };
-        let back = self.presence.apply(f, (self.now_secs)());
+        let now = (self.now_secs)();
+        // журнал: смена фактов и перерыв в снимках — по ним видно, почему Ома решила «он тут»
+        let idle = if f.idle_since == 0 { "ввод сейчас".to_string() } else { format!("ввода нет с {}", f.idle_since) };
+        let facts = format!("{idle}, блок {}, микрофон {}, камера {}, видео {}, наушники {:?}", f.locked, f.mic, f.camera, f.video, f.buds);
+        let gap = f.at.saturating_sub(self.presence_at);
+        if self.presence_at != 0 && gap > 45 {
+            eprintln!("agent-speak: снимок присутствия: перерыв {gap} с");
+        }
+        if facts != self.presence_seen {
+            eprintln!("agent-speak: снимок присутствия: {facts}");
+        }
+        (self.presence_at, self.presence_seen) = (f.at, facts);
+        let back = self.presence.apply(f, now);
         self.on_back(back);
         self.route();
     }
@@ -1473,6 +1489,8 @@ mod tests {
             here_ask: None,
             seen_mode: None,
             here_speakers: false,
+            presence_at: 0,
+            presence_seen: String::new(),
             welcome: false,
             night_keep: false,
             facts_src: Box::new(|| None), // снимка нет — как без сервиса присутствия
