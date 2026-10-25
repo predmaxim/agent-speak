@@ -202,8 +202,8 @@ class Conversation:
                 self.send_at = now + SEND_PAUSE
         if self.state == "listening" and not self.hearing and self.draft and self.send_at is not None and now >= self.send_at:
             text = self.draft.strip()
-            if is_cancel(text):  # «отбой» — не реплика: оборвать всё, что звучит (и чтение), и слушать дальше
-                return [("halt",)] + self.cancel()
+            if is_cancel(text):  # «отбой» — не реплика: оборвать всё, что звучит (и чтение), и закончить разговор
+                return [("halt",)] + self.end()
             acts = ([("stop",)] if self.audio_busy else []) + self._drop()  # статус агента, что звучит, обрываем
             return acts + (self._window_send(text) if self.window else self._send(text))
         if self.quiet_at is not None and now >= self.quiet_at and not self.hearing and self.state in ("listening", "paused"):

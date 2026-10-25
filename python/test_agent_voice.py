@@ -1115,8 +1115,8 @@ def test_prompt_demands_short_answers():
     assert "«Да» или «Нет»" in brain.OMA_PROMPT and "одной-тремя" not in brain.OMA_PROMPT
 
 
-def test_cancel_word_stops_everything_and_keeps_listening():
-    # «отбой»/«отмена» — не реплика мозгу: всё, что звучит (и чтение), обрывается, Ома сразу слушает дальше
+def test_cancel_word_stops_everything_and_ends_conversation():
+    # «отбой»/«отмена» — не реплика мозгу: всё, что звучит (и чтение), обрывается, разговор кончается, микрофон выключен
     clk, cv = _conv()
     cv.talk()
     cv.ask("расскажи про агентов")
@@ -1126,9 +1126,9 @@ def test_cancel_word_stops_everything_and_keeps_listening():
     cv.phrase("Отбой.", 1)
     clk.t += SEND_PAUSE
     acts = cv.tick()
-    assert ("halt",) in acts
+    assert ("halt",) in acts and ("ear", False) in acts
     assert not any(a[0] == "send" for a in acts)
-    assert cv.state == "listening" and cv.active
+    assert cv.state == "idle" and not cv.active
 
 
 def test_cancel_words_table():
