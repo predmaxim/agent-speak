@@ -1143,16 +1143,17 @@ impl State {
         if self.seen_mode.replace(mode).is_some_and(|m| m != mode) {
             eprintln!("agent-speak: присутствие: {mode:?}");
         }
-        // «Ты тут?» решён и разговор кончился — гарнитуру, включённую Омой, — обратно в музыку
+        self.speak_news(); // раньше окна ответа: новые новости встают перед ним, а не поверх
+        // «Ты тут?» решён, разговор кончился и всё стихло — гарнитуру, включённую Омой, — обратно в музыку;
+        // смена профиля роняет звук наушников: новость, начатая после «да», ушла бы в тишину
         if let Headset::Asked(switched) = self.headset {
-            if self.here_ask.is_none() && !self.oma.talking && self.listen_after.is_none() {
+            if self.here_ask.is_none() && !self.oma.talking && self.listen_after.is_none() && self.silent() {
                 if switched {
                     let _ = self.bt.send("music");
                 }
                 self.headset = Headset::Off;
             }
         }
-        self.speak_news(); // раньше окна ответа: новые новости встают перед ним, а не поверх
         self.listen_if_due(now);
     }
 
@@ -3066,6 +3067,30 @@ mod tests {
         assert_eq!(rx.try_recv(), Ok("music"), "вопрос решён — режим музыки обратно");
         st.tick();
         assert!(rx.try_recv().is_err(), "один раз");
+    }
+
+    #[test]
+    fn music_back_only_after_the_news_answered_for() {
+        // «да» в наушники — и сразу новость: вернуть музыку посреди неё — уронить звук, новость в тишину
+        let (mut st, _env) = env_state();
+        st.bt_out = Box::new(|| true);
+        let rx = bt(&mut st);
+        with_agents(&mut st, &["s", "t"]);
+        secs_at(&mut st, 1100);
+        snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000}));
+        final_s(&mut st);
+        st.tick();
+        st.on_bt("headset", true);
+        st.tick();
+        assert_eq!(rx.try_recv(), Ok("headset"));
+        texts(&st);
+        st.on_msg(Msg::Presence { state: "here".into() });
+        st.tick();
+        assert!(!texts(&st).is_empty(), "новость пошла");
+        assert!(rx.try_recv().is_err(), "пока новость звучит — гарнитуру не трогать");
+        st.listen_after = None; // новость и окно после неё позади
+        st.tick();
+        assert_eq!(rx.try_recv(), Ok("music"));
     }
 
     #[test]
