@@ -101,6 +101,19 @@ pub fn pending_background(content: &str) -> usize {
     pending.len()
 }
 
+/// Фоновые помощники, которые ещё работают, — по их `.meta.json` в папке `subagents` сессии (нет `finished`).
+/// Хвост транскрипта их не видит, если запуск был давно, а помощник-сервер работает часами.
+pub fn running_helpers(subagents: &std::path::Path) -> usize {
+    std::fs::read_dir(subagents)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|f| f.file_name().to_string_lossy().ends_with(".meta.json"))
+        .filter_map(|f| serde_json::from_str::<Value>(&std::fs::read_to_string(f.path()).ok()?).ok())
+        .filter(|m| m["requestShape"] == "background" && m["finished"] != true)
+        .count()
+}
+
 /// Самый поздний вызов инструмента целиком.
 fn last_call(content: &str) -> Option<Value> {
     content.lines().rev().find_map(|line| {
@@ -373,5 +386,19 @@ mod tests {
         let side = serde_json::json!({"type":"assistant","isSidechain":true,"message":{"content":[{"type":"tool_use","id":"s","name":"Grep","input":{}}]}}).to_string();
         assert_eq!(in_flight(&[call("a", "Agent"), side].join("\n")).unwrap()["name"], "Agent", "вызовы сабагента — не главной ветки");
         assert_eq!(in_flight(""), None);
+    }
+
+    #[test]
+    fn running_helpers_from_meta_files() {
+        let dir = std::env::temp_dir().join(format!("oma-subagents-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = |name: &str, v: serde_json::Value| std::fs::write(dir.join(format!("{name}.meta.json")), v.to_string()).unwrap();
+        meta("agent-a", serde_json::json!({"description": "сервер", "requestShape": "background"}));
+        meta("agent-b", serde_json::json!({"description": "готов", "requestShape": "background", "finished": true}));
+        meta("agent-c", serde_json::json!({"description": "на переднем плане", "requestShape": "foreground"}));
+        std::fs::write(dir.join("agent-a.jsonl"), "{}").unwrap();
+        assert_eq!(running_helpers(&dir), 1);
+        assert_eq!(running_helpers(&dir.join("нет")), 0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

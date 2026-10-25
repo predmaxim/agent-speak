@@ -407,6 +407,11 @@ fn shell_idle(pid: u32) -> bool {
     tasks.flatten().all(|t| std::fs::read_to_string(t.path().join("children")).is_ok_and(|c| c.trim().is_empty()))
 }
 
+/// Фоновые помощники агента, которые ещё не отчитались: по хвосту транскрипта и по их метафайлам.
+fn helpers(transcript: &Path, tail: &str) -> usize {
+    claude::pending_background(tail).max(claude::running_helpers(&transcript.with_extension("").join("subagents")))
+}
+
 /// Факты сторожа: активность — новейшее из хуков, транскрипта и транскриптов сабагентов; у Claude — хвост транскрипта.
 fn agent_facts(e: &Entry, activity: u64) -> Facts {
     let mut f = blank_facts(e, activity);
@@ -419,7 +424,7 @@ fn agent_facts(e: &Entry, activity: u64) -> Facts {
             f.active_at = f.active_at.max(mtime(&s.path()));
         }
         let tail = tail_of(&e.transcript);
-        (f.helpers, f.call, f.error) = (claude::pending_background(&tail), claude::in_flight(&tail), claude::last_api_error(&tail));
+        (f.helpers, f.call, f.error) = (helpers(t, &tail), claude::in_flight(&tail), claude::last_api_error(&tail));
     }
     f
 }
@@ -1175,7 +1180,7 @@ impl State {
                 let transcript = PathBuf::from(p["transcript_path"].as_str().unwrap_or_default());
                 let last = final_message(p, &transcript).unwrap_or_default();
                 // помощники в фоне — «Жду ревью» не итог, а агент работает
-                let waiting = claude::pending_background(&tail_of(&transcript.to_string_lossy())) > 0;
+                let waiting = helpers(&transcript, &tail_of(&transcript.to_string_lossy())) > 0;
                 if waiting {
                     self.registry.status(&session, &last, now);
                 } else {

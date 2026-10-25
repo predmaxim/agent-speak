@@ -319,8 +319,17 @@ fn outside(t: &mut Track, f: &Facts) -> Vec<Act> {
 fn hang(t: &mut Track, ctx: &Ctx, f: &Facts, quiet: u64) -> Vec<Act> {
     let (p, now, n) = (&f.project, ctx.now, quiet / 60);
     if f.helpers > 0 {
-        if std::mem::replace(&mut t.nudged, true) {
-            return vec![];
+        // помощник бывает сервером и молчит часами: писать агенту — только по вердикту модели «висит»
+        match t.ladder {
+            _ if t.nudged => return vec![],
+            Ladder::Hung => t.nudged = true,
+            Ladder::Judging => return vec![],
+            Ladder::Long(until) if now < until => return vec![],
+            _ => {
+                t.ladder = Ladder::Judging;
+                let text = format!("Тишина {n} мин. Агент закончил ход и ждёт своих фоновых помощников ({}), они тоже молчат.", f.helpers);
+                return vec![Act::Judge { session: f.id.clone(), text }];
+            }
         }
         let text = format!("Твой фоновый помощник молчит {n} мин — похоже, завис. Проверь его: завис — останови и перезапусти.");
         return match &f.pane {
@@ -609,10 +618,23 @@ mod tests {
         let mut w = Watch::default();
         let a = Facts { helpers: 2, ..f("a") };
         let acts = w.check(&ctx(800, 0), vec![a.clone()], |_| true);
+        assert!(matches!(&acts[..], [Act::Judge { text, .. }] if text.contains("фоновых помощников")), "сначала — модель: помощник-сервер молчит часами: {acts:?}");
+        w.judged("a", true, 805);
+        let acts = w.check(&ctx(860, 0), vec![a.clone()], |_| true);
         let j = run_of(&acts[0]).unwrap();
-        assert_eq!((j.what, &j.steps[..]), (What::Nudge, &[Step::Text("Твой фоновый помощник молчит 13 мин — похоже, завис. Проверь его: завис — останови и перезапусти.".into())][..]));
+        assert_eq!((j.what, &j.steps[..]), (What::Nudge, &[Step::Text("Твой фоновый помощник молчит 14 мин — похоже, завис. Проверь его: завис — останови и перезапусти.".into())][..]));
         assert!(w.check(&ctx(900, 0), vec![a], |_| true).is_empty());
         assert!(matches!(w.done("a", What::Nudge, None, 901), Some(Act::Say { text, .. }) if text == "p: помощник агента молчит — написала агенту."));
+    }
+
+    #[test]
+    fn long_helpers_are_left_alone() {
+        let mut w = Watch::default();
+        let a = Facts { helpers: 1, ..f("a") };
+        w.check(&ctx(800, 0), vec![a.clone()], |_| true);
+        w.judged("a", false, 805); // помощник держит сервер — так и задумано
+        assert!(w.check(&ctx(1500, 0), vec![a.clone()], |_| true).is_empty());
+        assert!(w.check(&ctx(4 * 720, 0), vec![a], |_| true).iter().all(|a| !matches!(a, Act::Run(_))), "без вердикта «висит» помощникам не пишем");
     }
 
     #[test]
