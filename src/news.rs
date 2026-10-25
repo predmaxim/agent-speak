@@ -1,8 +1,10 @@
-//! Доска новостей Омы: что говорить следующим — восстановление, вопросы по одному, итоги, промежуточное.
+//! Доска новостей Омы: что говорить следующим — срочное сторожа, восстановление, вопросы по одному, итоги, промежуточное.
 
 /// Порядок вариантов — приоритет.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Class {
+    /// сторож: нужен пользователь — звучит и когда он «занят»
+    Urgent,
     Restore,
     Question,
     Final,
@@ -49,10 +51,11 @@ impl Board {
         self.spoken.retain(|(i, _)| !(i.session == session && i.class == Class::Question));
     }
 
+    /// Новости закрытых агентов снимаются; сторожевые остаются: о закрывшемся агенте и надо сказать.
     pub fn retain_sessions(&mut self, alive: impl Fn(&str) -> bool) {
-        let keep = |s: &str| s == SUMMARY || alive(s);
-        self.items.retain(|i| keep(&i.session));
-        self.spoken.retain(|(i, _)| keep(&i.session));
+        let keep = |i: &News| i.session == SUMMARY || matches!(i.class, Class::Urgent | Class::Restore) || alive(&i.session);
+        self.items.retain(|i| keep(i));
+        self.spoken.retain(|(i, _)| keep(i));
         // закрытый агент не ответит: итоги не ждут его ANSWER_WAIT
         if self.asked.as_ref().is_some_and(|(q, _)| !alive(&q.session)) {
             self.asked = None;
@@ -77,7 +80,8 @@ impl Board {
         if !waiting {
             self.asked = None;
         }
-        let mut taken = self.drain(Class::Restore);
+        let mut taken = self.drain(Class::Urgent);
+        taken.extend(self.drain(Class::Restore));
         let mut more = None; // суффикс «после этого ещё N» — только во фразе, не в журнале
         if !waiting {
             let (mut qs, focused): (Vec<News>, Vec<News>) = self.drain(Class::Question).into_iter().partition(|i| Some(i.session.as_str()) != skip);
@@ -116,7 +120,7 @@ impl Board {
     /// Даст ли take(now, skip) фразу; доску не меняет: пока неясно, слушает ли он, итог агента в фокусе не снимается.
     pub fn sayable(&self, now: u64, skip: Option<&str>) -> bool {
         let waiting = self.waiting(now);
-        self.items.iter().any(|i| i.class == Class::Restore || (!waiting && Some(i.session.as_str()) != skip))
+        self.items.iter().any(|i| matches!(i.class, Class::Urgent | Class::Restore) || (!waiting && Some(i.session.as_str()) != skip))
     }
 
     /// Итог и промежуточное агента в фокусе снимаются без речи: он и так на них смотрит.
@@ -165,6 +169,21 @@ impl Board {
             parts.push(format!("{w} {} ответа", plural(w, ["ждёт", "ждут", "ждут"])));
         }
         if parts.is_empty() { None } else { Some(format!("Пока тебя не было: {}.", parts.join(", "))) }
+    }
+
+    pub fn has_urgent(&self) -> bool {
+        self.items.iter().any(|i| i.class == Class::Urgent)
+    }
+
+    /// Только срочное — пока пользователь занят; в журнал: не услышал — повторится по возвращении.
+    pub fn take_urgent(&mut self, now: u64) -> Option<String> {
+        let got = self.drain(Class::Urgent);
+        if got.is_empty() {
+            return None;
+        }
+        let say = got.iter().map(|i| i.say.as_str()).collect::<Vec<_>>().join(" ");
+        self.spoken.extend(got.into_iter().map(|i| (i, now)));
+        Some(say)
     }
 
     pub fn finals(&self) -> usize {
@@ -384,7 +403,8 @@ mod tests {
         b.push(n("c", Class::Question, "C: что делаем с мёртвым кодом?", 3));
         b.push(n("a", Class::Restore, "A: агент повис — перезапустила.", 4));
         b.push(n("b", Class::Restore, "B: сабагент повис — перезапустила.", 5));
-        assert_eq!(b.take(10, None, true).unwrap(), "A: агент повис — перезапустила. B: сабагент повис — перезапустила. C: что делаем с мёртвым кодом?");
+        b.push(n("f", Class::Urgent, "F: агент завис посреди push — не трогаю, посмотри сам.", 6));
+        assert_eq!(b.take(10, None, true).unwrap(), "F: агент завис посреди push — не трогаю, посмотри сам. A: агент повис — перезапустила. B: сабагент повис — перезапустила. C: что делаем с мёртвым кодом?");
         assert_eq!(b.take(20, None, true), None);                 // ждём ответа на вопрос
         b.answered("c");
         assert_eq!(b.take(21, None, true).unwrap(), "D: фича готова.");
@@ -471,5 +491,40 @@ mod tests {
         assert_eq!(more_questions(11), "После этого ещё 11 вопросов.");
         assert_eq!(more_questions(21), "После этого ещё 21 вопрос.");
         assert_eq!(more_questions(22), "После этого ещё 22 вопроса.");
+    }
+
+    #[test]
+    fn urgent_first_and_survives_gone_session() {
+        let mut b = Board::default();
+        b.push(n("q", Class::Question, "Q?", 1));
+        b.push(n("r", Class::Restore, "R перезапущен.", 2));
+        b.push(n("u", Class::Urgent, "U завис посреди push.", 3));
+        b.retain_sessions(|s| s == "q");
+        assert_eq!(b.take(10, None, true).unwrap(), "U завис посреди push. R перезапущен. Q?");
+    }
+
+    #[test]
+    fn take_urgent_leaves_the_rest() {
+        let mut b = Board::default();
+        b.push(n("f", Class::Final, "F.", 1));
+        b.push(n("u", Class::Urgent, "U.", 2));
+        assert!(b.has_urgent());
+        assert_eq!(b.take_urgent(10).unwrap(), "U.");
+        assert!(!b.has_urgent() && b.take_urgent(11).is_none());
+        assert_eq!(b.take(12, None, true).unwrap(), "F.");
+        b.push(n("u", Class::Urgent, "U.", 3));
+        b.take_urgent(1100);
+        b.returned(1000, true);
+        assert_eq!(b.take(2000, None, true).unwrap(), "U.", "срочное при «занят» — в журнал: не услышал — повторится");
+    }
+
+    #[test]
+    fn urgent_sayable_while_waiting_for_answer() {
+        let mut b = Board::default();
+        b.push(n("q", Class::Question, "Q?", 1));
+        b.take(10, None, true);
+        b.push(n("u", Class::Urgent, "U.", 2));
+        assert!(b.sayable(11, None));
+        assert_eq!(b.take(11, None, true).unwrap(), "U.");
     }
 }

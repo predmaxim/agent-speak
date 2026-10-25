@@ -603,7 +603,7 @@ impl State {
         let stale = match d.ask {
             Ask::Progress => e.state != agents::State::Working,
             Ask::Question => e.state != agents::State::Waiting,
-            Ask::Final | Ask::Summary => false,
+            Ask::Final | Ask::Summary | Ask::Hung => false,
         };
         if stale {
             return;
@@ -614,6 +614,7 @@ impl State {
             Ask::Final | Ask::Summary => Some("final"),
             Ask::Question => Some("question"),
             Ask::Progress => d.important.then_some("status"),
+            Ask::Hung => None,
         };
         if let Some(kind) = kind {
             self.bubble(&d.session, &format!("{kind}-{}", d.session), &who, &d.say, kind);
@@ -622,6 +623,7 @@ impl State {
             Ask::Question => Some(Class::Question),
             Ask::Final | Ask::Summary => Some(Class::Final),
             Ask::Progress => d.important.then_some(Class::Progress),
+            Ask::Hung => None,
         };
         if let Some(class) = class.filter(|_| !self.quiet()) {
             if class == Class::Question {
