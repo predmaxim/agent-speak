@@ -53,6 +53,7 @@ class Oma:
     def __init__(self, conv, ear, brain, whisper, send=link.send, notify=notify, clock=time.monotonic, orders=None):
         self.conv, self.ear, self.brain, self.whisper, self.send = conv, ear, brain, whisper, send
         self.orders = orders or Orders()
+        self.utter, self.sending = [], []  # звук фраз черновика; при выбросе черновика — к отправке
         self.notify, self.clock = notify, clock
         self.history = []  # текущий чат, как его видит окно: история из open() + реплики этого процесса
         self.n = 0         # номер ответа: пузырь oma-<pid>-<n>
@@ -146,7 +147,11 @@ class Oma:
         if kind == "start":
             await self.act(c.speech_start(ev[1]))
         elif kind == "phrase":
-            await self.act(c.phrase(ev[1], ev[2]))
+            pcm, before = getattr(self.ear, "audio", {}).pop(ev[2], b""), c.draft
+            acts = c.phrase(ev[1], ev[2])
+            if pcm and c.draft != before:  # фраза вошла в черновик
+                self.utter.append(pcm)
+            await self.act(acts)
         elif kind == "tick":
             await self.act(c.tick())
         elif kind == "locked":
@@ -175,6 +180,25 @@ class Oma:
             elif c.turn and ev[1].startswith("Claude"):  # ход мозга оборвался — в покой
                 await self.act(c.done())
 
+    async def hear(self, pcm):
+        """Реплика целиком: whisper по кускам между паузами теряет смысл на краях («этот спик» вместо «AgentSpeak»)."""
+        from .ear import transcribe
+        return await asyncio.to_thread(transcribe, await self.whisper.get(), pcm)
+
+    async def _whole(self, text):
+        """Текст реплики, сказанной голосом: несколько фраз — распознать звук целиком; не вышло — как в черновике."""
+        parts, self.sending = self.sending, []
+        if len(parts) < 2:
+            return text
+        try:
+            whole = (await self.hear(b"".join(parts))).strip()
+        except Exception as e:
+            print(f"agent_voice: реплика целиком: {e!r}", file=sys.stderr, flush=True)
+            return text
+        if whole and whole != text:
+            print(f"agent_voice: целиком «{whole}», по кускам «{text}»", file=sys.stderr, flush=True)
+        return whole or text
+
     async def act(self, acts):
         failed = said = None
         for a in acts:
@@ -188,6 +212,7 @@ class Oma:
                     await self.ear.stop()
             elif k == "send":
                 key = self.brain.key
+                a = (k, await self._whole(a[1]) if self.conv.voiced else a[1], a[2])
                 self.orders.turn(self.conv.voiced, a[1])
                 if self.conv.voiced:
                     said = await self.orders.confirm(a[1])  # «подтверждаю …» сверяет код, мозг не зовём
@@ -218,6 +243,7 @@ class Oma:
             elif k == "draft":
                 self.emit({"bubble": {"id": "draft", "who": "Ты", "text": a[1], "kind": "draft", "hearing": a[2], "append": False}})
             elif k == "drop_draft":
+                self.utter, self.sending = [], self.utter  # отправка следом заберёт звук; без неё — забыт новым черновиком
                 self.emit({"bubble": {"id": "draft", "who": "Ты", "text": "", "kind": "draft", "append": False, "drop": True}})
             elif k == "state":
                 s = "loading" if a[1] == "listening" and not self.whisper.ready else a[1]

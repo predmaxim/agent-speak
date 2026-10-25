@@ -96,6 +96,7 @@ class Ear:
         self.paused = False
         self._cut = False
         self.seq = 0
+        self.audio = {}  # номер речи → её звук, пока Ома его не забрала
         self._proc = self._vad = self._tasks = None
 
     @property
@@ -153,7 +154,9 @@ class Ear:
                 continue
             try:
                 model = await self.whisper.get()
-                await self.out.put(("phrase", await asyncio.to_thread(transcribe, model, pcm), n))
+                text = await asyncio.to_thread(transcribe, model, pcm)
+                self.audio[n] = pcm  # реплику из нескольких фраз Ома при отправке распознаёт целиком
+                await self.out.put(("phrase", text, n))
             except Exception as e:
                 await self.out.put(("error", f"recognize: {e!r}"))  # слух продолжает работать
                 await self.out.put(("phrase", "", n))  # речь закрыта: иначе Conversation.hearing застрянет

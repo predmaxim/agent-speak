@@ -22,8 +22,8 @@ def test_phrase_after_pause_with_preroll():
     ev = feed(seg, [0.1] * 10 + [0.9] * 20 + [0.1] * 22)
     assert ev[0] == ("start",)
     assert ev[1][0] == "phrase"
-    # предзахват: 8 кадров до старта + 20 речи + 22 тишины
-    assert len(ev[1][1]) == (8 + 20 + 22) * 1024
+    # предзахват: 10 кадров тишины до старта (запас 16, есть 10) + 20 речи + 22 тишины
+    assert len(ev[1][1]) == (10 + 20 + 22) * 1024
     assert len(ev) == 2
 
 
@@ -1366,3 +1366,61 @@ def test_cli_timeout_warns_it_may_have_arrived(monkeypatch):
     monkeypatch.setenv("AGENT_SPEAK_BIN", "sleep")
     ok, out = run(cli("5", timeout=0.2))
     assert not ok and "не знаю, дошло ли" in out
+
+
+def test_flickering_onset_keeps_first_syllable():
+    # под вентиляторами VAD «мигает» на первом слоге: начало не должно вытесниться из запаса
+    probs = [0.1] * 10 + [0.9] * 6 + [0.1] + [0.9] * 6 + [0.1] + [0.9] * 8 + [0.1] * 22
+    ev = feed(Segmenter(), probs)
+    audio = next(e[1] for e in ev if e[0] == "phrase")
+    assert bytes([10]) * 1024 in audio, "первый кадр речи на месте"
+
+
+def _oma_hearing(sent, emitted, heard):
+    clk, oma = _oma(sent, emitted)
+    oma.brain.texts = []
+    oma.ear.audio = {}
+
+    async def hear(pcm):
+        heard.append(pcm)
+        return "Какая погода в Москве?"
+
+    oma.hear = hear
+    return clk, oma
+
+
+def test_whole_utterance_retranscribed_at_send():
+    sent, emitted, heard = [], [], []
+    clk, oma = _oma_hearing(sent, emitted, heard)
+
+    async def go():
+        await oma.command({"do": "talk"})
+        for n, (text, pcm) in enumerate((("какая погода", b"a"), ("в москве", b"b")), 1):
+            await oma.event(("start", n))
+            oma.ear.audio[n] = pcm
+            await oma.event(("phrase", text, n))
+        clk.t += SEND_PAUSE
+        await oma.event(("tick",))
+    run(go())
+    assert heard == [b"ab"] and oma.brain.texts == ["Какая погода в Москве?"]
+    me = [e["line"]["bubble"]["text"] for e in emitted if e["line"].get("bubble", {}).get("kind") == "me"]
+    assert me == ["Какая погода в Москве?"], "в чате — то, что ушло мозгу"
+
+
+def test_single_phrase_not_retranscribed_and_dropped_audio_forgotten():
+    sent, emitted, heard = [], [], []
+    clk, oma = _oma_hearing(sent, emitted, heard)
+
+    async def go():
+        await oma.command({"do": "talk"})
+        await oma.event(("start", 1))
+        oma.ear.audio[1] = b"x"
+        await oma.event(("phrase", "лишнее", 1))
+        await oma.command({"do": "cancel"})  # Esc: фраза выброшена — и её звук
+        await oma.event(("start", 2))
+        oma.ear.audio[2] = b"y"
+        await oma.event(("phrase", "который час", 2))
+        clk.t += SEND_PAUSE
+        await oma.event(("tick",))
+    run(go())
+    assert heard == [] and oma.brain.texts == ["который час"] and oma.ear.audio == {}
