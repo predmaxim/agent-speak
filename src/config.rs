@@ -23,13 +23,21 @@ pub struct Config {
     pub orb_pos: String,
     /// орб и пузыри — и над полноэкранными окнами (слой Overlay), иначе под ними (Top)
     pub orb_over_fullscreen: bool,
+    /// сторож проверяет агентов раз в столько секунд
+    pub watch_every: u64,
+    /// агент «работает», а событий нет столько минут — завис
+    pub hung_after: u64,
+    /// вопрос агента ждёт ответа — напоминать раз в столько минут
+    pub remind_after: u64,
+    /// процент лимита, с которого Ома считает прогноз и подсказывает агентам
+    pub limit_threshold: u64,
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config { speaker: "xenia".into(), rate: "medium".into(),
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: true, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
-            orb_over_fullscreen: true }
+            orb_over_fullscreen: true, watch_every: 60, hung_after: 12, remind_after: 15, limit_threshold: 95 }
     }
 }
 
@@ -45,6 +53,11 @@ pub const CORNERS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-
 pub fn valid_pos(s: &str) -> bool {
     let p: Vec<&str> = s.split(',').collect();
     p.len() == 3 && CORNERS.contains(&p[0]) && p[1..].iter().all(|n| n.parse::<u32>().is_ok_and(|n| n <= 10000))
+}
+
+/// Целое из lo..=hi.
+fn in_range(v: &serde_json::Value, lo: u64, hi: u64) -> bool {
+    v.as_u64().is_some_and(|n| (lo..=hi).contains(&n))
 }
 
 /// Ровно `ЧЧ:ММ` (00..23:00..59) -> минуты от полуночи.
@@ -91,6 +104,10 @@ impl Config {
             "progress_digest" if value.is_boolean() => self.progress_digest = value.as_bool().unwrap(),
             "orb_pos" if valid_pos(s) => self.orb_pos = s.into(),
             "orb_over_fullscreen" if value.is_boolean() => self.orb_over_fullscreen = value.as_bool().unwrap(),
+            "watch_every" if in_range(value, 15, 3600) => self.watch_every = value.as_u64().unwrap(),
+            "hung_after" if in_range(value, 2, 240) => self.hung_after = value.as_u64().unwrap(),
+            "remind_after" if in_range(value, 1, 1440) => self.remind_after = value.as_u64().unwrap(),
+            "limit_threshold" if in_range(value, 50, 100) => self.limit_threshold = value.as_u64().unwrap(),
             _ => return false,
         }
         true
@@ -194,5 +211,18 @@ mod tests {
         assert!(!c.set("quiet_schedule", &json!("true")));
         assert!(!c.set("max_age_secs", &json!(5))); // настройки больше нет
         assert_eq!((c.speaker.as_str(), c.rate.as_str()), ("eugene", "x-fast"));
+    }
+
+    #[test]
+    fn watch_keys_default_and_validate() {
+        use serde_json::json;
+        let mut c = Config::default();
+        assert_eq!((c.watch_every, c.hung_after, c.remind_after, c.limit_threshold), (60, 12, 15, 95));
+        let old: Config = toml::from_str("speaker = \"baya\"").unwrap();
+        assert_eq!((old.watch_every, old.hung_after), (60, 12), "старый файл без ключей сторожа");
+        assert!(!c.set("hung_after", &json!(1)) && !c.set("limit_threshold", &json!(101)) && !c.set("watch_every", &json!(10)));
+        assert!(!c.set("remind_after", &json!("15")) && !c.set("hung_after", &json!(12.5)));
+        assert!(c.set("hung_after", &json!(20)) && c.set("watch_every", &json!(15)) && c.set("remind_after", &json!(1440)) && c.set("limit_threshold", &json!(50)));
+        assert_eq!((c.watch_every, c.hung_after, c.remind_after, c.limit_threshold), (15, 20, 1440, 50));
     }
 }
