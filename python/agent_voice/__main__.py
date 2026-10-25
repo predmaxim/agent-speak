@@ -199,8 +199,8 @@ class Oma:
         except Exception as e:
             print(f"agent_voice: реплика целиком: {e!r}", file=sys.stderr, flush=True)
             return text
-        if whole and whole != text:
-            print(f"agent_voice: целиком «{whole}», по кускам «{text}»", file=sys.stderr, flush=True)
+        if whole and whole != text:  # сам текст в журнал не пишем: в нём бывает чужой разговор в комнате
+            print(f"agent_voice: реплика целиком распознана иначе, чем по кускам ({len(whole)} и {len(text)} знаков)", file=sys.stderr, flush=True)
         return whole or text
 
     async def act(self, acts):

@@ -20,7 +20,8 @@ ACKS = {"ок", "окей", "ok", "okay", "понял", "поняла", "ясн�
 YES = {"да", "тут", "здесь", "я", "ага", "угу", "слушаю"}
 CANCEL = ("отбо", "отмен", "стоп")  # основы: whisper пишет любую форму — «отмену», «отменить», «отбою»
 # Похоже на ответ на «Эй, ты тут?»: остальная речь в комнате (ребёнок, гости) — не пользователь Оме
-ANSWER_WORDS = {"да", "ага", "угу", "ок", "окей", "тут", "я", "что", "как", "нет", "не", "ну", "щас"}
+ANSWER_WORDS = {"да", "ага", "угу", "ок", "окей", "тут", "я", "что", "как", "нет", "не", "ну", "щас", "через"}
+ANSWER_MAX = 8  # слов: ответ Оме короткий; длинное — разговор в комнате, в нём «да» и «нет» есть всегда
 ANSWER_STEMS = ("здес", "слуша", "говор", "рассказ", "давай", "нов", "потом", "позж", "минут", "секунд", "сейчас",
                 "подожд", "занят", "отбо", "отмен", "стоп", "ома", "хорош", "ладн")
 ECHO_WINDOW = 3     # с после её речи: хвост её голоса из динамиков ещё в микрофоне
@@ -42,7 +43,8 @@ def is_yes(text):
 
 
 def is_answer(text):
-    return any(w in ANSWER_WORDS or w.startswith(ANSWER_STEMS) for w in words(text))
+    w = words(text)
+    return 0 < len(w) <= ANSWER_MAX and (w[0] in ANSWER_WORDS or w[0].startswith(ANSWER_STEMS))
 
 
 def is_echo(text, said):
@@ -153,7 +155,9 @@ class Conversation:
             if w["kind"] == "news" and is_ack(text):
                 return acts + self.end()
             ctx = f"Ома только что сказала: «{w['said']}». "
-        w["close"] = is_ack(text)
+        # окно открыла Ома сама: одна реплика и её ответ, дальше микрофон закрыт — разговор в комнате не уходит
+        # в Claude; продолжить разговор — кликом
+        w["close"] = True
         return acts + self._send(text, ctx)
 
     def _closing(self):
@@ -201,10 +205,10 @@ class Conversation:
         if self._echoing() and (self.audio_busy or self.state == "speaking"):
             self.started = n  # её голос или перебив — решит распознанный текст: обрывать её по эху нельзя
             return []
+        if self.window and not self.window["first"]:
+            return []  # на окно уже ответили: дальше — не Оме, её ответ не обрывать
         self.started = n
         self.send_at = self.quiet_at = None
-        if self.window:
-            self.window["close"] = False
         acts = self._stop_turn()
         if self.state != "listening":
             acts += self._to("listening")
@@ -213,6 +217,8 @@ class Conversation:
 
     def phrase(self, text, n):
         self.heard = max(self.heard, n)
+        if self.window and not self.window["first"]:
+            return []  # на окно уже ответили: речь в комнате — не Оме
         pre = []
         if self._echoing():
             if is_echo(text, self.said):

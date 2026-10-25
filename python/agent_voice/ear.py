@@ -161,7 +161,6 @@ class Ear:
             try:
                 model = await self.whisper.get()
                 text = await asyncio.to_thread(transcribe, model, pcm)
-                print(f"agent_voice: слух: «{text[:120]}»", file=sys.stderr, flush=True)
                 self.audio[n] = pcm  # реплику из нескольких фраз Ома при отправке распознаёт целиком
                 await self.out.put(("phrase", text, n))
             except Exception as e:

@@ -269,13 +269,22 @@ def test_ack_reply_silent_in_quiet_mode_closes_on_done():
     assert ("ear", False) in cv.done()
 
 
-def test_window_silence_after_reply_is_five_seconds():
+def test_auto_window_closes_after_reply():
+    # окно открыла сама Ома: после её ответа микрофон закрыт — разговор в комнате не уходит в Claude; продолжить — кликом
     clk, cv = _conv()
     cv.listen(5, "question", "плуг: баг")
     _say(clk, cv, "расскажи подробнее")
-    cv.delta("А что за баг? "); cv.audio(True); cv.done(); cv.audio(False)
-    clk.t += WINDOW_END - 0.1; assert cv.tick() == [] and cv.active
-    clk.t += 0.2; assert ("ear", False) in cv.tick()
+    cv.delta("А что за баг? "); cv.audio(True); cv.done()
+    cv.speech_start(2)  # в комнате говорят поверх её ответа
+    assert ("ear", False) in cv.audio(False) or ("ear", False) in cv.tick()
+
+
+def test_are_you_there_room_talk_with_yes_inside_is_ignored():
+    clk, cv = _conv()
+    cv.listen(5, "here", "Эй, ты тут?")
+    acts = _say(clk, cv, "Которые под вид кожи? Налили пиво? Нет, не под вид кожи, а голубые")
+    assert not any(a[0] in ("send", "presence") for a in acts), "ответ Оме — короткий и начинается с ответа"
+    assert ("presence", "here") in _say(clk, cv, "через минуту", n=2)
 
 
 def test_are_you_there_yes_closes():
