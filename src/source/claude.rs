@@ -103,12 +103,14 @@ pub fn pending_background(content: &str) -> usize {
 
 /// Фоновые помощники, которые ещё работают, — по их `.meta.json` в папке `subagents` сессии (нет `finished`).
 /// Хвост транскрипта их не видит, если запуск был давно, а помощник-сервер работает часами.
-pub fn running_helpers(subagents: &std::path::Path) -> usize {
+/// since — старт процесса агента: метафайл старше — помощник прошлого запуска, он не отчитается никогда.
+pub fn running_helpers(subagents: &std::path::Path, since: u64) -> usize {
+    let mtime = |f: &std::fs::DirEntry| f.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
     std::fs::read_dir(subagents)
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|f| f.file_name().to_string_lossy().ends_with(".meta.json"))
+        .filter(|f| f.file_name().to_string_lossy().ends_with(".meta.json") && mtime(f) >= since)
         .filter_map(|f| serde_json::from_str::<Value>(&std::fs::read_to_string(f.path()).ok()?).ok())
         .filter(|m| m["requestShape"] == "background" && m["finished"] != true)
         .count()
@@ -161,17 +163,42 @@ pub struct ApiError {
     pub resets_at: Option<u64>,
 }
 
-/// Записи главной ветки: реплики пользователя и агента без сабагентов (isSidechain).
-fn main_records(content: &str) -> impl DoubleEndedIterator<Item = Value> + '_ {
-    content.lines().filter(|l| l.contains("\"type\":\"user\"") || l.contains("\"type\":\"assistant\"") || l.contains("queued_command")).filter_map(|l| {
+/// Записи хода: реплики пользователя и агента, вставки, служебные system; sidechain — и записи сабагентов.
+fn records(content: &str, sidechain: bool) -> impl DoubleEndedIterator<Item = Value> + '_ {
+    let wanted = ["\"type\":\"user\"", "\"type\":\"assistant\"", "\"type\":\"system\"", "queued_command"];
+    content.lines().filter(move |l| wanted.iter().any(|w| l.contains(w))).filter_map(move |l| {
         let e: Value = serde_json::from_str(l).ok()?;
-        (matches!(e["type"].as_str(), Some("user" | "assistant" | "attachment")) && e["isSidechain"] != true).then_some(e)
+        (matches!(e["type"].as_str(), Some("user" | "assistant" | "attachment" | "system")) && (sidechain || e["isSidechain"] != true)).then_some(e)
     })
+}
+
+/// Записи главной ветки, без сабагентов (isSidechain).
+fn main_records(content: &str) -> impl DoubleEndedIterator<Item = Value> + '_ {
+    records(content, false)
+}
+
+/// Ход кончился: конец хода (stop_hook_summary, turn_duration), Esc пользователя или ошибка API — после них агент ждёт.
+/// Файл сессии бывает «busy» часами, пока идут фоновые задачи, а на Esc и ошибку API хуков нет.
+pub fn turn_over(content: &str) -> bool {
+    for e in main_records(content).rev() {
+        match e["type"].as_str() {
+            Some("system") if matches!(e["subtype"].as_str(), Some("turn_duration" | "stop_hook_summary")) => return true,
+            Some("attachment") if e["attachment"]["type"] == "queued_command" => return false,
+            Some("assistant") => return e["isApiErrorMessage"] == true,
+            Some("user") => {
+                let c = &e["message"]["content"];
+                let text = c.as_str().map(str::to_string).unwrap_or_else(|| c.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect());
+                return text.starts_with("[Request interrupted by user");
+            }
+            _ => {}
+        }
+    }
+    true
 }
 
 /// Ход кончился ошибкой API: последняя реплика главной ветки — сообщение об ошибке (лимит, связь, вход…).
 pub fn last_api_error(content: &str) -> Option<ApiError> {
-    let e = main_records(content).rev().find(|e| e["type"] != "attachment")?;
+    let e = main_records(content).rev().find(|e| matches!(e["type"].as_str(), Some("user" | "assistant")))?;
     if e["isApiErrorMessage"] != true {
         return None;
     }
@@ -183,8 +210,17 @@ pub fn last_api_error(content: &str) -> Option<ApiError> {
 
 /// Последний вызов инструмента главной ветки, на который ещё нет результата; граница хода сбрасывает недождавшиеся.
 pub fn in_flight(content: &str) -> Option<Value> {
+    open_call(records(content, false))
+}
+
+/// То же в транскрипте сабагента: там все записи — sidechain.
+pub fn sub_in_flight(content: &str) -> Option<Value> {
+    open_call(records(content, true))
+}
+
+fn open_call(records: impl Iterator<Item = Value>) -> Option<Value> {
     let mut open: Vec<Value> = Vec::new();
-    for e in main_records(content) {
+    for e in records {
         if is_turn_start(&e) {
             open.clear();
             continue;
@@ -397,8 +433,39 @@ mod tests {
         meta("agent-b", serde_json::json!({"description": "готов", "requestShape": "background", "finished": true}));
         meta("agent-c", serde_json::json!({"description": "на переднем плане", "requestShape": "foreground"}));
         std::fs::write(dir.join("agent-a.jsonl"), "{}").unwrap();
-        assert_eq!(running_helpers(&dir), 1);
-        assert_eq!(running_helpers(&dir.join("нет")), 0);
+        assert_eq!(running_helpers(&dir, 0), 1);
+        assert_eq!(running_helpers(&dir.join("нет"), 0), 0);
+        let later = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 60;
+        assert_eq!(running_helpers(&dir, later), 0, "метафайл до старта процесса — помощник прошлого запуска, не отчитается никогда");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn system(sub: &str) -> String {
+        serde_json::json!({"type": "system", "subtype": sub}).to_string()
+    }
+    fn user_text(t: &str) -> String {
+        serde_json::json!({"type": "user", "message": {"content": [{"type": "text", "text": t}]}}).to_string()
+    }
+
+    #[test]
+    fn turn_over_by_end_records_interrupt_or_error() {
+        assert!(turn_over(&[call("a", "Bash"), result_of("a"), system("stop_hook_summary"), system("turn_duration")].join("\n")));
+        assert!(turn_over(&[call("a", "Bash"), user_text("[Request interrupted by user for tool use]")].join("\n")), "Esc пользователя хуков не шлёт");
+        assert!(turn_over(&err_line("server_error", false)));
+        assert!(turn_over(""), "нет записей — нечему висеть");
+        assert!(!turn_over(&call("a", "Bash")));
+        assert!(!turn_over(&[system("turn_duration"), user_text("сделай фичу")].join("\n")), "новый промпт — ход идёт");
+        assert!(!turn_over(&[system("turn_duration"), call("a", "Read"), system("compact_boundary")].join("\n")), "служебная запись посреди хода — не конец");
+        let side_end = serde_json::json!({"type": "system", "subtype": "turn_duration", "isSidechain": true}).to_string();
+        assert!(!turn_over(&[call("a", "Agent"), side_end].join("\n")), "конец хода сабагента — не конец хода агента");
+    }
+
+    #[test]
+    fn sub_in_flight_reads_sidechain_records() {
+        let side = |v: serde_json::Value| { let mut v = v; v["isSidechain"] = true.into(); v.to_string() };
+        let c = side(serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"s1","name":"Bash","input":{"command":"git push"}}]}}));
+        assert_eq!(sub_in_flight(&c).unwrap()["input"]["command"], "git push");
+        let r = side(serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"s1","content":"ok"}]}}));
+        assert_eq!(sub_in_flight(&[c, r].join("\n")), None);
     }
 }

@@ -11,6 +11,9 @@ impl Mux for Orca {
     fn name(&self) -> &'static str {
         "orca"
     }
+    fn hosts(&self, cmdline: &str) -> bool {
+        cmdline.contains("orca") // pty-хост — node из AppImage Orca
+    }
     fn locate(&self, env: &HashMap<String, String>) -> Option<Pane> {
         let id = env.get("ORCA_TERMINAL_HANDLE").filter(|h| !h.is_empty())?;
         let dir = env.get("ORCA_CLI_BIN_DIR").filter(|d| !d.is_empty())?;

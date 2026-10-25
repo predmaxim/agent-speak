@@ -11,6 +11,9 @@ impl Mux for Herdr {
     fn name(&self) -> &'static str {
         "herdr"
     }
+    fn hosts(&self, cmdline: &str) -> bool {
+        cmdline.contains("herdr") // панели держит сервер herdr
+    }
     fn locate(&self, env: &HashMap<String, String>) -> Option<Pane> {
         let id = env.get("HERDR_PANE_ID").filter(|p| !p.is_empty())?;
         let sock = env.get("HERDR_SOCKET_PATH").filter(|s| !s.is_empty())?;

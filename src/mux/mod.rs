@@ -24,6 +24,8 @@ pub struct Pane {
 
 pub trait Mux: Sync {
     fn name(&self) -> &'static str;
+    /// Командная строка процесса, который держит терминалы этого мультиплексора (его сервер, pty-хост).
+    fn hosts(&self, cmdline: &str) -> bool;
     /// Терминал по окружению процесса агента; None — агент не в этом мультиплексоре.
     fn locate(&self, env: &HashMap<String, String>) -> Option<Pane>;
     /// Текст и Enter одной отправкой.
@@ -49,10 +51,32 @@ pub fn environ(pid: u32) -> HashMap<String, String> {
         .collect()
 }
 
-/// Терминал агента с этим pid — первый адаптер, узнавший его окружение.
+/// Оболочки между агентом и терминалом: их пропускаем, ища хозяина терминала.
+pub const SHELLS: [&str; 5] = ["bash", "zsh", "fish", "sh", "dash"];
+
+fn comm(pid: u32) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default().trim().to_string()
+}
+
+/// Командная строка хозяина терминала агента: первый предок, который не оболочка.
+fn host_cmdline(pid: u32) -> String {
+    let mut p = crate::focus::ppid(pid).unwrap_or(0);
+    while p > 1 && SHELLS.contains(&comm(p).as_str()) {
+        p = crate::focus::ppid(p).unwrap_or(0);
+    }
+    let raw = std::fs::read(format!("/proc/{p}/cmdline")).unwrap_or_default();
+    String::from_utf8_lossy(&raw).replace('\0', " ")
+}
+
+/// Терминал по окружению — только если его мультиплексор и держит агента: окружение наследуют и окна,
+/// запущенные из терминала Orca или herdr (foot, редактор), и тогда писать туда — в чужую программу.
+pub fn pick(env: &HashMap<String, String>, host: &str) -> Option<Pane> {
+    adapters().iter().find_map(|m| m.locate(env).filter(|_| m.hosts(host)))
+}
+
+/// Терминал агента с этим pid.
 pub fn locate(pid: u32) -> Option<Pane> {
-    let env = environ(pid);
-    adapters().iter().find_map(|m| m.locate(&env))
+    pick(&environ(pid), &host_cmdline(pid))
 }
 
 fn adapter(pane: &Pane) -> Result<&'static dyn Mux, String> {
@@ -170,10 +194,18 @@ mod tests {
     #[test]
     fn locate_picks_the_adapter_that_knows_the_env() {
         assert_eq!(adapters().map(|m| m.name()), ["herdr", "orca"]);
-        // этот процесс тестов — не в мультиплексоре, если тесты гоняют не из Orca/herdr
-        let env = environ(std::process::id());
-        let expect = adapters().iter().find_map(|m| m.locate(&env));
-        assert_eq!(locate(std::process::id()), expect);
+        // процесс тестов запускает cargo, а не оболочка терминала: даже в Orca это не терминал агента
+        assert_eq!(locate(std::process::id()), None);
+    }
+
+    #[test]
+    fn pane_only_when_the_mux_hosts_the_agent() {
+        let env = HashMap::from([("HERDR_PANE_ID".to_string(), "w1:p1".to_string()), ("HERDR_SOCKET_PATH".into(), "/s.sock".into()),
+            ("ORCA_TERMINAL_HANDLE".into(), "term_1".into()), ("ORCA_CLI_BIN_DIR".into(), "/x".into())]);
+        assert_eq!(pick(&env, "herdr --session omatest server").unwrap().mux, "herdr");
+        assert_eq!(pick(&env, "/home/u/.cache/orca/appimage/a/b/resources/node-runtime/bin/node /home/u/.cache/orca/x.js").unwrap().mux, "orca");
+        assert_eq!(pick(&env, "foot --app-id=org.omarchy.agent -e claude"), None, "окно, запущенное из терминала Orca, наследует ORCA_* — но это не его терминал");
+        assert_eq!(pick(&HashMap::new(), "herdr server"), None);
     }
 
     #[test]

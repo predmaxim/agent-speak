@@ -37,6 +37,37 @@ pub fn last_turn(content: &str) -> Vec<String> {
     if cur.is_empty() { prev } else { cur }
 }
 
+/// Ход кончился: последнее из task_started / task_complete / turn_aborted — не начало (прерывание notify не шлёт).
+pub fn turn_over(content: &str) -> bool {
+    for l in content.lines().rev() {
+        let Ok(e) = serde_json::from_str::<Value>(l) else { continue };
+        match e["payload"]["type"].as_str().filter(|_| e["type"] == "event_msg") {
+            Some("task_complete" | "turn_aborted") => return true,
+            Some("task_started") => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Вызов инструмента без вывода — как команда Bash с его вводом целиком: сторожу важно, нет ли в нём опасного.
+pub fn in_flight(content: &str) -> Option<Value> {
+    let mut open: Vec<(Value, String)> = Vec::new();
+    for l in content.lines() {
+        let Ok(e) = serde_json::from_str::<Value>(l) else { continue };
+        let p = &e["payload"];
+        match p["type"].as_str().filter(|_| e["type"] == "response_item") {
+            Some("custom_tool_call" | "function_call") => {
+                let input = p["input"].as_str().or(p["arguments"].as_str()).unwrap_or_default();
+                open.push((p["call_id"].clone(), input.to_string()));
+            }
+            Some("custom_tool_call_output" | "function_call_output") => open.retain(|(id, _)| *id != p["call_id"]),
+            _ => {}
+        }
+    }
+    open.pop().map(|(_, cmd)| serde_json::json!({"name": "Bash", "input": {"command": cmd}}))
+}
+
 #[allow(dead_code)] // для отладки сабагентов Codex
 pub fn is_subagent(first_line: &str) -> bool {
     let Ok(e) = serde_json::from_str::<Value>(first_line) else { return false };
@@ -77,5 +108,32 @@ mod tests {
         assert_eq!(last_turn(&lines.join("\n")), ["раз", "два"]);
         let lines = [user("в"), said("раз"), user("ещё"), said("два")];
         assert_eq!(last_turn(&lines.join("\n")), ["два"]);
+    }
+
+    fn ev(t: &str) -> String {
+        serde_json::json!({"type": "event_msg", "payload": {"type": t}}).to_string()
+    }
+    fn tool(kind: &str, id: &str, input: &str) -> String {
+        serde_json::json!({"type": "response_item", "payload": {"type": kind, "call_id": id, "name": "exec", "input": input}}).to_string()
+    }
+
+    #[test]
+    fn codex_turn_over_by_complete_or_abort() {
+        assert!(turn_over(&[ev("task_started"), ev("task_complete")].join("\n")));
+        assert!(turn_over(&[ev("task_started"), ev("turn_aborted")].join("\n")), "прерван пользователем — notify не приходит");
+        assert!(!turn_over(&[ev("task_complete"), ev("task_started"), ev("token_count")].join("\n")));
+        assert!(turn_over(""));
+    }
+
+    #[test]
+    fn codex_in_flight_as_command() {
+        let open = tool("custom_tool_call", "c1", "tools.exec_command({\"cmd\":\"git push origin main\"})");
+        let got = in_flight(&open).unwrap();
+        assert_eq!(got["name"], "Bash");
+        assert!(got["input"]["command"].as_str().unwrap().contains("git push"));
+        let done = serde_json::json!({"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "c1"}}).to_string();
+        assert_eq!(in_flight(&[open, done].join("\n")), None);
+        let f = serde_json::json!({"type": "response_item", "payload": {"type": "function_call", "call_id": "f1", "name": "shell", "arguments": "{\"command\":[\"rm\",\"-rf\",\"x\"]}"}}).to_string();
+        assert!(in_flight(&f).unwrap()["input"]["command"].as_str().unwrap().contains("rm"));
     }
 }

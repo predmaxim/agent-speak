@@ -36,9 +36,19 @@ pub struct Board {
 impl Board {
     /// Новость той же сессии и класса заменяет прежнюю: старое уже неактуально.
     /// Итог заменяет и промежуточное своей сессии: иначе оно прозвучало бы после итога.
+    /// Одинаковые фразы сторожа разных проектов склеиваются: «A, B: лимит сброшен — разбудила агента».
     pub fn push(&mut self, n: News) {
         let superseded = |c: Class| c == n.class || (n.class == Class::Final && c == Class::Progress);
         self.items.retain(|i| !(i.session == n.session && superseded(i.class)));
+        if matches!(n.class, Class::Urgent | Class::Restore) {
+            if let Some((proj, rest)) = n.say.split_once(": ") {
+                if let Some(i) = self.items.iter_mut().find(|i| i.class == n.class && i.say.split_once(": ").is_some_and(|(_, r)| r == rest)) {
+                    let (old, _) = i.say.split_once(": ").unwrap();
+                    i.say = format!("{old}, {proj}: {rest}");
+                    return;
+                }
+            }
+        }
         self.items.push(n);
     }
 
@@ -521,5 +531,16 @@ mod tests {
         b.push(n("u", Class::Urgent, "U.", 2));
         assert!(b.sayable(11, None));
         assert_eq!(b.take(11, None, true).unwrap(), "U.");
+    }
+
+    #[test]
+    fn same_watch_phrase_glues_projects() {
+        let mut b = Board::default();
+        b.push(n("a", Class::Restore, "A: лимит сброшен — разбудила агента.", 1));
+        b.push(n("b", Class::Restore, "B: лимит сброшен — разбудила агента.", 2));
+        b.push(n("c", Class::Restore, "C: оборвалась связь — попросила агента продолжить.", 3));
+        b.push(n("d", Class::Final, "D: готово.", 4));
+        b.push(n("e", Class::Final, "E: готово.", 5));
+        assert_eq!(b.take(10, None, true).unwrap(), "A, B: лимит сброшен — разбудила агента. C: оборвалась связь — попросила агента продолжить. D: готово. E: готово.");
     }
 }
