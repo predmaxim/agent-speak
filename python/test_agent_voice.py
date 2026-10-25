@@ -1142,3 +1142,83 @@ def test_cancel_words_table():
     assert is_cancel("Отмена!") and is_cancel("отбой, отбой") and is_cancel("Стоп.") and is_cancel("отмени")
     assert is_cancel("отмену.") and is_cancel("Отменить") and is_cancel("отбою")  # whisper пишет любую форму слова
     assert not is_cancel("отмена встречи в пятницу") and not is_cancel("отменить встречу") and not is_cancel("стоп, а что там с тестами") and not is_cancel("")
+
+
+from agent_voice.orders import Orders, danger, asked
+
+
+def _orders(clk=None, ok=True, out=""):
+    calls = []
+
+    async def fake(*args):
+        calls.append(args)
+        return ok, out
+
+    return Orders(run=fake, clock=clk or Clock()), calls
+
+
+run = asyncio.run
+
+
+def test_danger_words_both_scripts():
+    assert danger("запушь ветку")[0] == "пуш" and danger("git push")[0] == "пуш"
+    assert danger("удали старые логи")[0] == "удаление" and danger("rm -rf build")[0] == "удаление"
+    assert danger("займись тестами") is None and danger("сотрудник написал") is None
+
+
+def test_voice_danger_waits_for_phrase_typed_goes():
+    o, calls = _orders()
+    o.turn(True, "пусть запушит")
+    r = run(o.tell(E[0], "Запушь изменения", "запушить"))
+    assert "подтверждаю пуш" in r and calls == []
+    o.turn(False, "удали старую ветку")
+    assert "Передано проекту omarchy-mail" in run(o.tell(E[0], "Удали старую ветку", "удалить ветку"))
+    assert calls == [("tell", "s1", "0", "Удали старую ветку")]
+
+
+def test_negative_answer_needs_no_confirmation():
+    o, calls = _orders()
+    agent = dict(E[0], ask="Ждёт ответа на AskUserQuestion: Запушить? Варианты: Да; Нет")
+    o.turn(True, "нет")
+    assert run(o.tell(agent, "Нет, не пушь", "не пушить")).startswith("Передано") and calls
+    o.turn(True, "да")
+    assert "подтверждаю пуш" in run(o.tell(agent, "Да", "пушить")), "опасность в вопросе агента"
+
+
+def test_confirm_only_same_kind_in_time():
+    clk = Clock()
+    for heard, wait, sent in (("подтверждаю пуш", 1, True), ("Подтверждаю, push.", 1, True),
+                              ("подтверждаю удаление", 1, False), ("подтверждаю пуш", 61, False),
+                              ("ну я вроде подтверждаю этот пуш наверное", 1, False)):
+        o, calls = _orders(clk)
+        o.turn(True, "запушь")
+        run(o.tell(E[0], "Запушь", "запушить"))
+        clk.t += wait
+        said = run(o.confirm(heard))
+        assert bool(calls) == sent and (said == "Передала проекту omarchy-mail: запушить.") == sent, heard
+        assert o.pending is None
+    assert run(o.confirm("подтверждаю пуш")) is None, "ожидание одно: после ответа его нет"
+
+
+def test_confirmed_order_leaves_note_for_brain():
+    o, calls = _orders()
+    o.turn(True, "запусти агента в почте, пусть удалит старые черновики")
+    assert "подтверждаю удаление" in run(o.launch("/p/mail", "Удали старые черновики", "удалить черновики"))
+    assert run(o.confirm("подтверждаю удаление")) == "Запустила агента в проекте mail: удалить черновики."
+    assert calls == [("launch", "/p/mail", "Удали старые черновики")]
+    assert "Запустила агента в проекте mail" in o.note
+
+
+def test_asked_takes_last_question_sentence():
+    final = dict(E[1], feed=[{"kind": "final", "text": "Всё запушено. Взяться за тесты?"}])
+    assert asked(final) == "Взяться за тесты?" and danger(asked(final)) is None
+    assert asked(dict(E[0], ask="Ждёт ответа на ExitPlanMode: план")) == "Ждёт ответа на ExitPlanMode: план"
+    assert asked(E[1]) == ""
+
+
+def test_cli_error_reaches_brain_and_projects_listed():
+    o, _ = _orders(ok=False, out="агент не в Orca и не в herdr — передать не могу")
+    o.turn(False, "скажи почте привет")
+    assert run(o.tell(E[0], "Привет", "привет")) == "Не передано: агент не в Orca и не в herdr — передать не могу. Скажи пользователю коротко, что не вышло."
+    o, _ = _orders(out="/p/mail\n/home/u/Projects/agent-speak\n")
+    assert run(o.projects()) == "mail — /p/mail\nagent-speak — /home/u/Projects/agent-speak"
