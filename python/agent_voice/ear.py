@@ -22,6 +22,16 @@ def rec_cmd(cmd: list, target: str) -> list:
     return cmd[:-1] + ["--target", target, cmd[-1]] if target else list(cmd)
 
 
+async def reap(*procs):
+    """Убить pw-record и дождаться. Process.wait() ждёт и закрытия труб, а непрочитанный stdout (поток второго
+    входа отстал — буфер полон) стоит на паузе и EOF не видит: wait() висел бы вечно — дочитываем stdout."""
+    procs = [p for p in procs if p is not None]
+    for p in procs:
+        with contextlib.suppress(ProcessLookupError):
+            p.kill()
+    await asyncio.gather(*(p.stdout.read() for p in procs), *(p.wait() for p in procs), return_exceptions=True)
+
+
 def load_whisper():
     from faster_whisper import WhisperModel
     try:
@@ -149,11 +159,8 @@ class Ear:
             return
         for t in tasks:
             t.cancel()
-        procs = [p for p in (proc, aec) if p is not None]
-        for p in procs:
-            with contextlib.suppress(ProcessLookupError):
-                p.kill()
-        await asyncio.gather(*tasks, *(p.wait() for p in procs), return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)  # до reap: дочитывать stdout, пока его ждёт _read, нельзя
+        await reap(proc, aec)
 
     def cut(self):
         """Ома смолкла, а речь ещё идёт: начало фразы — без её голоса (Segmenter.cut)."""
@@ -206,8 +213,4 @@ class Ear:
         if self._proc is proc:
             self._tasks[0].cancel()
             self._proc = self._tasks = self._aec = None
-            for p in (proc, aec):
-                if p is not None:
-                    with contextlib.suppress(ProcessLookupError):
-                        p.kill()
-                    await p.wait()
+            await reap(proc, aec)

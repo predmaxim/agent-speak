@@ -1592,3 +1592,19 @@ def test_ear_hears_echo_cancelled_stream_while_oma_speaks(monkeypatch):
         await e.stop()
     run(go())
     assert set(e.audio[1]) == {ord("B")}, "фраза — из потока без её голоса"
+
+
+def test_ear_stop_does_not_hang_on_unread_stream():
+    # mic_aec молчит, сырой поток льётся: его не читают, буфер полон, транспорт на паузе и EOF не видит —
+    # Process.wait() ждал бы его вечно, а с ним и stop(): диспетчер Омы вставал, клик по орбу не выключал слух
+    from agent_voice.ear import Ear
+    script = 'if [ "$1" = mic_aec ]; then exec sleep 60; else exec cat /dev/zero; fi'
+    e = Ear(asyncio.Queue(), Whisper(load=lambda: "m"), cmd=["sh", "-c", script, "sh"], vad_load=lambda: None,
+            mic=lambda: ("", True, "mic_aec"))
+
+    async def go():
+        await e.start()
+        await asyncio.sleep(0.5)
+        await asyncio.wait_for(e.stop(), 5)
+    run(go())
+    assert not e.open
