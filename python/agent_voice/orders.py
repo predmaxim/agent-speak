@@ -145,14 +145,14 @@ class Orders:
                                  f"Передано проекту {p}. Скажи пользователю одной фразой, кому и что: "
                                  f"«Передала проекту {p}: …» — смысл, не текст задания.")
 
-    async def launch(self, path, task, gist):
+    async def launch(self, path, task, gist, where="orca"):
         name = _name(path)
-        return await self._order(("launch", path, task), self.gate(task), f"Запустила агента в проекте {name}: {gist}.",
+        return await self._order(("launch", path, task, where), self.gate(task), f"Запустила агента в проекте {name}: {gist}.",
                                  f"Агент запущен в проекте {name}. Скажи пользователю одной фразой: "
                                  f"«Запустила агента в проекте {name}: …» — смысл задания.")
 
-    async def projects(self):
-        ok, out = await self.run("projects")
+    async def projects(self, where="orca"):
+        ok, out = await self.run("projects", where)
         if not ok:
             return f"Список проектов недоступен: {out}."
         return "\n".join(f"{_name(l)} — {l}" for l in out.splitlines() if l.strip()) or "Проектов нет."

@@ -44,6 +44,10 @@ pub trait Mux: Sync {
     fn projects(&self) -> Result<Vec<String>, String> {
         Ok(Vec::new())
     }
+    /// Ответ, если папки нет в projects().
+    fn no_project(&self) -> String {
+        format!("этого проекта нет в {}", self.name())
+    }
     /// Виден ли сейчас на экране терминал процесса с этим окружением (вкладка Orca, панель herdr); None — не знает.
     fn shown(&self, _env: &HashMap<String, String>) -> Option<bool> {
         None

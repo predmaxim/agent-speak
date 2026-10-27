@@ -1,9 +1,11 @@
 //! herdr (Apache-2.0): панели — через его CLI, сессия выбирается сокетом `HERDR_SOCKET_PATH`.
 
-use super::{cli, Key, Mux, Pane};
+use super::{cli, run, Key, Mux, Pane};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 pub struct Herdr;
 
@@ -37,6 +39,68 @@ impl Mux for Herdr {
     fn screen(&self, pane: &Pane) -> Result<String, String> {
         cli(herdr(pane, &["pane", "read", &pane.id, "--source", "visible", "--lines", "40"]))
     }
+    fn projects(&self) -> Result<Vec<String>, String> {
+        let home = std::env::var("HOME").map_err(|_| "нет HOME".to_string())?;
+        Ok(repos(Path::new(&format!("{home}/Projects")), 3))
+    }
+    fn no_project(&self) -> String {
+        "это не git-репозиторий в ~/Projects — в herdr запускаю только там".into()
+    }
+    /// Новое рабочее пространство в папке, в нём Claude, затем задание. Сессия — по умолчанию (сокет из окружения, иначе общий).
+    fn launch(&self, cwd: &str, prompt: &str) -> Result<(), String> {
+        let label = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(cwd);
+        let created = cli(top(&["workspace", "create", "--cwd", cwd, "--label", label, "--focus"])).map_err(not_running)?;
+        let (pane, ws) = root_pane(&created).ok_or_else(|| not_running(created.clone()))?;
+        // имя агента в herdr уникально, а id рабочих пространств не переиспользуются
+        let name = format!("{label}-{ws}");
+        // флаги — как у агентов пользователя в Orca (agentDefaultArgs.claude); у herdr своих настроек агента нет
+        let start = ["agent", "start", &name, "--kind", "claude", "--pane", &pane, "--", "--dangerously-skip-permissions"];
+        run(&mut top(&start), LAUNCH_TIMEOUT).and_then(|o| ok(&o)).map_err(|e| {
+            if e.contains("not ready") { "агент в herdr запустился, но ждёт ответа в терминале — ответь там".into() } else { e }
+        })?;
+        cli(top(&["agent", "prompt", &pane, prompt])).and_then(|o| ok(&o))
+    }
+}
+
+/// Запуск агента дольше обычного вызова: herdr ждёт, пока Claude будет готов к вводу (у него самого до 30 с).
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(40);
+
+/// `herdr <args>` без панели агента: сессия — из HERDR_SOCKET_PATH, иначе общая.
+fn top(args: &[&str]) -> Command {
+    let mut c = Command::new("herdr");
+    c.args(args);
+    c
+}
+
+/// Ответ `workspace create`: панель и рабочее пространство.
+fn root_pane(out: &str) -> Option<(String, String)> {
+    let v: Value = serde_json::from_str(out.trim()).ok()?;
+    let p = &v["result"]["root_pane"];
+    Some((p["pane_id"].as_str()?.to_string(), p["workspace_id"].as_str()?.to_string()))
+}
+
+/// Сервер herdr не запущен — понятной фразой; иначе ошибка как есть.
+fn not_running(err: String) -> String {
+    if err.contains("server_not_running") { "herdr не запущен — открой его, и я запущу".into() } else { err }
+}
+
+/// git-репозитории (и worktree, у них .git — файл) внутри dir до глубины depth; сам dir не считается (~/Projects
+/// бывает репозиторием), внутрь репозитория и в скрытые папки не заходим.
+fn repos(dir: &Path, depth: u32) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut v: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !e.file_name().to_string_lossy().starts_with('.'))
+        .flat_map(|e| match e.path() {
+            p if p.join(".git").exists() => vec![p.to_string_lossy().into_owned()],
+            p if depth > 1 => repos(&p, depth - 1),
+            _ => Vec::new(),
+        })
+        .collect();
+    v.sort();
+    v
 }
 
 /// Ответ `pane list`: панель в фокусе.
@@ -106,6 +170,31 @@ mod tests {
         let out = r#"{"result":{"panes":[{"pane_id":"w1:p1","focused":false},{"pane_id":"w1:p2","focused":true}],"type":"pane_list"}}"#;
         assert_eq!(focused_pane(out), Some("w1:p2".into()));
         assert_eq!(focused_pane(r#"{"error":{"message":"no server"}}"#), None);
+    }
+
+    #[test]
+    fn launch_replies() {
+        // так отвечает herdr 0.9.1 на workspace create
+        let out = r#"{"id":"cli:workspace:create","result":{"root_pane":{"pane_id":"w2:p1","workspace_id":"w2"},"type":"workspace_created"}}"#;
+        assert_eq!(root_pane(out), Some(("w2:p1".into(), "w2".into())));
+        assert_eq!(root_pane("мусор"), None);
+        let down = r#"exit status: 1: {"error":{"code":"server_not_running","message":"no herdr server is running"}}"#;
+        assert!(not_running(down.into()).starts_with("herdr не запущен"));
+        assert_eq!(not_running("таймаут".into()), "таймаут");
+    }
+
+    #[test]
+    fn repos_under_projects() {
+        let root = std::env::temp_dir().join(format!("agent-speak-repos-{}", std::process::id()));
+        for d in [".git", "a/.git", "a/sub/.git", "omarchy/own/b/.git", ".hidden/c/.git", "deep/x/y/z/.git", "plain"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(root.join("wt")).unwrap();
+        std::fs::write(root.join("wt/.git"), "gitdir: /x").unwrap(); // worktree: .git — файл
+        let got = repos(&root, 3);
+        let _ = std::fs::remove_dir_all(&root);
+        let names: Vec<_> = got.iter().map(|p| p.strip_prefix(&*root.to_string_lossy()).unwrap().to_string()).collect();
+        assert_eq!(names, ["/a", "/omarchy/own/b", "/wt"], "сам корень, внутрь репозитория, в скрытые и глубже трёх — нет");
     }
 
     #[test]

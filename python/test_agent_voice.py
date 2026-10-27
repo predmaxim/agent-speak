@@ -1258,7 +1258,7 @@ def test_confirmed_order_leaves_note_for_brain():
     o.turn(True, "запусти агента в почте, пусть удалит старые черновики")
     assert "подтверждаю удаление" in run(o.launch("/p/mail", "Удали старые черновики", "удалить черновики"))
     assert run(o.confirm("подтверждаю удаление")) == "Запустила агента в проекте mail: удалить черновики."
-    assert calls == [("launch", "/p/mail", "Удали старые черновики")]
+    assert calls == [("launch", "/p/mail", "Удали старые черновики", "orca")]
     assert "Запустила агента в проекте mail" in o.note
 
 
@@ -1273,8 +1273,11 @@ def test_cli_error_reaches_brain_and_projects_listed():
     o, _ = _orders(ok=False, out="агент не в Orca и не в herdr — передать не могу")
     o.turn(False, "скажи почте привет")
     assert run(o.tell(E[0], "Привет", "привет")) == "Не передано: агент не в Orca и не в herdr — передать не могу. Скажи пользователю коротко, что не вышло."
-    o, _ = _orders(out="/p/mail\n/home/u/Projects/agent-speak\n")
+    o, calls = _orders(out="/p/mail\n/home/u/Projects/agent-speak\n")
     assert run(o.projects()) == "mail — /p/mail\nagent-speak — /home/u/Projects/agent-speak"
+    assert run(o.projects("herdr")) and calls == [("projects", "orca"), ("projects", "herdr")]
+    o, _ = _orders(ok=False, out="Orca не запущена — открой её, и я запущу")
+    assert run(o.projects()) == "Список проектов недоступен: Orca не запущена — открой её, и я запущу."
 
 
 class FakeOrders:

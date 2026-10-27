@@ -95,18 +95,26 @@ pub fn tell(session: &str, option: usize, text: &str) -> Result<(), String> {
     mux::perform(&pane, &steps)
 }
 
-/// Папки, где можно запустить агента, — по всем адаптерам; адаптер с ошибкой не даёт ничего.
-pub fn projects() -> Vec<String> {
-    let mut v: Vec<String> = mux::adapters().iter().flat_map(|m| m.projects().unwrap_or_default()).collect();
-    v.sort();
-    v.dedup();
-    v
+/// Мультиплексор по имени: orca или herdr.
+fn named(name: &str) -> Result<&'static dyn mux::Mux, String> {
+    mux::adapters().into_iter().find(|m| m.name() == name).ok_or_else(|| format!("нет терминала {name} — есть orca и herdr"))
 }
 
-/// Новый агент Claude в известной папке path с заданием text.
-pub fn launch(path: &str, text: &str) -> Result<(), String> {
-    let m = mux::adapters().into_iter().find(|m| m.projects().is_ok_and(|p| p.iter().any(|x| x == path)));
-    m.ok_or("этого проекта нет в Orca — добавь его, и я запущу")?.launch(path, &one_line(text))
+/// Папки, где мультиплексор where_ умеет запустить агента; его ошибка (Orca закрыта) — как есть.
+pub fn projects(where_: &str) -> Result<Vec<String>, String> {
+    let mut v = named(where_)?.projects()?;
+    v.sort();
+    v.dedup();
+    Ok(v)
+}
+
+/// Новый агент Claude в известной папке path мультиплексора where_ с заданием text.
+pub fn launch(path: &str, text: &str, where_: &str) -> Result<(), String> {
+    let m = named(where_)?;
+    if !m.projects()?.iter().any(|x| x == path) {
+        return Err(m.no_project());
+    }
+    m.launch(path, &one_line(text))
 }
 
 #[cfg(test)]

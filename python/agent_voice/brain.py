@@ -30,7 +30,7 @@ OMA_PROMPT = ("Ты — Ома, голосовой заместитель пол
               "Передать агенту ответ или задание — tell: разверни короткую просьбу в полное задание от лица пользователя (что "
               "сделать, где искать, что вернуть), фактов не выдумывай; ответ на вопрос агента передай полностью, с нужными "
               "деталями. Агент ждёт ответа с вариантами (в agents — «ждёт ответа: … Варианты: …») — option с номером варианта по "
-              "порядку, если ответ ровно один из них, иначе свой ответ текстом. Новый агент — projects, затем launch с заданием. "
+              "порядку, если ответ ровно один из них, иначе свой ответ текстом. Новый агент — projects, затем launch с заданием; в Orca, а в herdr — если пользователь просит herdr (where). "
               "После tell или launch скажи пользователю одной фразой смысл и кому, не текст задания. Инструмент просит "
               "подтверждения — скажи пользователю ровно то, что он велит, и больше ничего не передавай. Не понятно, "
               "о чём речь, — коротко переспроси. "
@@ -191,14 +191,22 @@ def oma_tools(snapshot, send, orders=None) -> list:
             return _text(why)
         return _text(await orders.tell(e, args.get("text", ""), args.get("gist", ""), int(args.get("option") or 0)))
 
-    @tool("projects", "Проекты, где можно запустить нового агента: название и папка.", {})
-    async def projects(args):
-        return _text(await orders.projects())
+    where = {"type": "string", "enum": ["orca", "herdr"]}
 
-    @tool("launch", "Запустить нового агента Claude в проекте. path — папка из projects; task — полное задание; "
-                    "gist — смысл для пользователя.", {"path": str, "task": str, "gist": str})
+    @tool("projects", "Проекты, где можно запустить нового агента: название и папка. where — orca (по умолчанию) или "
+                      "herdr, если пользователь просит herdr.",
+          {"type": "object", "properties": {"where": where}})
+    async def projects(args):
+        return _text(await orders.projects(args.get("where") or "orca"))
+
+    @tool("launch", "Запустить нового агента Claude в проекте. path — папка из projects с тем же where; task — полное "
+                    "задание; gist — смысл для пользователя; where — orca (по умолчанию) или herdr.",
+          {"type": "object", "properties": {"path": {"type": "string"}, "task": {"type": "string"},
+                                            "gist": {"type": "string"}, "where": where},
+           "required": ["path", "task", "gist"]})
     async def launch(args):
-        return _text(await orders.launch(args.get("path", ""), args.get("task", ""), args.get("gist", "")))
+        return _text(await orders.launch(args.get("path", ""), args.get("task", ""), args.get("gist", ""),
+                                         args.get("where") or "orca"))
 
     return [agents, agent_feed, agent_tail, sel, presence, tell, projects, launch]
 

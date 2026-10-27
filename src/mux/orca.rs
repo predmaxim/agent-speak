@@ -52,7 +52,10 @@ impl Mux for Orca {
     fn projects(&self) -> Result<Vec<String>, String> {
         let mut c = Command::new(orca_bin());
         c.args(["worktree", "list", "--json"]);
-        Ok(worktree_paths(&cli(c)?))
+        Ok(worktree_paths(&cli(c).map_err(closed)?))
+    }
+    fn no_project(&self) -> String {
+        "этого проекта нет в Orca — добавь его, и я запущу".into()
     }
     fn launch(&self, cwd: &str, prompt: &str) -> Result<(), String> {
         let mut c = Command::new(orca_bin());
@@ -79,6 +82,16 @@ fn orca_bin() -> String {
     let config = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{}/.config", std::env::var("HOME").unwrap_or_default()));
     let shim = format!("{config}/orca/linux-orca-cli-shim/orca");
     if std::path::Path::new(&shim).exists() { shim } else { "orca".into() }
+}
+
+/// Ошибка CLI без терминала агента: закрытая Orca — понятной фразой. Обёртка её CLI тогда падает
+/// («Orca CLI is unavailable»), а без обёртки нет и `orca` в PATH.
+fn closed(err: String) -> String {
+    if err.contains("Orca CLI is unavailable") || err.contains("No such file") {
+        "Orca не запущена — открой её, и я запущу".into()
+    } else {
+        err
+    }
 }
 
 const SHOWN_QUERY: &str = "select json_extract(payload,'$.activeWorktreeId') as worktree, json_extract(payload,'$.activeTabIdByWorktree') as tabs from profile_state_documents where domain='workspaceSession'";
@@ -173,5 +186,13 @@ mod tests {
         assert!(worktree_paths("мусор").is_empty());
         assert_eq!(succeeded(r#"{"ok":true,"result":{}}"#), Ok(()));
         assert!(succeeded(r#"{"ok":false,"error":{"message":"selector_not_found"}}"#).unwrap_err().contains("selector_not_found"));
+    }
+
+    #[test]
+    fn closed_orca_is_said_plainly() {
+        let shim = "exit status: 1: Orca CLI is unavailable; reopen Orca or register the CLI again.";
+        assert!(closed(shim.into()).starts_with("Orca не запущена"), "закрытая Orca — не «нет такого проекта»");
+        assert!(closed("No such file or directory (os error 2)".into()).starts_with("Orca не запущена"));
+        assert_eq!(closed("таймаут 10 с".into()), "таймаут 10 с");
     }
 }
