@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -146,6 +146,12 @@ for (const s of secs) for (const o of s.options) assert.strictEqual(typeof o.val
 // The window's chat: a chat that got its id replaces the one shown, other chats are skipped
 const m1 = [{ role: "me", text: "привет" }]
 assert.deepStrictEqual(M.chatFor("new", { key: "chat:1", was: "new", messages: m1 }), { key: "chat:1", messages: m1 })
+// the general chat: the window asks for "general", Oma answers with its real key
+assert.deepStrictEqual(M.chatFor("general", { key: "chat:g", was: "general", messages: m1 }), { key: "chat:g", messages: m1 })
+assert.strictEqual(M.chatFor("general", { key: "agent:a", messages: m1 }), null)
+// a QML signal turns the messages array into an array-like sequence (Array.isArray is false): still the history
+assert.deepStrictEqual(M.chatFor("new", { key: "new", messages: { 0: m1[0], length: 1 } }).messages, [m1[0]])
+assert.strictEqual(M.plainCopy("Астра\u0301л и до\u0301ки"), "Астрал и доки")
 assert.deepStrictEqual(M.chatFor("chat:1", { key: "chat:1", messages: m1 }), { key: "chat:1", messages: m1 })
 assert.strictEqual(M.chatFor("agent:a", { key: "chat:1", was: "new", messages: m1 }), null)
 assert.strictEqual(M.chatFor("chat:2", { key: "chat:1", messages: m1 }), null)

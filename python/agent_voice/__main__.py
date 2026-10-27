@@ -105,6 +105,8 @@ class Oma:
         do, c = cmd.get("do"), self.conv
         if do == "talk":
             self.ear.speakers = None  # разговор по клику — вход по тому, куда она говорит
+            if c.state == "idle" and self.brain.key.startswith("agent:"):  # с Омой-помощником — в общем чате
+                await self.switch(await self.general(), was="*")
             await self.act(c.talk())
         elif do == "cancel":
             await self.act(c.cancel())
@@ -123,21 +125,31 @@ class Oma:
         elif do == "open" and not cmd.get("key"):  # окно спрашивает текущий чат: без переключения, was "*" — принять его ключ
             self.emit({"chat": {"key": self.brain.key, "was": "*", "messages": self.history}})
         elif do in ("ask", "open", "new"):
-            key = "new" if do == "new" else cmd.get("key") or self.brain.key
+            want = cmd.get("key")
+            key = "new" if do == "new" else await self.general() if want == "general" else want or self.brain.key
+            was = "general" if want == "general" else None  # окно ждёт ответа на «general» и примет настоящий ключ
             if key != self.brain.key:
-                await self.switch(key)
+                await self.switch(key, was)
             elif do != "ask":
-                self.emit({"chat": {"key": key, "messages": self.history}})
+                self.emit({"chat": {"key": key, **({"was": was} if was else {}), "messages": self.history}})
             if do == "ask":
                 await self.act(c.ask(cmd.get("text", "")))
 
-    async def switch(self, key):
-        """Перейти в чат key."""
+    async def switch(self, key, was=None):
+        """Перейти в чат key; was — ключ, на который окно ждёт ответа ("*" — любой)."""
         if self.conv.turn:  # ход прошлого чата обрываем, пока его клиент жив
             await self.act(self.conv.cancel())
         self.history = []  # open упал — чужая история не останется под новым ключом
         self.history = await self.brain.open(key)
-        self.emit({"chat": {"key": key, "messages": self.history}})
+        self.emit({"chat": {"key": key, **({"was": was} if was else {}), "messages": self.history}})
+
+    async def general(self):
+        """Общий чат: текущий, если он не чат агента; иначе последний общий, если он моложе STALE_HOURS, иначе новый."""
+        from .brain import STALE_HOURS  # мозг (Claude SDK) грузится лениво, как в main
+        if not self.brain.key.startswith("agent:"):
+            return self.brain.key
+        chats = await asyncio.to_thread(self.brain.chats)
+        return chats[0]["key"] if chats and time.time() - chats[0]["updated"] < STALE_HOURS * 3600 else "new"
 
     async def _cut_later(self):
         await asyncio.sleep(TAIL)

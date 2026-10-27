@@ -51,8 +51,7 @@ Item {
 
   property var openScreen: null
   property string page: "main"       // main | history | settings
-  property string chatKey: "new"     // "new", "chat:<id>" or "agent:<agent id>"
-  property string generalKey: "new"  // the last general chat: Esc from an agent's chat goes back to it
+  property string chatKey: "new"     // "new", "chat:<id>", "agent:<agent id>"; "general" until Oma names it
   property var messages: []
   property var chatList: []
   property real now: Date.now() / 1000
@@ -69,7 +68,8 @@ Item {
     for (var i = 0; i < agents.length; i++) if ("agent:" + agents[i].id === chatKey) return agents[i]
     return null
   }
-  readonly property int rowCount: page === "main" ? agents.length : page === "history" ? chatList.length : Model.SETTINGS_ROWS.length
+  // Main page: row 0 — the general chat with Oma, then the agents.
+  readonly property int rowCount: page === "main" ? agents.length + 1 : page === "history" ? chatList.length : Model.SETTINGS_ROWS.length
   // Main page: talk, new chat, history, sound, settings, the power switch; Oma off: the switch; a page: Back.
   readonly property var headItems: Model.headItems(page, speech.running === true)
   readonly property int headCount: headItems.length
@@ -105,6 +105,15 @@ Item {
 
   function send(action) { if (root.link) root.link.send(Model.omaCmd(action)) }
 
+  // To the clipboard as plain text, like the jira plugin (wl-copy).
+  function copy(text) { if (text) Quickshell.execDetached(["wl-copy", "--", Model.plainCopy(text)]) }
+
+  // A typed character goes to the field, wherever the keys were.
+  function typeIn(t) {
+    field.forceActiveFocus()
+    field.insert(field.cursorPosition, t)
+  }
+
   function choose(key, value, sample) {
     if (!root.link) return
     root.link.send(Model.set(key, value))
@@ -120,21 +129,16 @@ Item {
   function tellView(): void { if (root.link) root.link.send(Model.view(root.shown, root.chatKey)) }
   onChatKeyChanged: tellView()
 
-  function setKey(key) {
-    root.chatKey = key
-    if (key.indexOf("agent:") !== 0) root.generalKey = key
-  }
-
   // A chat on the right; its messages come back in Oma's `chat` line.
   function openChat(key) {
-    if (key !== root.chatKey) { root.setKey(key); root.messages = [] }
+    if (key !== root.chatKey) { root.chatKey = key; root.messages = [] }
     root.scrollDown()
     root.send({ do: "open", key: key })
     root.showPage("main")
   }
 
   function newChat() {
-    root.setKey("new")
+    root.chatKey = "new"
     root.messages = []
     root.scrollDown()
     root.send({ do: "new" })
@@ -168,7 +172,7 @@ Item {
     if (root.viewing) root.viewing = ""
     else if (root.page !== "main") root.showPage("main")
     else if (field.text !== "") field.text = ""
-    else if (root.agentChat) root.openChat(root.generalKey)
+    else if (root.agentChat) root.openChat("general")
     else root.shown = false
   }
 
@@ -203,7 +207,8 @@ Item {
       else root.step(row, dx)
     } else return false
     var view = root.page === "main" ? agentList : root.page === "history" ? chatsView : null
-    if (view && root.cursor >= 0) view.positionViewAtIndex(root.cursor, ListView.Contain)
+    if (view === agentList && root.cursor === 0) agentList.positionViewAtBeginning()  // the Oma row is the list's header
+    else if (view && root.cursor >= 0) view.positionViewAtIndex(root.cursor - (view === agentList ? 1 : 0), ListView.Contain)
     if (root.page === "settings" && root.cursor >= 0) root.showSettingRow(root.cursor)
     return true
   }
@@ -226,7 +231,7 @@ Item {
   function activate() {
     if (root.onHead) return root.press(root.headCol)
     if (root.cursor < 0 || root.cursor >= root.rowCount) return
-    if (root.page === "main") return root.openChat("agent:" + root.agents[root.cursor].id)
+    if (root.page === "main") return root.openChat(root.cursor === 0 ? "general" : "agent:" + root.agents[root.cursor - 1].id)
     if (root.page === "history") return root.openChat(root.chatList[root.cursor].key)
     var row = Model.SETTINGS_ROWS[root.cursor]
     var box = { speaker: speakerBox, rate: rateBox, quiet_hours: root.hoursCol ? toBox : fromBox }[row]
@@ -292,7 +297,7 @@ Item {
     function onChat(c) {
       var shownChat = Model.chatFor(root.chatKey, c)
       if (!shownChat) return
-      root.setKey(shownChat.key)
+      root.chatKey = shownChat.key
       root.setMessages(shownChat.messages)
     }
     function onChatDelta(d) { if (d.key === root.chatKey) root.setMessages(Model.chatApply(root.messages, d)) }
@@ -345,11 +350,7 @@ Item {
         onMoveRequested: function(dx, dy) { root.move(dx, dy) }
         onActivateRequested: root.activate()
         onCloseRequested: root.back()
-        onTextKey: function(t) {
-          if (root.page !== "main") return
-          field.forceActiveFocus()
-          field.insert(field.cursorPosition, t)
-        }
+        onTextKey: function(t) { if (root.page === "main") root.typeIn(t) }
 
         PointerMoveGate { id: pointerGate; referenceItem: card }
 
@@ -463,6 +464,91 @@ Item {
             boundsBehavior: Flickable.StopAtBounds
             model: root.agents
 
+            // Row 0: the general chat — Oma as an assistant, not about an agent.
+            // Tinted even when not open (the user's choice over an accent bar):
+            // it stays easy to find among the agents.
+            header: Column {
+              width: agentList.width
+              spacing: Style.spacing.xs
+              bottomPadding: Style.spacing.xs
+
+              CursorSurface {
+                id: omaRow
+                width: parent.width
+                implicitHeight: Math.max(Style.space(50), omaText.implicitHeight + Style.spacing.rowPaddingX * 2)
+                foreground: root.fg
+                current: !root.agentChat
+                hasCursor: !root.onHead && root.cursor === 0 && !current
+                color: hasCursor ? fill : current ? currentFill : Util.alpha(Color.accent, 0.14)
+
+                MouseArea {
+                  id: omaArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onPositionChanged: function(mouse) {
+                    if (pointerGate.moved(omaArea, mouse)) { root.onHead = false; root.cursor = 0 }
+                  }
+                  onClicked: root.openChat("general")
+                }
+
+                // In the agents' dot column, a little larger than a dot.
+                Item {
+                  id: omaSlot
+                  x: Style.spacing.rowPaddingX
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(10)
+                  height: width
+
+                  OrbFace {
+                    anchors.centerIn: parent
+                    mode: "idle"
+                    size: Style.space(16)
+                    line: 1
+                  }
+                }
+
+                Column {
+                  id: omaText
+                  anchors.left: omaSlot.right
+                  anchors.leftMargin: Style.space(12)
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.spacing.rowPaddingX
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(4)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: root.tr("Oma")
+                    color: root.fg
+                    font.family: root.font
+                    font.pixelSize: Style.font.heading
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: root.tr("General chat")
+                    color: root.dim
+                    font.family: root.font
+                    font.pixelSize: Style.font.body
+                  }
+                }
+              }
+
+              Text {
+                visible: root.agents.length > 0
+                leftPadding: Style.spacing.rowPaddingX
+                topPadding: Style.space(6)
+                textFormat: Text.PlainText
+                text: root.tr("Agents").toUpperCase()
+                color: root.dim
+                font.family: root.font
+                font.pixelSize: Style.font.body
+                font.bold: true
+                font.letterSpacing: 1.2
+              }
+            }
+
             delegate: CursorSurface {
               id: agentRow
               required property var modelData
@@ -472,7 +558,7 @@ Item {
               foreground: root.fg
               // The agent whose chat is open is the selected row; the cursor paints the others.
               current: root.chatKey === "agent:" + modelData.id
-              hasCursor: !root.onHead && root.cursor === index && !current
+              hasCursor: !root.onHead && root.cursor === index + 1 && !current
 
               MouseArea {
                 id: agentArea
@@ -480,7 +566,7 @@ Item {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onPositionChanged: function(mouse) {
-                  if (pointerGate.moved(agentArea, mouse)) { root.onHead = false; root.cursor = agentRow.index }
+                  if (pointerGate.moved(agentArea, mouse)) { root.onHead = false; root.cursor = agentRow.index + 1 }
                 }
                 onClicked: root.openChat("agent:" + agentRow.modelData.id)
               }
@@ -971,6 +1057,8 @@ Item {
     property string label: (role === "me" ? root.tr("You") : root.tr("Oma")).toUpperCase()
     property color bodyColor: root.fg
     property var images: []   // screenshots of the prompt: files in the daemon's cache
+    property bool copied: false   // the copy button shows a check for a moment
+    readonly property bool copyable: role === "oma" && body !== ""
     readonly property string tone: Model.tone(role)
     readonly property color base: tone === "me" ? Model.ME_TINT : Color.foreground
     readonly property int pad: Style.space(10)
@@ -979,7 +1067,7 @@ Item {
     Rectangle {
       id: bubble
       anchors.right: chatLine.tone === "me" ? parent.right : undefined
-      width: chatLine.images.length ? parent.width * 0.8 : Math.min(parent.width * 0.8, Math.max(labelText.implicitWidth, bodyText.implicitWidth) + chatLine.pad * 2)
+      width: chatLine.images.length ? parent.width * 0.8 : Math.min(parent.width * 0.8, Math.max(labelText.implicitWidth + (chatLine.copyable ? copyIcon.implicitWidth + Style.space(16) : 0), bodyText.implicitWidth) + chatLine.pad * 2)
       height: lineText.implicitHeight + chatLine.pad * 2
       color: Qt.tint(Color.popups.background, Qt.rgba(chatLine.base.r, chatLine.base.g, chatLine.base.b, Math.max(0.05, Model.TONE_ALPHA[chatLine.tone])))
       radius: Style.cornerRadius
@@ -991,30 +1079,71 @@ Item {
         width: parent.width - chatLine.pad * 2
         spacing: Style.space(4)
 
-        Text {
-          id: labelText
-          textFormat: Text.PlainText
-          text: chatLine.label
-          color: root.dim
-          font.family: root.font
-          font.pixelSize: Style.font.body
-          font.bold: true
-          font.letterSpacing: 1.2
+        // ТЫ/ОМА at the left; Oma's lines have a copy button at the right.
+        Item {
+          width: parent.width
+          height: labelText.implicitHeight
+
+          Text {
+            id: labelText
+            textFormat: Text.PlainText
+            text: chatLine.label
+            color: root.dim
+            font.family: root.font
+            font.pixelSize: Style.font.body
+            font.bold: true
+            font.letterSpacing: 1.2
+          }
+
+          Text {
+            id: copyIcon
+            visible: chatLine.copyable
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: chatLine.copied ? "\u{F012C}" : "\u{F018F}"
+            color: copyArea.containsMouse ? root.fg : root.dim
+            font.family: root.font
+            font.pixelSize: Style.font.title
+
+            MouseArea {
+              id: copyArea
+              anchors.fill: parent
+              anchors.margins: -Style.space(6)
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: { root.copy(chatLine.body); chatLine.copied = true; copiedTimer.restart() }
+            }
+            PanelToolTip { visible: copyArea.containsMouse; text: chatLine.copied ? root.tr("Copied") : root.tr("Copy") }
+            Timer { id: copiedTimer; interval: 1500; onTriggered: chatLine.copied = false }
+          }
         }
 
-        Text {
+        // Selectable: a drag selects, Ctrl+C copies; other keys go back to the field.
+        TextEdit {
           id: bodyText
           width: parent.width
+          readOnly: true
+          selectByMouse: true
           // Agents answer in Markdown: lists, headings, code keep their shape
           // (the daemon drops ![images](…): MarkdownText would fetch them).
-          textFormat: Text.MarkdownText
+          textFormat: TextEdit.MarkdownText
           onLinkActivated: function(link) { Qt.openUrlExternally(link) }
           text: chatLine.body
           color: chatLine.bodyColor
+          selectionColor: Color.accent
+          selectedTextColor: Color.popups.background
           font.family: root.font
           font.pixelSize: Style.font.title
-          wrapMode: Text.Wrap
-          visible: text !== ""
+          wrapMode: TextEdit.Wrap
+          visible: chatLine.body !== ""
+          Keys.onPressed: function(e) {
+            if (e.matches(StandardKey.Copy)) root.copy(bodyText.selectedText)
+            else if (e.key === Qt.Key_Escape) { bodyText.deselect(); root.refocus() }
+            else if (e.text !== "" && !(e.modifiers & Qt.ControlModifier)) { bodyText.deselect(); root.typeIn(e.text) }
+            else return
+            e.accepted = true
+          }
         }
 
         // Thumbnails; a click opens the picture over the window.

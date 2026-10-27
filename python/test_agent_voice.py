@@ -1,5 +1,5 @@
 # python -m pytest python/test_agent_voice.py  (из voice-venv или любого python3 с pytest)
-import sys, os
+import sys, os, time
 sys.path.insert(0, os.path.dirname(__file__))
 from agent_voice.segment import Segmenter
 from agent_voice.chunker import Chunker
@@ -957,6 +957,38 @@ def test_oma_open_without_key_reports_current_chat():
     asyncio.run(oma.command({"do": "open"}))
     assert lines == [{"chat": {"key": "chat:x", "was": "*", "messages": [{"role": "me", "text": "голосом"}]}}]
     assert opened == [] and oma.brain.key == "chat:x"
+
+
+def test_general_chat_for_talk_and_window():
+    # Ома-помощник — в общем чате: клик по орбу из чата агента и строка «Ома» в окне ведут в последний
+    # общий чат (моложе двух часов), иначе в новый; окно принимает настоящий ключ по was
+    lines, opened = [], []
+
+    class FakeBrain:
+        key = "agent:a1"
+        updated = time.time() - 600
+        async def open(self, k): opened.append(k); self.key = k; return []
+        async def interrupt(self): pass
+        def chats(self): return [{"key": "chat:g", "updated": self.updated}]
+
+    oma = Oma(Conversation(), SimpleNamespace(open=False, speakers=None, start=_async_none, stop=_async_none),
+              FakeBrain(), SimpleNamespace(ready=True), send=lambda c: c["cmd"] == "emit" and lines.append(c["line"]))
+
+    async def go():
+        await oma.command({"do": "talk"})
+        assert opened == ["chat:g"] and lines[0]["chat"]["was"] == "*", "окно идёт за разговором"
+        await oma.command({"do": "talk"})  # слушала — клик закрывает разговор, чат тот же
+        assert opened == ["chat:g"]
+        oma.brain.key, oma.brain.updated = "agent:a1", time.time() - 3 * 3600
+        await oma.command({"do": "open", "key": "general"})
+        assert opened[-1] == "new" and lines[-1]["chat"]["key"] == "new" and lines[-1]["chat"]["was"] == "general"
+        await oma.command({"do": "open", "key": "general"})  # уже в общем — он и есть
+        assert opened[-1] == "new" and len(opened) == 2 and lines[-1]["chat"] == {"key": "new", "was": "general", "messages": []}
+    asyncio.run(go())
+
+
+async def _async_none(*_):
+    return None
 
 
 def test_oma_error_notifies_new_text_or_after_5_min():

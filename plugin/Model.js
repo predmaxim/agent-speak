@@ -133,13 +133,20 @@ function chatApply(messages, delta) {
   return messages.concat([{ role: delta.role, text: delta.text }])
 }
 
+// Text for the clipboard: without the stress marks (U+0301) Oma puts in for the voice.
+function plainCopy(text) {
+  return String(text || "").replace(/\u0301/g, "")
+}
+
 // A `chat` line against the window's chat `cur`: the chat to show (the key
 // switches when the chat it showed got its id, `was`, and to Oma's current
 // chat on her answer to a keyless `open`, `was` "*"), or null when the line
 // is about another chat.
 function chatFor(cur, c) {
   var key = c.was === "*" || c.was === cur ? c.key : cur
-  return c.key === key ? { key: key, messages: Array.isArray(c.messages) ? c.messages : [] } : null
+  // through a QML signal the array arrives as an array-like sequence: Array.isArray is false for it
+  var list = c.messages && typeof c.messages.length === "number" ? Array.prototype.slice.call(c.messages) : []
+  return c.key === key ? { key: key, messages: list } : null
 }
 
 // The screen corner nearest to the orb's centre (x, y) on a w x h screen.
