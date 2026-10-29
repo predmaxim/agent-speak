@@ -1,5 +1,6 @@
-"""Задания и ответы агентам от Омы: опасное, сказанное голосом, уходит только после «подтверждаю …».
-Совпадение проверяет код по распознанному тексту, не модель: модель могла бы «услышать» подтверждение в ослышке.
+"""Задания и ответы агентам от Омы: голосом ничего не уходит без подтверждения отдельной репликой — обычное после
+«да, передай», опасное после «подтверждаю …». Совпадение проверяет код по распознанному тексту, не модель: модель
+могла бы «услышать» подтверждение в ослышке или принять за него «продолжай» (так и было 2026-10-29).
 Передаёт CLI `agent-speak tell | launch | projects` — исход мозгу нужен сразу."""
 import asyncio
 import os
@@ -19,6 +20,9 @@ DANGER = (  # (что, слово фразы «подтверждаю …», о�
     ("force", "форс", ("force", "форс"), ("форс", "force")),
     ("запись в базу", "запись", ("drop", "truncate", "insert", "update", "базу", "базе", "база", "database", "бд"), ("запис",)),
 )
+# Обычное поручение голосом: подтверждение — «да» и глагол передачи вместе, одиночное «да» бывает поддакиванием и ослышкой
+ORDINARY = ("поручение", "передай", (), ())
+GO = ("переда", "отправ", "запуск", "запуст")
 NO = {"нет", "не"}
 NEGATIVE = ("отмен", "стоп", "отлож", "пропуст", "позже", "потом")  # начала отказа и в вариантах меню («Отложить»)
 
@@ -106,10 +110,10 @@ def _name(path):
 class Orders:
     """Передача агентам. turn() — перед каждой репликой мозгу: сказана ли она голосом и что именно."""
 
-    def __init__(self, run=cli, clock=time.monotonic):
-        self.run, self.clock = run, clock
+    def __init__(self, run=cli, clock=time.monotonic, show=None):
+        self.run, self.clock, self.show = run, clock, show  # show — полный текст ждущего поручения в окно
         self.voiced, self.heard = False, ""
-        self.pending = None  # опасное ждёт фразы: {args, what, said, until}
+        self.pending = None  # поручение ждёт фразы: {args, what, verb, said, until}
         self.tripped = False  # в этом ходе мозга уже было опасное: до следующей реплики не уходит ничего
         self.note = ""       # мозгу — в начало следующей реплики: подтверждённое Ома передала сама
 
@@ -117,39 +121,48 @@ class Orders:
         self.voiced, self.heard, self.tripped = voiced, heard, False
 
     def gate(self, sent, ask="", option=0):
-        """Опасное, сказанное голосом: строка DANGER; набранное в окне и отказ («нет, не пушь») — None.
-        Проверяется то, что уйдёт: при option — сам вариант; одобрение плана (вариантов нет) отказом не считается."""
+        """Что ждёт подтверждения: набранное в окне — None; голосом — строка DANGER, иначе ORDINARY (отказ «нет, не пушь»
+        не опасен, но и он — после «да, передай»). Проверяется то, что уйдёт: при option — сам вариант; одобрение плана
+        (вариантов нет) отказом не считается."""
         if not self.voiced:
             return None
         label = chosen(ask, option)
         d = danger(self.heard) or danger(sent) or danger(label) or danger(ask)
         refusal = negative(self.heard) and not danger(self.heard) and (option == 0 or label) and all(
             negative(x) and not danger(unnegated(x)) for x in (sent, label.split(" — ")[0]) if x)
-        return None if d and refusal else d
+        return ORDINARY if not d or refusal else d
 
-    async def _order(self, args, d, said, ok_reply):
-        if self.tripped:  # мозг перефразировал опасное в том же ходе — словарь мог его не узнать
-            return "Не передано: опасное уже ждёт подтверждения. Скажи пользователю фразу подтверждения и больше ничего не передавай."
+    async def _order(self, args, d, said, ok_reply, ask, verb, shown):
+        if self.tripped:  # мозг перефразировал поручение в том же ходе — передавать нельзя ничего
+            return "Не передано: поручение уже ждёт подтверждения. Скажи пользователю фразу подтверждения и больше ничего не передавай."
         if d:
             self.tripped = True
-            self.pending = {"args": args, "what": d, "said": said, "until": self.clock() + CONFIRM_WAIT}
+            self.pending = {"args": args, "what": d, "verb": verb, "said": said, "until": self.clock() + CONFIRM_WAIT}
+            if self.show:
+                self.show(shown)
+            if d is ORDINARY:
+                return (f"Не передано: голосом поручение уходит только после подтверждения. "
+                        f"Скажи пользователю ровно: «{ask} Скажи: да, {verb}.»")
             return (f"Не передано: это {d[0]}, такое уходит только после подтверждения голосом. "
-                    f"Скажи пользователю ровно: «Это {d[0]}. Скажи: подтверждаю {d[1]}».")
+                    f"Скажи пользователю ровно: «{ask} Это {d[0]}. Скажи: подтверждаю {d[1]}».")
         ok, out = await self.run(*args)
         return ok_reply if ok else f"Не передано: {out}. Скажи пользователю коротко, что не вышло."
 
     async def tell(self, entry, text, gist, option=0):
-        p = entry["project"]
-        return await self._order(("tell", entry["id"], str(option), text), self.gate(text, asked(entry), option),
+        p, ask = entry["project"], asked(entry)
+        shown = f"Передам проекту {p}: " + (f"вариант {option} — {chosen(ask, option)}" if option else f"«{text}»")
+        return await self._order(("tell", entry["id"], str(option), text), self.gate(text, ask, option),
                                  f"Передала проекту {p}: {gist}.",
                                  f"Передано проекту {p}. Скажи пользователю одной фразой, кому и что: "
-                                 f"«Передала проекту {p}: …» — смысл, не текст задания.")
+                                 f"«Передала проекту {p}: …» — смысл, не текст задания.",
+                                 f"Передать проекту {p}: {gist}?", "передай", shown)
 
     async def launch(self, path, task, gist, where="orca"):
         name = _name(path)
         return await self._order(("launch", path, task, where), self.gate(task), f"Запустила агента в проекте {name}: {gist}.",
                                  f"Агент запущен в проекте {name}. Скажи пользователю одной фразой: "
-                                 f"«Запустила агента в проекте {name}: …» — смысл задания.")
+                                 f"«Запустила агента в проекте {name}: …» — смысл задания.",
+                                 f"Запустить агента в проекте {name}: {gist}?", "запускай", f"Запущу агента в проекте {name}: «{task}»")
 
     async def projects(self, where="orca"):
         ok, out = await self.run("projects", where)
@@ -158,19 +171,26 @@ class Orders:
         return "\n".join(f"{_name(l)} — {l}" for l in out.splitlines() if l.strip()) or "Проектов нет."
 
     async def confirm(self, text):
-        """Реплика голосом, пока опасное ждёт: фраза совпала — передать и вернуть фразу Омы. Попытка подтвердить
-        не тем словом — переспросить, ожидание держится; «не подтверждаю» — отказ. Другая реплика снимает ожидание: None."""
+        """Реплика голосом, пока поручение ждёт: фраза совпала — передать и вернуть фразу Омы. Попытка подтвердить
+        не той фразой — переспросить, ожидание держится; «нет», «не подтверждаю» — отказ. Другая реплика («продолжай»)
+        снимает ожидание, ничего не уходит: None, реплика — мозгу с пометкой."""
         p = self.pending
-        ws = words(text)
-        if not p or self.clock() > p["until"] or not _has(ws, ("подтвержд",)):
+        if not p or self.clock() > p["until"]:
             self.pending = None
             return None
-        if NO & set(ws):
+        ws, d = words(text), p["what"]
+        if NO & set(ws) or (ws and ws[0].startswith(NEGATIVE)):
             self.pending = None
             self.note = "(Пользователь не подтвердил — Ома ничего не передала.) "
             return "Хорошо, не передаю."
-        if not confirms(text, p["what"]):
-            return f"Не расслышала. Скажи: подтверждаю {p['what'][1]}."
+        short = len(ws) <= 4
+        ok = short and "да" in ws and _has(ws, GO) if d is ORDINARY else confirms(text, d)
+        if not ok:
+            if short and ("да" in ws or _has(ws, GO + ("подтвержд",))):
+                return f"Не расслышала. Скажи: да, {p['verb']}." if d is ORDINARY else f"Не расслышала. Скажи: подтверждаю {d[1]}."
+            self.pending = None
+            self.note = "(Пользователь не подтвердил — Ома ничего не передала.) "
+            return None
         self.pending = None
         ok, out = await self.run(*p["args"])
         said = p["said"] if ok else f"Не вышло: {out}."

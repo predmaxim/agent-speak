@@ -53,6 +53,7 @@ class Oma:
     def __init__(self, conv, ear, brain, whisper, send=link.send, notify=notify, clock=time.monotonic, orders=None):
         self.conv, self.ear, self.brain, self.whisper, self.send = conv, ear, brain, whisper, send
         self.orders = orders or Orders()
+        self.orders.show = self._show  # ждущее подтверждения поручение — полным текстом в окне
         self.utter, self.sending = [], []  # звук фраз черновика; при выбросе черновика — к отправке
         self.notify, self.clock = notify, clock
         self.history = []  # текущий чат, как его видит окно: история из open() + реплики этого процесса
@@ -60,6 +61,10 @@ class Oma:
         self.tasks = set()
         self.sound = 0     # номер события audio: хвост pw-cat отсчитывается от последнего
         self.notified = (None, 0.0)  # последнее уведомление: текст, время
+
+    def _show(self, text):
+        self.emit({"bubble": {"id": f"oma-{os.getpid()}-{self.n}", "who": "Ома", "text": text, "kind": "oma", "append": True}})
+        self._chat("oma", text)
 
     def emit(self, line):
         self.send({"cmd": "emit", "line": line})
@@ -244,8 +249,7 @@ class Oma:
                 key = self.brain.key
                 a = (k, await self._whole(a[1]) if self.conv.voiced else a[1], a[2])
                 self.orders.turn(self.conv.voiced, a[1])
-                if self.conv.voiced:
-                    said = await self.orders.confirm(a[1])  # «подтверждаю …» сверяет код, мозг не зовём
+                said = await self.orders.confirm(a[1])  # подтверждение сверяет код, мозг не зовём; другая реплика снимает ожидание
                 if said is None:
                     note, self.orders.note = self.orders.note, ""
                     try:
@@ -268,8 +272,7 @@ class Oma:
             elif k == "say":
                 self.send({"cmd": "voice", "text": a[1]})
             elif k == "show":
-                self.emit({"bubble": {"id": f"oma-{os.getpid()}-{self.n}", "who": "Ома", "text": a[1], "kind": "oma", "append": True}})
-                self._chat("oma", a[1])
+                self._show(a[1])
             elif k == "draft":
                 self.emit({"bubble": {"id": "draft", "who": "Ты", "text": a[1], "kind": "draft", "hearing": a[2], "append": False}})
             elif k == "drop_draft":

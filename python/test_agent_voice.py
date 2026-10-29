@@ -1220,7 +1220,8 @@ def test_negative_answer_needs_no_confirmation():
     o, calls = _orders()
     agent = dict(E[0], ask="Ждёт ответа на AskUserQuestion: Запушить? Варианты: Да; Нет")
     o.turn(True, "нет")
-    assert run(o.tell(agent, "Нет, не пушь", "не пушить")).startswith("Передано") and calls
+    r = run(o.tell(agent, "Нет, не пушь", "не пушить"))
+    assert "да, передай" in r and "подтверждаю" not in r and not calls, "отказ не опасен, но голосом — тоже после «да, передай»"
     o.turn(True, "да")
     assert "подтверждаю пуш" in run(o.tell(agent, "Да", "пушить")), "опасность в вопросе агента"
 
@@ -1372,7 +1373,8 @@ def test_option_gated_by_chosen_variant():
     o.turn(True, "нет")
     assert "подтверждаю пуш" in run(o.tell(agent, "Нет", "не пушить", option=1)), "уходит вариант 1 — пуш, а не текст"
     o.turn(True, "нет")
-    assert run(o.tell(agent, "", "не пушить", option=2)).startswith("Передано") and calls
+    r = run(o.tell(agent, "", "не пушить", option=2))
+    assert "да, передай" in r and "подтверждаю" not in r
     plan = dict(E[0], ask="Ждёт ответа на ExitPlanMode: 1. тесты 2. git push")
     o.turn(True, "нет")
     assert "подтверждаю пуш" in run(o.tell(plan, "Нет", "одобрить", option=1)), "одобрение плана — без поблажки отказу"
@@ -1384,7 +1386,8 @@ def test_refusal_does_not_cover_added_danger():
         o.turn(True, "нет")
         assert "подтверждаю" in run(o.tell(E[0], sent, "нет")), sent
     o.turn(True, "нет")
-    assert run(o.tell(E[0], "Нет, не пушь", "не пушить")).startswith("Передано")
+    r = run(o.tell(E[0], "Нет, не пушь", "не пушить"))
+    assert "да, передай" in r and "подтверждаю" not in r
 
 
 def test_asked_is_only_the_question_part():
@@ -1392,7 +1395,8 @@ def test_asked_is_only_the_question_part():
     assert asked(agent) == "Ждёт ответа на AskUserQuestion: Взяться за тесты? Варианты: Да; Нет"
     o, calls = _orders()
     o.turn(True, "да")
-    assert run(o.tell(agent, "Да", "взяться за тесты")).startswith("Передано")
+    r = run(o.tell(agent, "Да", "взяться за тесты"))
+    assert "да, передай" in r and "подтверждаю" not in r
 
 
 def test_danger_dictionary_gaps():
@@ -1409,7 +1413,8 @@ def test_same_turn_after_danger_sends_nothing():
     assert "подтверждаю пуш" in run(o.tell(E[0], "Запушь изменения", "запушить"))
     assert run(o.tell(E[0], "Отправь изменения на GitHub", "отправить")).startswith("Не передано") and calls == []
     o.turn(True, "займись тестами")
-    assert run(o.tell(E[0], "Займись тестами", "тесты")).startswith("Передано")
+    r = run(o.tell(E[0], "Займись тестами", "тесты"))
+    assert "да, передай" in r and "подтверждаю" not in r
 
 
 def test_cli_timeout_warns_it_may_have_arrived(monkeypatch):
@@ -1930,3 +1935,82 @@ def test_long_first_sentence_starts_at_comma():
     assert ch.feed(" нужно ваше решение. Дальше") == ["осталась пятая, и ему нужно ваше решение."], "дальше — предложениями"
     short = Chunker()
     assert short.feed("Да, конечно, сейчас") == [], "короткое — ждёт конца предложения"
+
+
+# --- голосом агентам ничего не уходит без «да, передай»: 2026-10-29 Ома сама составила задание из обрывков
+# («Стой. Сделай. Короче. Стоп.») и приняла «продолжай» за согласие — текст набрался в строке ввода агента ---
+
+def _ordinary(clk=None):
+    o, calls = _orders(clk)
+    shown = []
+    o.show = shown.append
+    o.turn(True, "скажи агенту, пусть делает обе оптимизации")
+    r = run(o.tell(E[0], "Делай обе оптимизации", "делать обе оптимизации"))
+    return o, calls, shown, r
+
+
+def test_voice_order_waits_for_yes_and_reads_back():
+    o, calls, shown, r = _ordinary()
+    assert calls == [] and "«Передать проекту omarchy-mail: делать обе оптимизации? Скажи: да, передай.»" in r
+    assert shown == ["Передам проекту omarchy-mail: «Делай обе оптимизации»"], "полный текст — в окне"
+    assert run(o.confirm("Да, передай.")) == "Передала проекту omarchy-mail: делать обе оптимизации."
+    assert calls == [("tell", "s1", "0", "Делай обе оптимизации")] and "подтвердил" in o.note
+
+
+def test_continue_is_not_consent():
+    for heard in ("продолжай", "У меня.", "давай", "ага", "да, и ещё скажи ему про тесты потом"):
+        o, calls, _, _ = _ordinary()
+        assert run(o.confirm(heard)) is None and o.pending is None and calls == [], heard
+        assert "ничего не передала" in o.note, "мозг знает, что не ушло"
+
+
+def test_half_yes_asks_again_and_no_cancels():
+    o, calls, _, _ = _ordinary()
+    assert run(o.confirm("да")) == "Не расслышала. Скажи: да, передай." and o.pending and not calls
+    assert run(o.confirm("передай")) == "Не расслышала. Скажи: да, передай." and o.pending
+    assert run(o.confirm("нет, не надо")) == "Хорошо, не передаю." and o.pending is None and not calls
+
+
+def test_voice_launch_waits_for_yes_launch():
+    o, calls = _orders()
+    o.turn(True, "запусти агента в почте, пусть займётся тестами")
+    r = run(o.launch("/p/mail", "Займись тестами", "заняться тестами"))
+    assert "«Запустить агента в проекте mail: заняться тестами? Скажи: да, запускай.»" in r and not calls
+    assert run(o.confirm("Да, запускай!")) == "Запустила агента в проекте mail: заняться тестами." and calls
+
+
+def test_danger_ignores_plain_yes():
+    o, calls = _armed()
+    assert run(o.confirm("да, передай")) == "Не расслышала. Скажи: подтверждаю пуш." and o.pending and not calls
+
+
+def test_option_read_back_names_the_variant():
+    agent = dict(E[0], ask=PUSH_MENU)
+    o, calls = _orders()
+    shown = []
+    o.show = shown.append
+    o.turn(True, "нет, потом")
+    run(o.tell(agent, "", "не пушить", option=2))
+    assert shown == ["Передам проекту omarchy-mail: вариант 2 — Нет — потом"]
+
+
+def test_prompt_forbids_composing_from_fragments():
+    from agent_voice import brain
+    assert "из обрывков" in brain.OMA_PROMPT and "«Продолжай»" in brain.OMA_PROMPT
+
+
+def test_oma_shows_pending_order_in_window():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    oma.orders.show("Передам проекту x: «текст»")
+    assert any(e["line"].get("bubble", {}).get("text") == "Передам проекту x: «текст»" for e in emitted)
+
+
+def test_typed_reply_drops_pending_voice_order():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    oma.orders, calls = _orders(clk)
+    oma.orders.turn(True, "пусть делает тесты")
+    run(oma.orders.tell(E[0], "Делай тесты", "тесты"))
+    run(oma.command({"do": "ask", "text": "а что с почтой"}))
+    assert oma.orders.pending is None and calls == []
