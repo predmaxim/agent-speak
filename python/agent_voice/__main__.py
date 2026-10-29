@@ -58,6 +58,7 @@ class Oma:
         self.history = []  # текущий чат, как его видит окно: история из open() + реплики этого процесса
         self.n = 0         # номер ответа: пузырь oma-<pid>-<n>
         self.tasks = set()
+        self.sound = 0     # номер события audio: хвост pw-cat отсчитывается от последнего
         self.notified = (None, 0.0)  # последнее уведомление: текст, время
 
     def emit(self, line):
@@ -156,6 +157,11 @@ class Oma:
         if self.conv.hearing:
             self.ear.cut()
 
+    async def _tail_over(self, sound):
+        await asyncio.sleep(TAIL)
+        if self.sound == sound:  # хвост pw-cat доиграл, новой речи не было — дальше сырой микрофон
+            self.ear.speaking = False
+
     async def event(self, ev):
         kind, c = ev[0], self.conv
         if kind == "start":
@@ -163,10 +169,10 @@ class Oma:
         elif kind == "phrase":
             pcm, before = getattr(self.ear, "audio", {}).pop(ev[2], b""), c.draft
             acts = c.phrase(ev[1], ev[2])
-            if pcm and c.draft != before:  # фраза вошла в черновик
-                self.utter.append(pcm)
+            if pcm and c.draft != before:  # фраза вошла в черновик; начало срезано как эхо — её звук целиком не распознавать
+                self.utter.append(pcm if c.draft.endswith(ev[1].strip()) else None)
             if ev[1].strip():  # без текста: в нём бывает чужой разговор в комнате
-                verdict = "принята" if c.draft != before else ("эхо" if c._echoing() else "не принята")
+                verdict = "принята" if c.draft != before else ("эхо" if c._echoing() or ev[2] == c.echo_n else "не принята")
                 print(f"agent_voice: слух: фраза {len(ev[1].split())} сл., {verdict}", file=sys.stderr, flush=True)
             await self.act(acts)
         elif kind == "tick":
@@ -180,7 +186,13 @@ class Oma:
             self.emit({"chat": {"key": self.brain.key, "messages": self.history}})
             self.emit({"chats": await asyncio.to_thread(self.brain.chats)})
         elif kind == "audio":
-            self.ear.speaking = ev[1]  # её голос звучит: в динамиках слух — на входе с эхоподавлением
+            # её голос звучит: в динамиках слух — на входе с эхоподавлением; «смолкла» демон шлёт, записав
+            # последний кусок, а pw-cat доигрывает ещё ~0,7 с — сырой микрофон слышал бы их без эхоподавления
+            self.sound += 1
+            if ev[1]:
+                self.ear.speaking = True
+            else:
+                self.bg(self._tail_over(self.sound))
             # её перебили: в начале фразы — её голос из динамиков; срезать, когда доиграет хвост pw-cat.
             # В наушниках её голоса в микрофоне нет — срез съел бы начало ответа
             if not ev[1] and c.hearing and getattr(self.ear, "echo", False):
@@ -208,7 +220,7 @@ class Oma:
     async def _whole(self, text):
         """Текст реплики, сказанной голосом: несколько фраз — распознать звук целиком; не вышло — как в черновике."""
         parts, self.sending = self.sending, []
-        if len(parts) < 2:
+        if len(parts) < 2 or None in parts:  # None — фраза с её голосом в начале: целиком эхо вернулось бы
             return text
         try:
             whole = (await self.hear(b"".join(parts))).strip()

@@ -8,6 +8,7 @@ phrase(text, n) — по номерам отбрасываются куски, �
 Тихий режим показывает ответ (show), но не озвучивает (say). Часы подставляются
 снаружи (clock), дедлайны проверяет tick().
 """
+import difflib
 import re
 import time
 
@@ -27,6 +28,7 @@ ANSWER_STEMS = ("здес", "слуша", "говор", "рассказ", "да�
                 "подожд", "занят", "отбо", "отмен", "стоп", "ома", "хорош", "ладн")
 ECHO_WINDOW = 3     # с после её речи: хвост её голоса из динамиков ещё в микрофоне
 ECHO_SHARE = 0.6    # доля слов фразы из её же речи, с которой фраза — эхо
+ECHO_RUN = 3        # слов её речи по порядку в начале фразы, с которых это начало — эхо
 
 
 def words(text):
@@ -55,6 +57,21 @@ def is_echo(text, said):
     return bool(w) and bool(s) and sum(x[:4] in s for x in w) / len(w) >= ECHO_SHARE
 
 
+def strip_echo(text, said):
+    """Начало фразы — её последние слова из динамиков: пользователь заговорил, пока она договаривала, и её хвост
+    с его словами — один кусок. Срезается начало, совпавшее с её речью по порядку (по основам, от ECHO_RUN слов;
+    whisper искажает отдельные слова — пропуск до двух); дальше — слова пользователя."""
+    low = text.lower().replace("ё", "е")  # та же длина: позиции слов годятся и для text
+    toks = list(re.finditer(r"[a-zа-я]+", low))
+    w, s = [m.group()[:4] for m in toks], [x[:4] for x in words(said)]
+    end = got = 0
+    for i, _, n in difflib.SequenceMatcher(None, w, s, autojunk=False).get_matching_blocks():
+        if not n or i - end > 2:
+            break
+        end, got = i + n, got + n
+    return text[toks[end - 1].end():].lstrip(" ,.;:!?…-—") if got >= ECHO_RUN else text
+
+
 def is_hold(text):
     w = words(text)
     return 1 <= len(w) <= 3 and all(x.startswith(HOLD) for x in w)
@@ -77,6 +94,7 @@ class Conversation:
         self.mic = False       # микрофон занят другим (voxtype и т. п.)
         self.chunker = Chunker()
         self.started = self.heard = self.cut = 0  # номера речи: начата / пришла / отменена до
+        self.echo_n = 0        # номер речи, начатой под её голос: эхо судится по началу фразы, а не по её распознаванию
         self.send_at = None    # когда отправить черновик
         self.quiet_at = None   # когда закончить разговор от тишины
         self.window = None     # разговор открыт окном ответа: {kind, said, first, close}
@@ -208,6 +226,8 @@ class Conversation:
     def speech_start(self, n):
         if not self.active or self.state in ("idle", "paused"):
             return []
+        if self._echoing():
+            self.echo_n = n
         if self._echoing() and (self.audio_busy or self.state == "speaking"):
             self.started = n  # её голос или перебив — решит распознанный текст: обрывать её по эху нельзя
             return []
@@ -226,9 +246,10 @@ class Conversation:
         if self.window and not self.window["first"]:
             return []  # на окно уже ответили: речь в комнате — не Оме
         pre = []
-        if self._echoing():
+        if self._echoing() or n == self.echo_n:  # пользователь договаривал дольше ECHO_WINDOW — начало всё равно её
             if is_echo(text, self.said):
                 return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else []
+            text = strip_echo(text, self.said)
             if self.state == "speaking" and len(text.strip()) >= 2:
                 pre = self._stop_turn() + self._to("listening")  # не её слова — перебивает пользователь
         if n <= self.cut or self.state != "listening":

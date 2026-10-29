@@ -1560,6 +1560,89 @@ def test_echo_words_table():
     assert not is_echo("да", "")
 
 
+VPN = ("От вас нужно удалить в reg.ru запись `vpl2.predmax.ru`. Из-за неё трафик к серверу уходит мимо VPN. "
+       "Ещё на сервере остался временный sudo без пароля, агент уберёт его в конце.")
+
+
+def test_own_tail_before_user_words_is_cut_off():
+    # 2026-10-29: пользователь заговорил, пока она договаривала, — её последнее предложение и его вопрос
+    # одной фразой; её слов в ней 8 из 15 (меньше ECHO_SHARE), и фраза ушла мозгу целиком
+    clk, cv = _speaking_through_speakers(VPN)
+    assert cv.speech_start(1) == []
+    acts = cv.phrase("...со временной суда без пароля. Агент уберет его в конце. А что там с директусом?", 1)
+    assert ("stop",) in acts and cv.draft == "А что там с директусом?"
+
+
+def test_echo_judged_by_phrase_onset_not_by_transcript_time():
+    # фраза началась под её голос, а распознана через 4 с после того, как она смолкла (пользователь договаривал):
+    # окно эха считается от начала речи
+    clk, cv = _speaking_through_speakers(VPN)
+    assert cv.speech_start(1) == []
+    cv.audio(False)
+    clk.t += 4
+    cv.phrase("...со временной суда без пароля. Агент уберет его в конце. А что там с директусом?", 1)
+    assert cv.draft == "А что там с директусом?"
+
+
+def test_strip_echo_table():
+    from agent_voice.conversation import strip_echo
+    assert strip_echo("...со временной суда без пароля. Агент уберет его в конце. А что там с директусом?", VPN) \
+        == "А что там с директусом?"
+    assert strip_echo("Агент уберёт его в конце, а sudo оставь", VPN) == "а sudo оставь"
+    assert strip_echo("Удалить запись? Да, удали.", VPN) == "Удалить запись? Да, удали.", "два слова подряд — не эхо"
+    assert strip_echo("а что там с директусом", VPN) == "а что там с директусом"
+    assert strip_echo("расскажи про почту, агент уберёт его в конце", VPN) \
+        == "расскажи про почту, агент уберёт его в конце", "её слова не в начале — уже не эхо"
+
+
+def test_echo_cut_phrase_skips_whole_retranscription():
+    # звук фразы с её голосом в начале нельзя распознавать целиком: эхо вернулось бы в реплику
+    sent, emitted, heard = [], [], []
+    clk, oma = _oma_hearing(sent, emitted, heard)
+    oma.ear.echo = True
+
+    async def go():
+        await oma.command({"do": "talk"})
+        oma.conv.echo = True
+        oma.conv.ask("что с vpn")
+        oma.conv.delta(VPN)
+        oma.conv.done()
+        await oma.event(("audio", True))
+        await oma.event(("start", 1))
+        oma.ear.audio[1] = b"x"
+        await oma.event(("phrase", "Агент уберет его в конце. А что там с директусом?", 1))
+        await oma.event(("audio", False))
+        await oma.event(("start", 2))
+        oma.ear.audio[2] = b"y"
+        await oma.event(("phrase", "и почту проверь", 2))
+        clk.t += SEND_PAUSE
+        await oma.event(("tick",))
+    run(go())
+    assert heard == [] and oma.brain.texts[-1] == "А что там с директусом? и почту проверь"
+
+
+def test_ear_keeps_echo_cancelled_stream_through_playback_tail():
+    # демон шлёт «audio false», когда записал последний кусок, а pw-cat доигрывает ещё ~0,7 с:
+    # сырой микрофон в это время слышит её голос без эхоподавления
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    oma.ear.speaking = False
+
+    async def go():
+        await oma.event(("audio", True))
+        assert oma.ear.speaking
+        await oma.event(("audio", False))
+        assert oma.ear.speaking, "хвост pw-cat ещё звучит"
+        await asyncio.sleep(main_TAIL() / 2)
+        await oma.event(("audio", True))
+        await oma.event(("audio", False))
+        await asyncio.sleep(main_TAIL() * 0.75)
+        assert oma.ear.speaking, "новая фраза продлила хвост"
+        await asyncio.sleep(main_TAIL() / 2)
+        assert not oma.ear.speaking
+    run(go())
+
+
 def test_listen_through_speakers_uses_echo_mic(monkeypatch):
     from agent_voice import __main__ as main_mod
     monkeypatch.setattr(main_mod, "locked", lambda: False)
