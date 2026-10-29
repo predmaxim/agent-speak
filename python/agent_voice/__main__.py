@@ -220,7 +220,10 @@ class Oma:
     async def _turn_done(self, pcm):
         """Договорил ли: Smart Turn по всей реплике (фразы черновика и эта); сбой — None, пауза как раньше."""
         try:
-            return await asyncio.to_thread(self.turn_end.complete, b"".join([p for p in self.utter if p] + [pcm]))
+            p = await asyncio.to_thread(self.turn_end.complete, b"".join([p for p in self.utter if p] + [pcm]))
+            if p is not None:  # для подстройки порогов DONE/UNDONE; текста нет
+                print(f"agent_voice: конец реплики {p:.2f}", file=sys.stderr, flush=True)
+            return p
         except Exception as e:
             print(f"agent_voice: конец реплики: {e!r}", file=sys.stderr, flush=True)
             return None
