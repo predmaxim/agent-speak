@@ -27,19 +27,6 @@ def test_phrase_after_pause_with_preroll():
     assert len(ev) == 2
 
 
-def test_cut_drops_heard_audio_and_silence_after_it_is_empty():
-    seg = Segmenter()
-    assert feed(seg, [0.9] * 10) == [("start",)]
-    seg.cut()  # Ома смолкла: всё услышанное до этого — вперемешку с её голосом
-    ev = feed(seg, [0.9] * 5 + [0.1] * 22)
-    assert [e[0] for e in ev] == ["phrase"] and len(ev[0][1]) == (5 + 22) * 1024
-    feed(seg, [0.9] * 10)
-    seg.cut()
-    assert feed(seg, [0.1] * 22) == [("phrase", b"")]  # после обрыва одна тишина — распознавать нечего
-    seg.cut()  # вне фразы — ничего не делает
-    assert feed(seg, [0.1] * 5) == []
-
-
 def test_short_pause_keeps_one_phrase():
     ev = feed(Segmenter(), [0.9] * 10 + [0.1] * 10 + [0.9] * 10 + [0.1] * 22)
     assert [e[0] for e in ev] == ["start", "phrase"]
@@ -740,10 +727,9 @@ from agent_voice.link import watch
 
 def _oma(sent, emitted):
     class FakeEar:
-        open, pid, cuts = False, 1, 0
+        open, pid = False, 1
         async def start(self): self.open = True
         async def stop(self): self.open = False
-        def cut(self): self.cuts += 1
 
     class FakeBrain:
         key, texts = "new", []
@@ -779,29 +765,6 @@ def test_oma_routes_talk_draft_tick_and_quiet_answer():
         await oma.event(("delta", "Почта ждёт твоего ответа сейчас. "))
         assert not any(c["cmd"] == "voice" for c in sent)
         assert any(e["line"].get("bubble", {}).get("kind") == "oma" for e in emitted)
-
-    asyncio.run(run())
-
-
-def test_oma_barge_in_cuts_the_mixed_start_once_her_voice_is_gone(monkeypatch):
-    import agent_voice.__main__ as m
-    monkeypatch.setattr(m, "TAIL", 0.01)
-    sent, emitted = [], []
-    clk, oma = _oma(sent, emitted)
-    oma.ear.echo = True  # в динамиках: её голос просачивается в микрофон
-
-    async def run():
-        await oma.command({"do": "talk"})
-        await oma.event(("audio", True))   # Ома говорит
-        await oma.event(("start", 1))      # «Стоп» поверх неё
-        await oma.event(("audio", False))  # смолкла, а фраза ещё идёт
-        await asyncio.sleep(0.05)
-        assert oma.ear.cuts == 1
-        await oma.event(("phrase", "расскажи только про первого", 1))
-        await oma.event(("audio", True))
-        await oma.event(("audio", False))  # смолкла, когда никто не говорит, — резать нечего
-        await asyncio.sleep(0.05)
-        assert oma.ear.cuts == 1
 
     asyncio.run(run())
 
@@ -1664,23 +1627,6 @@ def test_mic_target_forced_to_speakers(monkeypatch):
     assert context.mic_target(fake_run, out=True) == ("alsa_input.pci", True, "mic_aec"), "спросила в динамики — сырой ноутбука, её голос в нём есть"
 
 
-def test_barge_in_cut_only_through_echo_canceller(monkeypatch):
-    # в наушниках её голоса в микрофоне нет: начало ответа, сказанное поверх её речи, — слова пользователя
-    sent, emitted = [], []
-    clk, oma = _oma(sent, emitted)
-    cuts = []
-    oma.ear.cut = lambda: cuts.append(1)
-
-    async def go():
-        await oma.command({"do": "talk"})
-        await oma.event(("audio", True))
-        await oma.event(("start", 1))
-        await oma.event(("audio", False))
-        await asyncio.sleep(main_TAIL() + 0.1)
-    run(go())
-    assert cuts == [], "без эхоподавления не режем"
-
-
 def main_TAIL():
     from agent_voice import __main__ as m
     return m.TAIL
@@ -1836,3 +1782,23 @@ def test_marks_hidden_from_chat_history():
     m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
     assert messages_of([m("user", "кхм"), m("assistant", "[молчу]"), m("user", "как дела"), m("assistant", "Хорошо.")]) == \
         [{"role": "me", "text": "кхм"}, {"role": "me", "text": "как дела"}, {"role": "oma", "text": "Хорошо."}]
+
+
+def test_quick_ack_right_after_her_last_word_ends_conversation():
+    # 2026-10-29: «ок» сразу после её фразы через динамики пропадало — срез через секунду после конца её звука
+    # (_cut_later) выбрасывал фразу, начатую под её голос, целиком; теперь её хвост снимает текст (strip_echo)
+    clk, cv = _speaking_through_speakers("Два агента работают, а исследование простаивает.")
+    cv.speech_start(1)
+    cv.done(); cv.audio(False)
+    cv.phrase("Простаивает. Ок.", 1)
+    assert cv.draft == "Ок."
+    clk.t += SEND_PAUSE
+    assert ("ear", False) in cv.tick() and cv.state == "idle"
+
+
+def test_strip_echo_her_last_word_only_when_phrase_began_under_her_voice():
+    from agent_voice.conversation import strip_echo
+    said = "Два агента работают, а исследование простаивает."
+    assert strip_echo("Простаивает. Ок.", said, tail=True) == "Ок."
+    assert strip_echo("Простаивает. Ок.", said) == "Простаивает. Ок.", "одно слово без начала под её голос — не эхо"
+    assert strip_echo("Работают. Ок.", said, tail=True) == "Работают. Ок.", "не последнее её слово — не хвост"

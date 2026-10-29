@@ -107,7 +107,6 @@ class Ear:
         self.out, self.whisper, self.cmd, self._mic = out, whisper, list(cmd), mic
         self._vad_load, self._lock = vad_load, asyncio.Lock()  # lock: start/stop идут по очереди, побеждает последний вызов
         self.paused = False
-        self._cut = False
         self.seq = 0
         self.audio = {}  # номер речи → её звук, пока Ома его не забрала
         self.echo = False  # слух на входе с эхоподавлением: Ома говорит в динамики
@@ -162,10 +161,6 @@ class Ear:
         await asyncio.gather(*tasks, return_exceptions=True)  # до reap: дочитывать stdout, пока его ждёт _read, нельзя
         await reap(proc, aec)
 
-    def cut(self):
-        """Ома смолкла, а речь ещё идёт: начало фразы — без её голоса (Segmenter.cut)."""
-        self._cut = True
-
     async def _recognize(self, phrases):  # отдельно: распознавание не задерживает чтение микрофона (перебивание)
         while True:
             n, pcm = await phrases.get()
@@ -194,9 +189,6 @@ class Ear:
                 if self.paused:
                     seg = Segmenter()
                     continue
-                if self._cut:
-                    self._cut = False
-                    seg.cut()
                 x = torch.from_numpy(np.frombuffer(b, np.int16).astype(np.float32) / 32768)
                 for ev in seg.feed(self._vad(x, RATE).item(), b):
                     if ev[0] == "start":

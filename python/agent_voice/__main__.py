@@ -152,11 +152,6 @@ class Oma:
         chats = await asyncio.to_thread(self.brain.chats)
         return chats[0]["key"] if chats and time.time() - chats[0]["updated"] < STALE_HOURS * 3600 else "new"
 
-    async def _cut_later(self):
-        await asyncio.sleep(TAIL)
-        if self.conv.hearing:
-            self.ear.cut()
-
     async def _tail_over(self, sound):
         await asyncio.sleep(TAIL)
         if self.sound == sound:  # хвост pw-cat доиграл, новой речи не было — дальше сырой микрофон
@@ -193,10 +188,6 @@ class Oma:
                 self.ear.speaking = True
             else:
                 self.bg(self._tail_over(self.sound))
-            # её перебили: в начале фразы — её голос из динамиков; срезать, когда доиграет хвост pw-cat.
-            # В наушниках её голоса в микрофоне нет — срез съел бы начало ответа
-            if not ev[1] and c.hearing and getattr(self.ear, "echo", False):
-                self.bg(self._cut_later())
             await self.act(c.audio(ev[1]))
         elif kind == "quiet":
             await self.act(c.set_quiet(ev[1]))

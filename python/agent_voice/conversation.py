@@ -59,19 +59,21 @@ def is_echo(text, said):
     return bool(w) and bool(s) and sum(x[:4] in s for x in w) / len(w) >= ECHO_SHARE
 
 
-def strip_echo(text, said):
+def strip_echo(text, said, tail=False):
     """Начало фразы — её последние слова из динамиков: пользователь заговорил, пока она договаривала, и её хвост
     с его словами — один кусок. Срезается начало, совпавшее с её речью по порядку (по основам, от ECHO_RUN слов;
-    whisper искажает отдельные слова — пропуск до двух); дальше — слова пользователя."""
+    whisper искажает отдельные слова — пропуск до двух); дальше — слова пользователя. tail — фраза начата под её
+    голос: тогда хватает и одного слова, если это конец её речи («Простаивает. Ок.»)."""
     low = text.lower().replace("ё", "е")  # та же длина: позиции слов годятся и для text
     toks = list(re.finditer(r"[a-zа-я]+", low))
     w, s = [m.group()[:4] for m in toks], [x[:4] for x in words(said)]
-    end = got = 0
-    for i, _, n in difflib.SequenceMatcher(None, w, s, autojunk=False).get_matching_blocks():
+    end = got = last = 0
+    for i, j, n in difflib.SequenceMatcher(None, w, s, autojunk=False).get_matching_blocks():
         if not n or i - end > 2:
             break
-        end, got = i + n, got + n
-    return text[toks[end - 1].end():].lstrip(" ,.;:!?…-—") if got >= ECHO_RUN else text
+        end, got, last = i + n, got + n, j + n
+    echo = got >= ECHO_RUN or (tail and got and last == len(s))
+    return text[toks[end - 1].end():].lstrip(" ,.;:!?…-—") if echo else text
 
 
 def is_noise(text):
@@ -267,7 +269,7 @@ class Conversation:
         if self._echoing() or n == self.echo_n:  # пользователь договаривал дольше ECHO_WINDOW — начало всё равно её
             if is_echo(text, self.said):
                 return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else []
-            text = strip_echo(text, self.said)
+            text = strip_echo(text, self.said, tail=n == self.echo_n)
             if self.state == "speaking" and is_barge(text):
                 pre = self._stop_turn() + self._to("listening")  # не её слова — перебивает пользователь
         elif n == self.held and self.state in ("thinking", "speaking"):
