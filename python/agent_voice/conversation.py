@@ -29,6 +29,8 @@ ANSWER_STEMS = ("здес", "слуша", "говор", "рассказ", "да�
 ECHO_WINDOW = 3     # с после её речи: хвост её голоса из динамиков ещё в микрофоне
 ECHO_SHARE = 0.6    # доля слов фразы из её же речи, с которой фраза — эхо
 ECHO_RUN = 3        # слов её речи по порядку в начале фразы, с которых это начало — эхо
+# Междометие, кашель, вздох — как их пишет whisper («Кхм.», «Эм...», «Э-э-э», «Кхе-кхе»): не реплика
+NOISE = re.compile(r"(?:э+м*|м+|х+м+|к+х+[еам]*|а+|о+х*|ой|ай|эх|ух|уф|ах|фу|ну+)$")
 
 
 def words(text):
@@ -72,6 +74,16 @@ def strip_echo(text, said):
     return text[toks[end - 1].end():].lstrip(" ,.;:!?…-—") if got >= ECHO_RUN else text
 
 
+def is_noise(text):
+    """Не слова: междометия и пометки whisper в скобках («[кашель]», «(вздыхает)», «*кашляет*»)."""
+    return all(NOISE.match(x) for x in words(re.sub(r"\[[^]]*\]|\([^)]*\)|\*[^*]*\*", " ", text)))
+
+
+def is_barge(text):
+    """Перебив — слова; поддакивание («угу», «ок») и кашель её не обрывают."""
+    return len(text.strip()) >= 2 and not is_noise(text) and not is_ack(text)
+
+
 def is_hold(text):
     w = words(text)
     return 1 <= len(w) <= 3 and all(x.startswith(HOLD) for x in w)
@@ -95,6 +107,8 @@ class Conversation:
         self.chunker = Chunker()
         self.started = self.heard = self.cut = 0  # номера речи: начата / пришла / отменена до
         self.echo_n = 0        # номер речи, начатой под её голос: эхо судится по началу фразы, а не по её распознаванию
+        self.held = 0          # номер речи, начатой, пока она думала: обрывать ли ход — решает распознанный текст
+        self.head = ""         # начало хода до первого знака; ход с «[» — метка «[молчу]»/«[конец]», решится в done; None — решено
         self.send_at = None    # когда отправить черновик
         self.quiet_at = None   # когда закончить разговор от тишины
         self.window = None     # разговор открыт окном ответа: {kind, said, first, close}
@@ -141,6 +155,7 @@ class Conversation:
 
     def _send(self, text, ctx="", voiced=True):
         self.turn, self.voiced, self.said = True, voiced, ""
+        self.head = ""
         self.chunker.reset()
         return [("send", text, ctx)] + self._to("thinking")
 
@@ -233,6 +248,9 @@ class Conversation:
             return []
         if self.window and not self.window["first"]:
             return []  # на окно уже ответили: дальше — не Оме, её ответ не обрывать
+        if self.turn and self.state == "thinking" and not self.audio_busy:
+            self.started = self.held = n  # кашель, пока она думает, не обрывает ответ: перебив решит текст (phrase)
+            return [("draft", self.draft, True)]
         self.started = n
         self.send_at = self.quiet_at = None
         acts = self._stop_turn()
@@ -250,12 +268,16 @@ class Conversation:
             if is_echo(text, self.said):
                 return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else []
             text = strip_echo(text, self.said)
-            if self.state == "speaking" and len(text.strip()) >= 2:
+            if self.state == "speaking" and is_barge(text):
                 pre = self._stop_turn() + self._to("listening")  # не её слова — перебивает пользователь
+        elif n == self.held and self.state in ("thinking", "speaking"):
+            if not is_barge(text):
+                return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else [("drop_draft",)]
+            pre = self._stop_turn() + self._to("listening")
         if n <= self.cut or self.state != "listening":
             return pre
         t = text.strip()
-        if len(t) < 2:
+        if len(t) < 2 or is_noise(t):
             return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else [("drop_draft",)]
         self.draft = f"{self.draft} {t}".strip()
         self.send_at = self.clock() + SEND_PAUSE
@@ -276,6 +298,8 @@ class Conversation:
                 return [("halt",)] + self.end()
             if is_hold(text):  # «стоп» — оборвать всё, что звучит, и слушать дальше
                 return [("halt",)] + self._stop_turn() + self._drop() + self._to(self._rest())
+            if is_ack(text) and not self.window and not self.said.rstrip().endswith("?"):
+                return self.end()  # «ок» после её ответа — разговор окончен; на её вопрос «хорошо» — ответ, уходит мозгу
             acts = ([("stop",)] if self.audio_busy else []) + self._drop()  # статус агента, что звучит, обрываем
             return acts + (self._window_send(text) if self.window else self._send(text))
         if self.quiet_at is not None and now >= self.quiet_at and not self.hearing and self.state in ("listening", "paused"):
@@ -296,18 +320,31 @@ class Conversation:
     def delta(self, text):
         if not self.turn:
             return []
+        if self.head is not None:  # метка молчания — первым знаком хода: до решения ничего не звучит
+            self.head += text
+            if not self.head.strip() or self.head.lstrip().startswith("["):
+                return []
+            text, self.head = self.head, None
         return self._speak(self.chunker.feed(text))
 
     def done(self):
         if not self.turn:
             return []
         self.turn = False
-        acts = self._speak(self.chunker.flush())
+        head, self.head = (self.head or "").strip(), None
+        if head.lower().startswith("[конец"):  # «ок, спасибо» после её ответа — разговор окончен
+            return self.end()
+        acts = [] if head.lower().startswith("[молч") else self._speak(self.chunker.feed(self._unmark(head)) + self.chunker.flush())
         if self.state == "speaking":
             return acts  # дозвучит — audio(False) вернёт в покой
         if self._closing():
             return acts + self.end()
         return acts + self._to(self._rest())
+
+    @staticmethod
+    def _unmark(text):
+        """Ход начался с «[», но это не метка: скобки не читаются."""
+        return text.replace("[", "").replace("]", "")
 
     def audio(self, busy):
         self.audio_busy = busy

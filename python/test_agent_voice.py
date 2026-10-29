@@ -309,14 +309,12 @@ def test_are_you_there_ignores_talk_not_to_oma():
     assert ("presence", "here") in acts
 
 
-def test_click_conversation_ack_still_sent():
+def test_click_conversation_ack_ends_it():
+    # «ок» и тишина — пользователь закончил: мозгу не уходит, разговор закрывается сразу, а не через SILENCE_END
     clk, cv = _conv()
     cv.talk()
     acts = _say(clk, cv, "ок")
-    assert ("send", "ок", "") in acts and not any(a[0] == "presence" for a in acts)
-    cv.delta("Хорошо. "); cv.audio(True); cv.done(); cv.audio(False)
-    clk.t += SILENCE_END - 0.1; assert cv.tick() == []
-    clk.t += 0.2; assert ("ear", False) in cv.tick()
+    assert not any(a[0] in ("send", "presence") for a in acts) and ("ear", False) in acts and cv.state == "idle"
 
 
 def test_is_ack_table():
@@ -1726,3 +1724,115 @@ def test_ear_stop_does_not_hang_on_unread_stream():
         await asyncio.wait_for(e.stop(), 5)
     run(go())
     assert not e.open
+
+
+# --- разговорное поведение: «ок» — конец, шум — не реплика, поддакивание не обрывает, молчание по решению мозга ---
+
+def _answered(text):
+    """Разговор по клику: вопрос ушёл, ответ Омы прозвучал, она слушает."""
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1); cv.phrase("как дела у агентов", 1)
+    clk.t += SEND_PAUSE; cv.tick()
+    cv.delta(text); cv.done(); cv.audio(True); cv.audio(False)
+    assert cv.state == "listening"
+    return clk, cv
+
+
+def _reply(clk, cv, text, n=2):
+    cv.speech_start(n); cv.phrase(text, n)
+    clk.t += SEND_PAUSE
+    return cv.tick()
+
+
+def test_ack_after_answer_ends_conversation():
+    clk, cv = _answered("Оба агента простаивают.")
+    acts = _reply(clk, cv, "Окей.")
+    assert ("ear", False) in acts and not any(a[0] == "send" for a in acts) and cv.state == "idle"
+
+
+def test_ack_after_question_is_an_answer():
+    clk, cv = _answered("Передать агенту, чтобы запускал тесты?")
+    acts = _reply(clk, cv, "Хорошо.")
+    assert ("send", "Хорошо.", "") in acts and cv.active
+
+
+def test_noise_is_not_a_reply():
+    from agent_voice.conversation import is_noise
+    for t in ["Кхм.", "Эм...", "Ммм", "Хм?", "[кашель]", "(вздыхает)", "*кашляет*", "Э-э-э", "Ну...", "А?", "Кхе-кхе."]:
+        assert is_noise(t), t
+    for t in ["Да.", "Нет", "Ага.", "Стоп.", "Ну что там с почтой?", "Окей"]:
+        assert not is_noise(t), t
+    clk, cv = _answered("Оба агента простаивают.")
+    assert not any(a[0] == "send" for a in _reply(clk, cv, "Кхм.")) and cv.draft == "" and cv.active
+
+
+def test_backchannel_through_speakers_does_not_stop_her():
+    clk, cv = _speaking_through_speakers("Могу смотреть, что делают твои агенты, и запускать новых.")
+    cv.speech_start(1)
+    assert cv.phrase("Угу.", 1) == [] and cv.state == "speaking"
+    cv.speech_start(2)
+    assert cv.phrase("Кхм.", 2) == [] and cv.state == "speaking"
+
+
+def test_cough_while_thinking_keeps_the_answer():
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1); cv.phrase("как дела у агентов", 1)
+    clk.t += SEND_PAUSE; cv.tick()
+    assert cv.state == "thinking"
+    assert ("interrupt",) not in cv.speech_start(2), "начало звука — ещё не перебив"
+    assert ("interrupt",) not in cv.phrase("Кхм.", 2) and cv.turn
+    assert any(a[0] == "say" for a in cv.delta("Оба агента сейчас простаивают и ждут тебя. "))
+
+
+def test_words_while_thinking_interrupt():
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1); cv.phrase("как дела у агентов", 1)
+    clk.t += SEND_PAUSE; cv.tick()
+    cv.speech_start(2)
+    acts = cv.phrase("и ещё про почту", 2)
+    assert ("interrupt",) in acts and cv.draft == "и ещё про почту" and cv.state == "listening"
+
+
+def test_words_while_thinking_interrupt_even_if_she_started_speaking():
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1); cv.phrase("как дела у агентов", 1)
+    clk.t += SEND_PAUSE; cv.tick()
+    cv.speech_start(2)
+    cv.delta("Оба простаивают. "); cv.audio(True)
+    acts = cv.phrase("подожди, а почта", 2)
+    assert ("stop",) in acts and cv.draft == "подожди, а почта"
+
+
+def _thinking(text):
+    clk, cv = _conv()
+    cv.talk(); cv.speech_start(1); cv.phrase(text, 1)
+    clk.t += SEND_PAUSE; cv.tick()
+    return cv
+
+
+def test_silent_mark_says_nothing():
+    # инструмент silent модель звала по кругу (8 раз на «Кхм.»): метка в ответе — без лишних кругов
+    from agent_voice.brain import OMA_PROMPT
+    assert "[молчу]" in OMA_PROMPT and "[конец]" in OMA_PROMPT
+    cv = _thinking("да, мам, сейчас приду")
+    assert cv.delta(" [мол") == [] and cv.delta("чу]") == []
+    assert cv.done() == [("state", "listening")] and cv.active
+
+
+def test_end_mark_closes_conversation():
+    cv = _thinking("ну всё, спасибо, свободна")
+    assert cv.delta("[конец]") == []
+    assert ("ear", False) in cv.done() and cv.state == "idle"
+
+
+def test_bracket_that_is_not_a_mark_is_spoken():
+    cv = _thinking("что в скобках")
+    cv.delta("[Пример] — это пример текста в скобках.")
+    assert any(a == ("say", "Пример — это пример текста в скобках.") for a in cv.done())
+
+
+def test_marks_hidden_from_chat_history():
+    from agent_voice.brain import messages_of
+    m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
+    assert messages_of([m("user", "кхм"), m("assistant", "[молчу]"), m("user", "как дела"), m("assistant", "Хорошо.")]) == \
+        [{"role": "me", "text": "кхм"}, {"role": "me", "text": "как дела"}, {"role": "oma", "text": "Хорошо."}]
