@@ -152,7 +152,7 @@ def test_voice_barge_in():
     cv.talk(); cv.phrase("вопрос тут", 1)
     clk.t += SEND_PAUSE; cv.tick()
     cv.delta("Сборка идёт уже десять минут. "); cv.audio(True)
-    assert cv.speech_start(2) == [("stop",), ("interrupt",), ("state", "listening"), ("draft", "", True)]
+    assert cv.speech_start(2) == [("pause_voice", True), ("draft", "", True)], "в наушниках — пауза, не обрыв: решит текст"
 
 
 def test_mic_busy_clears_hearing():
@@ -1509,7 +1509,7 @@ def test_real_barge_in_through_speakers_still_stops():
     clk, cv = _speaking_through_speakers("Могу смотреть, что делают твои агенты.")
     assert cv.speech_start(1) == []
     acts = cv.phrase("стоп, расскажи про почту", 1)
-    assert ("stop",) in acts and cv.draft == "стоп, расскажи про почту"
+    assert ("pause_voice", True) in acts and ("stop",) not in acts and cv.draft == "стоп, расскажи про почту"
 
 
 def test_oma_learns_echo_from_ear():
@@ -1538,7 +1538,7 @@ def test_own_tail_before_user_words_is_cut_off():
     clk, cv = _speaking_through_speakers(VPN)
     assert cv.speech_start(1) == []
     acts = cv.phrase("...со временной суда без пароля. Агент уберет его в конце. А что там с директусом?", 1)
-    assert ("stop",) in acts and cv.draft == "А что там с директусом?"
+    assert ("pause_voice", True) in acts and cv.draft == "А что там с директусом?"
 
 
 def test_echo_judged_by_phrase_onset_not_by_transcript_time():
@@ -1751,9 +1751,9 @@ def test_words_while_thinking_interrupt_even_if_she_started_speaking():
     cv.talk(); cv.speech_start(1); cv.phrase("как дела у агентов", 1)
     clk.t += SEND_PAUSE; cv.tick()
     cv.speech_start(2)
-    cv.delta("Оба простаивают. "); cv.audio(True)
+    cv.delta("Оба агента сейчас простаивают и ждут тебя. "); cv.audio(True)
     acts = cv.phrase("подожди, а почта", 2)
-    assert ("stop",) in acts and cv.draft == "подожди, а почта"
+    assert ("pause_voice", True) in acts and cv.draft == "подожди, а почта"
 
 
 def _thinking(text):
@@ -2092,3 +2092,81 @@ def test_whole_utterance_heard_ahead_while_pausing():
         await oma.event(("tick",))
     run(go())
     assert heard == [b"ab", b"abc"] and oma.brain.texts == ["Какая погода в Москве?"]
+
+
+
+# --- перебив — пауза, а не обрыв: кашель — она продолжает; слова не ей («[молчу]») — продолжает; ответ по делу —
+# прерванный ответ выбрасывается ---
+
+def _speaking_in_buds():
+    clk, cv = _conv()
+    _ask_answer(clk, cv)  # ответ звучит, ход мозга ещё идёт
+    assert cv.state == "speaking" and cv.turn
+    return clk, cv
+
+
+def test_cough_in_buds_pauses_then_resumes():
+    clk, cv = _speaking_in_buds()
+    assert cv.speech_start(2) == [("pause_voice", True), ("draft", "", True)]
+    assert cv.audio(False) == [] and cv.state == "speaking", "пауза — не конец её речи"
+    acts = cv.phrase("Кхм.", 2)
+    assert ("pause_voice", False) in acts and ("interrupt",) not in acts and cv.state == "speaking" and cv.turn
+
+
+def _suspended(text="да, мам, сейчас приду"):
+    clk, cv = _speaking_in_buds()
+    cv.speech_start(2)
+    cv.audio(False)  # демон: на паузе она молчит
+    acts = cv.phrase(text, 2)
+    assert ("interrupt",) in acts and ("stop",) not in acts and ("pause_voice", False) not in acts
+    assert cv.state == "listening" and cv.draft == text
+    clk.t += SEND_PAUSE
+    assert any(a[0] == "send" for a in cv.tick())
+    return clk, cv
+
+
+def test_words_not_for_her_resume_her_answer():
+    clk, cv = _suspended()
+    assert cv.delta("[молчу]") == []
+    assert cv.done() == [("pause_voice", False), ("state", "speaking")], "продолжает прерванный ответ"
+    assert cv.audio(True) == [] and cv.audio(False) == [("state", "listening")]
+
+
+def test_real_answer_after_barge_drops_old_answer():
+    clk, cv = _suspended("подожди, а что с почтой")
+    acts = cv.delta("Почта пуста, новых писем нет. ")
+    assert acts[:2] == [("stop",), ("pause_voice", False)] and ("say", "Почта пуста, новых писем нет.") in acts
+
+
+def test_tool_after_barge_drops_old_answer_first():
+    clk, cv = _suspended("подожди, а что с почтой")
+    acts = cv.tool("mcp__oma__agents")
+    assert acts[:2] == [("stop",), ("pause_voice", False)] and ("say", "Смотрю агентов.") in acts
+
+
+def test_end_mark_after_barge_ends_and_unpauses():
+    clk, cv = _suspended("всё, свободна")
+    cv.delta("[конец]")
+    acts = cv.done()
+    assert ("stop",) in acts and ("pause_voice", False) in acts and cv.state == "idle"
+
+
+def test_cancel_while_paused_unpauses():
+    clk, cv = _speaking_in_buds()
+    cv.speech_start(2)
+    acts = cv.cancel()
+    assert ("stop",) in acts and ("pause_voice", False) in acts and cv.state == "listening"
+
+
+def test_speakers_barge_pauses_too():
+    clk, cv = _speaking_through_speakers("Могу смотреть, что делают твои агенты, и запускать новых.")
+    cv.speech_start(1)
+    acts = cv.phrase("да, мам, сейчас", 1)
+    assert ("pause_voice", True) in acts and ("stop",) not in acts and cv.state == "listening"
+
+
+def test_oma_sends_her_pause_to_daemon():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    run(oma.act([("pause_voice", True), ("pause_voice", False)]))
+    assert [c for c in sent if c["cmd"] == "oma_pause"] == [{"cmd": "oma_pause", "on": True}, {"cmd": "oma_pause", "on": False}]

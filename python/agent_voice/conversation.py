@@ -117,7 +117,8 @@ class Conversation:
         self.chunker = Chunker()
         self.started = self.heard = self.cut = 0  # номера речи: начата / пришла / отменена до
         self.echo_n = 0        # номер речи, начатой под её голос: эхо судится по началу фразы, а не по её распознаванию
-        self.held = 0          # номер речи, начатой, пока она думала: обрывать ли ход — решает распознанный текст
+        self.held = 0          # номер речи, начатой, пока она думала или говорила: обрывать ли — решает распознанный текст
+        self.suspended = False # её речь на паузе по перебиву: перебил не ей («[молчу]», кашель) — продолжит, иначе выбросить
         self.head = ""         # начало хода до первого знака; ход с «[» — метка «[молчу]»/«[конец]», решится в done; None — решено
         self.send_at = None    # когда отправить черновик
         self.quiet_at = None   # когда закончить разговор от тишины
@@ -169,10 +170,34 @@ class Conversation:
         self.chunker.reset()
         return [("send", text, ctx)] + self._to("thinking")
 
+    def _pause_her(self):
+        acts = [] if self.suspended else [("pause_voice", True)]
+        self.suspended = True
+        return acts
+
+    def _resume(self):
+        """Перебив оказался не ей: она продолжает прерванный ответ (звучавшая фраза — с начала)."""
+        self.suspended = False
+        return [("pause_voice", False)] + self._to("speaking")
+
+    def _discard(self):
+        """Прерванный ответ больше не нужен: выбросить и снять паузу — новости и чтение идут дальше."""
+        if not self.suspended:
+            return []
+        self.suspended = False
+        return [("stop",), ("pause_voice", False)]
+
+    def _barge(self):
+        """Перебили словами: её речь — на паузу (мозг ответит «[молчу]» — продолжит), ход мозга — оборвать."""
+        acts = self._pause_her() + ([("interrupt",)] if self.turn else [])
+        self.turn = False
+        self.chunker.reset()
+        return acts + self._to("listening")
+
     def _stop_turn(self):
         """Оборвать звук и ход агента (если они есть)."""
-        acts = []
-        if self.audio_busy or self.state == "speaking":
+        acts = self._discard()
+        if not acts and (self.audio_busy or self.state == "speaking"):
             acts.append(("stop",))
         if self.turn:
             acts.append(("interrupt",))
@@ -261,6 +286,9 @@ class Conversation:
         if self.turn and self.state == "thinking" and not self.audio_busy:
             self.started = self.held = n  # кашель, пока она думает, не обрывает ответ: перебив решит текст (phrase)
             return [("draft", self.draft, True)]
+        if self.state == "speaking" and not self.echo:  # наушники: её — на паузу, обрывать ли — решит текст (phrase)
+            self.started = self.held = n
+            return self._pause_her() + [("draft", self.draft, True)]
         self.started = n
         self.send_at = self.quiet_at = None
         acts = self._stop_turn()
@@ -279,11 +307,12 @@ class Conversation:
                 return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else []
             text = strip_echo(text, self.said, tail=n == self.echo_n)
             if self.state == "speaking" and is_barge(text):
-                pre = self._stop_turn() + self._to("listening")  # не её слова — перебивает пользователь
+                pre = self._barge()  # не её слова — перебивает пользователь
         elif n == self.held and self.state in ("thinking", "speaking"):
-            if not is_barge(text):
-                return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else [("drop_draft",)]
-            pre = self._stop_turn() + self._to("listening")
+            if not is_barge(text):  # кашель, «угу» — она продолжает
+                acts = self._resume() if self.suspended else []
+                return acts + ([("draft", self.draft, self.hearing)] if self.draft or self.hearing else [("drop_draft",)])
+            pre = self._barge() if self.state == "speaking" else self._stop_turn() + self._to("listening")
         if n <= self.cut or self.state != "listening":
             return pre
         t = text.strip()
@@ -336,6 +365,7 @@ class Conversation:
             if not self.head.strip() or self.head.lstrip().startswith("["):
                 return []
             text, self.head = self.head, None
+            return self._discard() + self._speak(self.chunker.feed(text))  # ответ по делу — прерванный не нужен
         return self._speak(self.chunker.feed(text))
 
     def done(self):
@@ -345,7 +375,12 @@ class Conversation:
         head, self.head = (self.head or "").strip(), None
         if head.lower().startswith("[конец"):  # «ок, спасибо» после её ответа — разговор окончен
             return self.end()
-        acts = [] if head.lower().startswith("[молч") else self._speak(self.chunker.feed(self._unmark(head)) + self.chunker.flush())
+        if head.lower().startswith("[молч"):
+            if self.suspended:
+                return self._resume()  # перебили не её — продолжает прерванный ответ
+            acts = []
+        else:
+            acts = self._discard() + self._speak(self.chunker.feed(self._unmark(head)) + self.chunker.flush())
         if self.state == "speaking":
             return acts  # дозвучит — audio(False) вернёт в покой
         if self._closing():
@@ -362,10 +397,12 @@ class Conversation:
         if not self.turn or self.audio_busy or self.state == "speaking" or (name == "thinking" and self.said):
             return []
         phrase = FILLERS.get(name, "Секунду.")
-        return self._speak([phrase]) if phrase else []
+        return self._discard() + self._speak([phrase]) if phrase else []
 
     def audio(self, busy):
         self.audio_busy = busy
+        if self.suspended:
+            return []  # её пауза — не конец речи
         if not busy:
             self.spoke_at = self.clock()
         if not busy and self.state == "speaking":
@@ -387,5 +424,5 @@ class Conversation:
     def set_quiet(self, on):
         self.quiet = on
         if on and self.state == "speaking":
-            return [("stop",)] + self._after_sound()
+            return (self._discard() or [("stop",)]) + self._after_sound()
         return []

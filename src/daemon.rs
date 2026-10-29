@@ -161,6 +161,7 @@ struct State {
     projects: HashMap<String, String>, // сессия → имя папки проекта (из хуков и окна в фокусе)
     helper_turn: HashMap<String, bool>, // ход начал отчёт помощника (true), пока пользователь в нём не писал
     oma: Oma,
+    oma_paused: bool, // очередь на паузе по перебиву Омы, а не по кнопке: снимает она сама или конец разговора
     voice_cmd: Vec<String>, // запуск Омы; в тестах — заглушка
     minutes: Box<dyn Fn() -> u32>, // местное время, минуты от полуночи; в тестах — 12:00
     sched: Option<(bool, u32, u64)>, // прошлый tick: (тихо по расписанию, минуты, эпоха в с); None — ещё не было
@@ -337,6 +338,7 @@ pub fn run() {
         projects: HashMap::new(),
         helper_turn: HashMap::new(),
         oma: Oma { state: "off".into(), ..Default::default() },
+        oma_paused: false,
         voice_cmd: vec![
             data.join("voice-venv/bin/python").to_string_lossy().into(),
             "-m".into(),
@@ -983,6 +985,21 @@ impl State {
         n
     }
 
+    /// Перебив Омы: on — пауза (звучащая фраза потом повторится с начала), off — дальше. Только своя пауза:
+    /// стоящую по кнопке пользователя не ставит себе в заслугу и не снимает.
+    fn oma_pause(&mut self, on: bool) {
+        let paused = self.shared.queue.lock().unwrap().paused();
+        if on && !paused {
+            self.shared.pause();
+            self.oma_paused = true;
+        } else if !on && self.oma_paused {
+            self.oma_paused = false;
+            if paused {
+                self.shared.resume();
+            }
+        }
+    }
+
     fn stop(&mut self) {
         self.shared.stop();
         (self.listen_after, self.listen_at) = (None, None); // новости оборвали сами — ответа не ждём
@@ -1058,6 +1075,7 @@ impl State {
         let dead = self.oma.child.as_mut().is_some_and(|c| !matches!(c.try_wait(), Ok(None)));
         if dead {
             eprintln!("agent-speak: Ома завершилась");
+            self.oma_pause(false);
             self.oma_down();
         }
         let now = (self.clock)();
@@ -1158,9 +1176,13 @@ impl State {
     }
 
     fn on_msg(&mut self, m: Msg) {
-        let changes = matches!(m, Msg::Stop | Msg::Hush | Msg::Pause | Msg::VoiceState { .. });
+        let changes = matches!(m, Msg::Stop | Msg::Hush | Msg::Pause | Msg::OmaPause { .. } | Msg::VoiceState { .. });
         match m {
-            Msg::Stop => self.stop(),
+            Msg::Stop => {
+                self.stop();
+                self.oma_paused = false; // stop снимает и паузу
+            }
+            Msg::OmaPause { on } => self.oma_pause(on),
             Msg::Hush => self.shared.hush(), // новость, удержанная за Омой, не теряется
             Msg::Voice { text } => {
                 self.enqueue(Agent::Claude, "voice", &text, Kind::Voice); // звучит ли — решает audible
@@ -1171,6 +1193,9 @@ impl State {
                 }
             }
             Msg::VoiceState { state, talking } => {
+                if state == "idle" {
+                    self.oma_pause(false); // разговор кончился — её пауза не должна держать новости и чтение
+                }
                 self.hold(matches!(state.as_str(), "thinking" | "speaking"));
                 self.oma.state = state;
                 self.oma.talking = talking;
@@ -1179,6 +1204,7 @@ impl State {
             Msg::Oma { action } => self.oma_send(&action),
             Msg::Emit { line } => self.broadcast_line(&format!("{line}\n")),
             Msg::Pause => {
+                self.oma_paused = false; // кнопка пользователя главнее: дальше пауза — его
                 let paused = self.shared.queue.lock().unwrap().paused();
                 if paused {
                     self.shared.resume();
@@ -1583,6 +1609,7 @@ mod tests {
             projects: HashMap::new(),
             helper_turn: HashMap::new(),
             oma: Oma { state: "off".into(), ..Default::default() },
+            oma_paused: false,
             voice_cmd: vec!["sh".into(), "-c".into(), "sleep 30".into(), "x".into()],
             minutes: Box::new(|| 720), // 12:00 — вне тихого расписания
             registry: Registry::new(),
@@ -2004,6 +2031,30 @@ mod tests {
         next(&mut r);
         st.on_msg(Msg::Emit { line: serde_json::json!({"chat": {"key": "new", "messages": []}}) });
         assert_eq!(next(&mut r)["chat"]["key"], "new");
+    }
+
+    #[test]
+    fn oma_pause_is_hers_only() {
+        let mut st = test_state();
+        let paused = |st: &State| st.shared.queue.lock().unwrap().paused();
+        st.on_msg(Msg::OmaPause { on: true });
+        assert!(paused(&st));
+        st.on_msg(Msg::OmaPause { on: false });
+        assert!(!paused(&st), "перебив оказался кашлем — дальше");
+        st.on_msg(Msg::Pause); // пауза пользователя
+        st.on_msg(Msg::OmaPause { on: true });
+        st.on_msg(Msg::OmaPause { on: false });
+        assert!(paused(&st), "чужую паузу Ома не снимает");
+        st.on_msg(Msg::Pause);
+        st.on_msg(Msg::OmaPause { on: true });
+        st.on_msg(Msg::Pause); // пользователь снял паузу кнопкой
+        st.on_msg(Msg::Pause); // и поставил свою
+        st.on_msg(Msg::OmaPause { on: false });
+        assert!(paused(&st), "пауза теперь его");
+        st.on_msg(Msg::Pause);
+        st.on_msg(Msg::OmaPause { on: true });
+        st.on_msg(Msg::VoiceState { state: "idle".into(), talking: false });
+        assert!(!paused(&st), "разговор кончился — её пауза снята");
     }
 
     #[test]
