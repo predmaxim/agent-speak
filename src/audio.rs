@@ -66,6 +66,37 @@ pub fn bluetooth_out() -> bool {
     Command::new("pactl").arg("get-default-sink").output().is_ok_and(|o| o.stdout.starts_with(b"bluez_"))
 }
 
+/// Щелчок «услышала»: 90 мс, 880 Гц, края сглажены — без треска. s16 48 кГц моно, как у Player.
+fn chime_pcm() -> Vec<u8> {
+    let n = 48000 * 90 / 1000;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / 48000.0;
+            let fade = (std::f32::consts::PI * i as f32 / n as f32).sin(); // 0 → 1 → 0
+            ((2.0 * std::f32::consts::PI * 880.0 * t).sin() * fade * 0.25 * i16::MAX as f32) as i16
+        })
+        .flat_map(i16::to_le_bytes)
+        .collect()
+}
+
+/// Сыграть щелчок отдельным pw-cat в выход sink (пусто — по умолчанию), не задерживая вызывающего.
+pub fn chime(sink: &str) {
+    let sink = sink.to_string();
+    std::thread::spawn(move || {
+        let mut cmd = Command::new("pw-cat");
+        cmd.args(["--playback", "--raw", "--format", "s16", "--rate", "48000", "--channels", "1"]);
+        if !sink.is_empty() {
+            cmd.args(["--target", &sink]);
+        }
+        if let Ok(mut c) = cmd.arg("-").stdin(Stdio::piped()).spawn() {
+            if let Some(mut s) = c.stdin.take() {
+                let _ = s.write_all(&chime_pcm());
+            }
+            let _ = c.wait(); // stdin закрыт: pw-cat доиграет и выйдет
+        }
+    });
+}
+
 fn needs_respawn(has_child: bool, spawned_sink: &str, sink: &str) -> bool {
     !has_child || spawned_sink != sink
 }
@@ -73,6 +104,15 @@ fn needs_respawn(has_child: bool, spawned_sink: &str, sink: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chime_is_short_and_fades() {
+        let pcm = chime_pcm();
+        assert_eq!(pcm.len(), 48000 * 90 / 1000 * 2);
+        let s = |i: usize| i16::from_le_bytes([pcm[2 * i], pcm[2 * i + 1]]).unsigned_abs();
+        assert!(s(0) < 50 && s(pcm.len() / 2 - 1) < 50, "края тихие — без щелчка-треска");
+        assert!((0..pcm.len() / 2).map(s).max().unwrap() > 5000);
+    }
 
     #[test]
     fn respawns_when_sink_changes() {

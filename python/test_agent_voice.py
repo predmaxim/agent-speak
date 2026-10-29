@@ -686,13 +686,13 @@ def test_brain_reconnects_after_failed_connect_and_dead_stream(monkeypatch, tmp_
             await b.send("раз")
         await b.interrupt()  # клиента нет — ничего
         await b.send("два")
-        assert made[1].sent == ["два"] and [await ev.get(), await ev.get()] == [("opened", "chat:sid-2", "new"), ("done", None)]
+        assert [brain.strip_note(t) for t in made[1].sent] == ["два"] and [await ev.get(), await ev.get()] == [("opened", "chat:sid-2", "new"), ("done", None)]
         await made[1].q.put(None)
         assert await ev.get() == ("error", "Claude: сессия оборвалась")
         await b.interrupt()
         assert made[1].interrupts == 0 and not b.st["skip"]
         await b.send("три")
-        assert made[2].sent == ["три"] and made[2].opts.resume == "sid-2"
+        assert [brain.strip_note(t) for t in made[2].sent] == ["три"] and made[2].opts.resume == "sid-2"
         await b.close()
 
     asyncio.run(run())
@@ -732,8 +732,9 @@ def _oma(sent, emitted):
         async def stop(self): self.open = False
 
     class FakeBrain:
-        key, texts = "new", []
+        key, texts, warmed = "new", [], False
         async def send(self, t): self.texts.append(t)
+        async def warm(self): self.warmed = True
         async def open(self, k): self.key = k; return []
         async def interrupt(self): pass
         def chats(self): return []
@@ -930,6 +931,7 @@ def test_general_chat_for_talk_and_window():
         updated = time.time() - 600
         async def open(self, k): opened.append(k); self.key = k; return []
         async def interrupt(self): pass
+        async def warm(self): pass
         def chats(self): return [{"key": "chat:g", "updated": self.updated}]
 
     oma = Oma(Conversation(), SimpleNamespace(open=False, speakers=None, start=_async_none, stop=_async_none),
@@ -1802,3 +1804,129 @@ def test_strip_echo_her_last_word_only_when_phrase_began_under_her_voice():
     assert strip_echo("Простаивает. Ок.", said, tail=True) == "Ок."
     assert strip_echo("Простаивает. Ок.", said) == "Простаивает. Ок.", "одно слово без начала под её голос — не эхо"
     assert strip_echo("Работают. Ок.", said, tail=True) == "Работают. Ок.", "не последнее её слово — не хвост"
+
+
+# --- отклик быстрее: щелчок «услышала», слова на инструментах, снимок агентов в реплике, claude по клику, первая запятая ---
+
+def test_voiced_send_chimes_first():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+
+    async def go():
+        await oma.command({"do": "talk"})
+        await oma.event(("start", 1))
+        await oma.event(("phrase", "как дела у агентов", 1))
+        clk.t += SEND_PAUSE
+        await oma.event(("tick",))
+    run(go())
+    assert {"cmd": "chime"} in sent and oma.brain.texts
+
+
+def test_typed_or_quiet_send_does_not_chime():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    run(oma.command({"do": "ask", "text": "как дела"}))
+    assert {"cmd": "chime"} not in sent
+    clk, oma = _oma(sent, emitted)
+
+    async def go():
+        await oma.event(("quiet", True))
+        await oma.command({"do": "talk"})
+        await oma.event(("start", 1))
+        await oma.event(("phrase", "как дела у агентов", 1))
+        clk.t += SEND_PAUSE
+        await oma.event(("tick",))
+    run(go())
+    assert {"cmd": "chime"} not in sent
+
+
+def test_tool_call_says_what_she_does():
+    cv = _thinking("как дела у агентов")
+    acts = cv.tool("mcp__oma__agents")
+    assert ("say", "Смотрю агентов.") in acts and ("show", "Смотрю агентов.") in acts and cv.state == "speaking"
+    cv.audio(True)
+    assert cv.tool("mcp__oma__agent_tail") == [], "она ещё говорит — тишины нет"
+    cv.audio(False)
+    assert ("say", "Читаю переписку агента.") in cv.tool("mcp__oma__agent_tail"), "каждый инструмент — своё слово"
+    assert cv.tool("thinking") == [], "раздумье после сказанного — без слова"
+    assert cv.tool("mcp__oma__presence") == []
+
+
+def test_thinking_first_says_a_word():
+    cv = _thinking("сложный вопрос")
+    assert any(a[0] == "say" for a in cv.tool("thinking"))
+    quiet = _thinking("тихо")
+    quiet.quiet = True
+    assert not any(a[0] == "say" for a in quiet.tool("mcp__oma__agents"))
+
+
+def test_claude_events_report_tool_and_thinking_start():
+    st = {"skip": False}
+    ev = lambda block: SimpleNamespace(event={"type": "content_block_start", "content_block": block})
+    assert claude_events(ev({"type": "tool_use", "name": "mcp__oma__agents"}), st) == [("tool", "mcp__oma__agents")]
+    assert claude_events(ev({"type": "thinking"}), st) == [("tool", "thinking")]
+    assert claude_events(ev({"type": "text"}), st) == []
+
+
+def test_oma_routes_tool_event_to_voice():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+
+    async def go():
+        await oma.command({"do": "talk"})
+        oma.conv.ask("как дела у агентов")
+        await oma.event(("tool", "mcp__oma__agents"))
+    run(go())
+    assert {"cmd": "voice", "text": "Смотрю агентов."} in sent
+
+
+def test_agents_snapshot_rides_with_reply_and_hides_from_chat():
+    from agent_voice.brain import with_agents, strip_note, messages_of, general_chats
+    entries = [{"title": "Ома", "project": "agent-speak", "id": "a1", "state": "working", "since": 0, "status": "правит слух"}]
+    text = with_agents("как дела у агентов", entries, 60)
+    assert text.startswith("как дела у агентов") and "правит слух" in text and strip_note(text) == "как дела у агентов"
+    m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
+    assert messages_of([m("user", text)]) == [{"role": "me", "text": "как дела у агентов"}]
+    info = SimpleNamespace(session_id="s", custom_title=None, summary=None, first_prompt=text, last_modified=0, tag=None)
+    assert general_chats([info])[0]["title"] == "как дела у агентов"
+
+
+def test_brain_warms_once_and_send_reuses_it():
+    from agent_voice.brain import Brain
+    b = Brain(asyncio.Queue(), lambda: [])
+    calls, queries = [], []
+
+    class Client:
+        async def query(self, t): queries.append(t)
+
+    async def connect():
+        calls.append(1)
+        await asyncio.sleep(0.01)
+        b.client, b.reader = Client(), asyncio.get_running_loop().create_future()
+
+    b._connect = connect
+
+    async def go():
+        await asyncio.gather(b.warm(), b.warm(), b.send("привет"))
+    run(go())
+    assert calls == [1] and queries and queries[0].startswith("привет")
+
+
+def test_talk_warms_brain():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+
+    async def go():
+        await oma.command({"do": "talk"})
+        await asyncio.sleep(0)
+    run(go())
+    assert oma.brain.warmed
+
+
+def test_long_first_sentence_starts_at_comma():
+    ch = Chunker()
+    assert ch.feed("Агент по Directus закрыл пять задач из шести, осталась пятая, и ему") == \
+        ["Агент по Directus закрыл пять задач из шести,"]
+    assert ch.feed(" нужно ваше решение. Дальше") == ["осталась пятая, и ему нужно ваше решение."], "дальше — предложениями"
+    short = Chunker()
+    assert short.feed("Да, конечно, сейчас") == [], "короткое — ждёт конца предложения"

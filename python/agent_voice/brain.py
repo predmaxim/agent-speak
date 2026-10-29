@@ -25,7 +25,8 @@ OMA_PROMPT = ("Ты — Ома, голосовой заместитель пол
               "истории шагов. Не перечисляй, что умеешь, не объясняй, как узнала, не добавляй "
               "оговорок, советов и вопросов «что-нибудь ещё?»; подробности — только когда попросят. Без вступлений, "
               "markdown, списков и кода. "
-              "Состояние агентов — инструментами agents и agent_feed; конец переписки агента — agent_tail (пустой аргумент — "
+              "Состояние агентов — по свежему снимку в конце реплики (‹агенты›…‹/агенты›), agents для этого не вызывай; "
+              "лента агента — agent_feed; конец переписки агента — agent_tail (пустой аргумент — "
               "агент в фокусе); «это», «тут», «эта ошибка» — сначала selection, затем agent_tail. Файлы ты только читаешь. "
               "Передать агенту ответ или задание — tell: разверни короткую просьбу в полное задание от лица пользователя (что "
               "сделать, где искать, что вернуть), фактов не выдумывай; ответ на вопрос агента передай полностью, с нужными "
@@ -63,15 +64,34 @@ def claude_events(msg, st):
             return []
         return [("done", None)]
     ev = getattr(msg, "event", None)
+    if not st["skip"] and isinstance(ev, dict) and ev.get("type") == "content_block_start":
+        b = ev.get("content_block") or {}
+        if b.get("type") == "tool_use":
+            return [("tool", b.get("name", ""))]
+        return [("tool", "thinking")] if b.get("type") == "thinking" else []
     if st["skip"] or not isinstance(ev, dict) or ev.get("type") != "content_block_delta":
         return []
     d = ev.get("delta", {})
     return [("delta", d["text"])] if d.get("type") == "text_delta" and d.get("text") else []
 
 
+NOTE = ("\n\n‹агенты›\n", "\n‹/агенты›")
+
+
+def with_agents(text: str, entries, now) -> str:
+    """Реплика со свежим снимком агентов: на «как дела у агентов» мозг отвечает сразу, без круга на agents (2–4 с)."""
+    return f"{text}{NOTE[0]}{format_agents(entries, now)}{NOTE[1]}"
+
+
+def strip_note(text: str) -> str:
+    """Реплика без снимка агентов — для чата и названий."""
+    i = text.find(NOTE[0])
+    return text[:i] if i >= 0 else text
+
+
 def general_chats(infos) -> list:
     """Общие чаты (без чатов агентов), свежие первыми."""
-    return [{"key": f"chat:{i.session_id}", "title": (i.custom_title or i.summary or i.first_prompt or "")[:60],
+    return [{"key": f"chat:{i.session_id}", "title": strip_note(i.custom_title or i.summary or i.first_prompt or "")[:60],
              "updated": i.last_modified // 1000}
             for i in sorted(infos, key=lambda i: i.last_modified, reverse=True)
             if not (i.tag or "").startswith("agent:")]
@@ -95,10 +115,11 @@ def messages_of(msgs) -> list:
                 continue
             if role == "oma" and b["text"].strip().startswith(("[молч", "[конец")):  # метка молчания — не реплика
                 continue
+            text = strip_note(b["text"]) if role == "me" else b["text"]
             if role == "oma" and out and out[-1]["role"] == "oma":  # как в окне: ответ одним сообщением
-                out[-1]["text"] += " " + b["text"]
+                out[-1]["text"] += " " + text
             else:
-                out.append({"role": role, "text": b["text"]})
+                out.append({"role": role, "text": text})
     return out
 
 
@@ -226,6 +247,7 @@ class Brain:
         self.events, self.snapshot, self.tools = events, snapshot, oma_tools(snapshot, send, orders)
         self.key, self.sid, self.client, self.reader = "new", None, None, None
         self.st, self.used, self.turns = {"skip": False}, time.time(), 0  # turns: запросов без ResultMessage
+        self.lock = asyncio.Lock()  # warm и send не поднимают claude дважды
 
     def chats(self) -> list:
         return general_chats(list_sessions(OMA_DIR))
@@ -276,15 +298,24 @@ class Brain:
             self.turns = 0
             await self.events.put(("error", f"Claude: {e}"))
 
+    async def _ready(self):
+        """Клиент текущего чата наготове: устаревший чат — новым, мёртвый клиент — новым подключением."""
+        async with self.lock:
+            if self.key.startswith("chat:") and time.time() - self.used > STALE_HOURS * 3600:
+                await self.events.put(("opened", "new", self.key))  # до open: ключ станет "new", даже если connect упадёт
+                await self.open("new")
+            if not self.reader or self.reader.done():
+                await self._connect()
+
+    async def warm(self):
+        """Клик по орбу: claude поднимается, пока пользователь говорит, — первая реплика не ждёт его запуска (0,7–2 с)."""
+        await self._ready()
+
     async def send(self, text: str):
-        if self.key.startswith("chat:") and time.time() - self.used > STALE_HOURS * 3600:
-            await self.events.put(("opened", "new", self.key))  # до open: ключ станет "new", даже если connect упадёт
-            await self.open("new")
-        if not self.reader or self.reader.done():
-            await self._connect()
+        await self._ready()
         self.used = time.time()
         self.turns += 1  # до query: ResultMessage может прийти раньше, чем query вернётся
-        await self.client.query(text)
+        await self.client.query(with_agents(text, self.snapshot(), time.time()))
 
     async def interrupt(self):
         """Перебить ход в полёте; кончившийся не трогаем — иначе skip съест следующий ответ."""

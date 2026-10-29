@@ -22,6 +22,8 @@ pub enum Msg {
     Say { text: String },
     /// Ответ Омы голосом.
     Voice { text: String },
+    /// Короткий звук «услышала»: реплика ушла мозгу, ответа ещё нет.
+    Chime,
     /// Состояние Омы (idle | loading | listening | thinking | speaking | paused) и talking — идёт ли разговор.
     VoiceState { state: String, #[serde(default)] talking: bool },
     /// Команда Оме от плагина и CLI: action уходит строкой в её stdin.
@@ -60,6 +62,7 @@ mod tests {
         assert!(matches!(set, Msg::Set { ref key, ref value } if key == "read_intermediate" && *value == serde_json::json!(false)));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"say\",\"text\":\"т\"}").unwrap(), Msg::Say { .. }));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice\",\"text\":\"т\"}").unwrap(), Msg::Voice { .. }));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"chime\"}").unwrap(), Msg::Chime));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice_state\",\"state\":\"thinking\"}").unwrap(), Msg::VoiceState { ref state, talking: false } if state == "thinking"));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"voice_state\",\"state\":\"idle\",\"talking\":true}").unwrap(), Msg::VoiceState { talking: true, .. }));
         let oma = serde_json::from_str::<Msg>("{\"cmd\":\"oma\",\"action\":{\"do\":\"ask\",\"text\":\"т\",\"key\":\"new\"}}").unwrap();

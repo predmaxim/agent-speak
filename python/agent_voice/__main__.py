@@ -109,6 +109,8 @@ class Oma:
             if c.state == "idle" and self.brain.key.startswith("agent:"):  # с Омой-помощником — в общем чате
                 await self.switch(await self.general(), was="*")
             await self.act(c.talk())
+            if c.active:
+                self.bg(self.brain.warm())  # claude поднимается, пока пользователь говорит
         elif do == "cancel":
             await self.act(c.cancel())
         elif do == "warm":  # демон прогревает слух до окна ответа: whisper не грузится при открытом микрофоне
@@ -176,6 +178,8 @@ class Oma:
             await self.act(c.end())
         elif kind == "delta":
             await self.act(c.delta(ev[1]))
+        elif kind == "tool":
+            await self.act(c.tool(ev[1]))
         elif kind == "done":
             await self.act(c.done())
             self.emit({"chat": {"key": self.brain.key, "messages": self.history}})
@@ -235,6 +239,8 @@ class Oma:
                 else:
                     await self.ear.stop()
             elif k == "send":
+                if self.conv.voiced and not self.conv.quiet:
+                    self.send({"cmd": "chime"})  # «услышала» сразу: до ответа мозга секунды
                 key = self.brain.key
                 a = (k, await self._whole(a[1]) if self.conv.voiced else a[1], a[2])
                 self.orders.turn(self.conv.voiced, a[1])

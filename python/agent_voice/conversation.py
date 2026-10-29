@@ -29,6 +29,12 @@ ANSWER_STEMS = ("здес", "слуша", "говор", "рассказ", "да�
 ECHO_WINDOW = 3     # с после её речи: хвост её голоса из динамиков ещё в микрофоне
 ECHO_SHARE = 0.6    # доля слов фразы из её же речи, с которой фраза — эхо
 ECHO_RUN = 3        # слов её речи по порядку в начале фразы, с которых это начало — эхо
+# Что она делает, пока мозг занят инструментом или раздумьем: тишина хуже повтора; presence — мгновенный, без слова
+FILLERS = {"mcp__oma__agents": "Смотрю агентов.", "mcp__oma__agent_feed": "Смотрю ленту агента.",
+           "mcp__oma__agent_tail": "Читаю переписку агента.", "mcp__oma__selection": "Смотрю выделенное.",
+           "mcp__oma__tell": "Передаю агенту.", "mcp__oma__projects": "Смотрю проекты.", "mcp__oma__launch": "Запускаю агента.",
+           "Read": "Смотрю файлы.", "Glob": "Смотрю файлы.", "Grep": "Смотрю файлы.", "WebSearch": "Ищу в сети.",
+           "thinking": "Секунду, подумаю.", "mcp__oma__presence": ""}
 # Междометие, кашель, вздох — как их пишет whisper («Кхм.», «Эм...», «Э-э-э», «Кхе-кхе»): не реплика
 NOISE = re.compile(r"(?:э+м*|м+|х+м+|к+х+[еам]*|а+|о+х*|ой|ай|эх|ух|уф|ах|фу|ну+)$")
 
@@ -347,6 +353,13 @@ class Conversation:
     def _unmark(text):
         """Ход начался с «[», но это не метка: скобки не читаются."""
         return text.replace("[", "").replace("]", "")
+
+    def tool(self, name):
+        """Мозг взялся за инструмент (или задумался) — сказать, что она делает, если сейчас не звучит."""
+        if not self.turn or self.audio_busy or self.state == "speaking" or (name == "thinking" and self.said):
+            return []
+        phrase = FILLERS.get(name, "Секунду.")
+        return self._speak([phrase]) if phrase else []
 
     def audio(self, busy):
         self.audio_busy = busy

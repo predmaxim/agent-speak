@@ -1165,6 +1165,11 @@ impl State {
             Msg::Voice { text } => {
                 self.enqueue(Agent::Claude, "voice", &text, Kind::Voice); // звучит ли — решает audible
             }
+            Msg::Chime => {
+                if audible(&Kind::Voice, self.quiet()) {
+                    crate::audio::chime(&self.shared.sink.lock().unwrap()); // туда же, куда её голос
+                }
+            }
             Msg::VoiceState { state, talking } => {
                 self.hold(matches!(state.as_str(), "thinking" | "speaking"));
                 self.oma.state = state;
