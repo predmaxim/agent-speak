@@ -15,6 +15,8 @@ import time
 from .chunker import Chunker
 
 SEND_PAUSE = 1.3   # с от прихода фразы до отправки (VAD уже ждал свою паузу)
+# Smart Turn (turn.py) — договорил ли: уверен — сразу; оборвал на полуслове — ждать продолжения дольше; не знает — как было
+DONE, UNDONE, WAIT_MORE = 0.9, 0.5, 2.5
 SILENCE_END = 30   # с тишины до конца разговора
 WINDOW_END = 5     # с тишины после ответа Омы в разговоре из окна ответа
 ACKS = {"ок", "окей", "ok", "okay", "понял", "поняла", "ясно", "спасибо", "хорошо", "угу", "ага", "принято"}
@@ -267,7 +269,7 @@ class Conversation:
             self.quiet_at = None
         return acts + [("draft", self.draft, True)]
 
-    def phrase(self, text, n):
+    def phrase(self, text, n, done=None):
         self.heard = max(self.heard, n)
         if self.window and not self.window["first"]:
             return []  # на окно уже ответили: речь в комнате — не Оме
@@ -288,7 +290,8 @@ class Conversation:
         if len(t) < 2 or is_noise(t):
             return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else [("drop_draft",)]
         self.draft = f"{self.draft} {t}".strip()
-        self.send_at = self.clock() + SEND_PAUSE
+        wait = SEND_PAUSE if done is None else 0.0 if done >= DONE else SEND_PAUSE if done >= UNDONE else WAIT_MORE
+        self.send_at = self.clock() + wait
         self.quiet_at = self.clock() + self.silence
         return pre + [("draft", self.draft, self.hearing)]
 

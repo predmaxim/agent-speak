@@ -15,6 +15,7 @@ from . import link
 from .context import foreign_capture, locked, mic_outputs, on_ac
 from .conversation import Conversation
 from .orders import Orders
+from .turn import SmartTurn
 
 
 # Хвост звука после конца речи демона — speaker::TAIL: pw-cat ещё доигрывает свой буфер.
@@ -50,11 +51,13 @@ def kill_children():
 class Oma:
     """Связывает разговор, слух, мозг и демона: команды и события → действия Conversation → исполнение."""
 
-    def __init__(self, conv, ear, brain, whisper, send=link.send, notify=notify, clock=time.monotonic, orders=None):
+    def __init__(self, conv, ear, brain, whisper, send=link.send, notify=notify, clock=time.monotonic, orders=None, turn_end=None):
         self.conv, self.ear, self.brain, self.whisper, self.send = conv, ear, brain, whisper, send
         self.orders = orders or Orders()
         self.orders.show = self._show  # ждущее подтверждения поручение — полным текстом в окне
         self.utter, self.sending = [], []  # звук фраз черновика; при выбросе черновика — к отправке
+        self.pre = self.pre_sending = None  # (число фраз, задача) — реплика целиком, распознаваемая заранее
+        self.turn_end = turn_end or SmartTurn()
         self.notify, self.clock = notify, clock
         self.history = []  # текущий чат, как его видит окно: история из open() + реплики этого процесса
         self.n = 0         # номер ответа: пузырь oma-<pid>-<n>
@@ -170,9 +173,11 @@ class Oma:
             await self.act(c.speech_start(ev[1]))
         elif kind == "phrase":
             pcm, before = getattr(self.ear, "audio", {}).pop(ev[2], b""), c.draft
-            acts = c.phrase(ev[1], ev[2])
+            done = await self._turn_done(pcm) if pcm and ev[1].strip() else None
+            acts = c.phrase(ev[1], ev[2], done)
             if pcm and c.draft != before:  # фраза вошла в черновик; начало срезано как эхо — её звук целиком не распознавать
                 self.utter.append(pcm if c.draft.endswith(ev[1].strip()) else None)
+                self._prehear()
             if ev[1].strip():  # без текста: в нём бывает чужой разговор в комнате
                 verdict = "принята" if c.draft != before else ("эхо" if c._echoing() or ev[2] == c.echo_n else "не принята")
                 print(f"agent_voice: слух: фраза {len(ev[1].split())} сл., {verdict}", file=sys.stderr, flush=True)
@@ -212,6 +217,24 @@ class Oma:
             elif c.turn and ev[1].startswith("Claude"):  # ход мозга оборвался — в покой
                 await self.act(c.done())
 
+    async def _turn_done(self, pcm):
+        """Договорил ли: Smart Turn по всей реплике (фразы черновика и эта); сбой — None, пауза как раньше."""
+        try:
+            return await asyncio.to_thread(self.turn_end.complete, b"".join([p for p in self.utter if p] + [pcm]))
+        except Exception as e:
+            print(f"agent_voice: конец реплики: {e!r}", file=sys.stderr, flush=True)
+            return None
+
+    def _prehear(self):
+        """Реплика из нескольких фраз распознаётся целиком сразу, пока идёт пауза: отправка не ждёт whisper (~0,3 с)."""
+        if self.pre:
+            self.pre[1].cancel()
+        parts, self.pre = self.utter, None
+        if len(parts) >= 2 and None not in parts:
+            t = asyncio.ensure_future(self.hear(b"".join(parts)))
+            t.add_done_callback(lambda t: t.cancelled() or t.exception())  # сбой заберёт _whole; брошенная — без шума
+            self.pre = (len(parts), t)
+
     async def hear(self, pcm):
         """Реплика целиком: whisper по кускам между паузами теряет смысл на краях («этот спик» вместо «AgentSpeak»)."""
         from .ear import transcribe
@@ -220,10 +243,11 @@ class Oma:
     async def _whole(self, text):
         """Текст реплики, сказанной голосом: несколько фраз — распознать звук целиком; не вышло — как в черновике."""
         parts, self.sending = self.sending, []
+        pre, self.pre_sending = self.pre_sending, None
         if len(parts) < 2 or None in parts:  # None — фраза с её голосом в начале: целиком эхо вернулось бы
             return text
         try:
-            whole = (await self.hear(b"".join(parts))).strip()
+            whole = (await (pre[1] if pre and pre[0] == len(parts) else self.hear(b"".join(parts)))).strip()
         except Exception as e:
             print(f"agent_voice: реплика целиком: {e!r}", file=sys.stderr, flush=True)
             return text
@@ -277,6 +301,7 @@ class Oma:
                 self.emit({"bubble": {"id": "draft", "who": "Ты", "text": a[1], "kind": "draft", "hearing": a[2], "append": False}})
             elif k == "drop_draft":
                 self.utter, self.sending = [], self.utter  # отправка следом заберёт звук; без неё — забыт новым черновиком
+                self.pre_sending, self.pre = self.pre, None
                 self.emit({"bubble": {"id": "draft", "who": "Ты", "text": "", "kind": "draft", "append": False, "drop": True}})
             elif k == "state":
                 s = "loading" if a[1] == "listening" and not self.whisper.ready else a[1]

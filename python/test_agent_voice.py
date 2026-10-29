@@ -741,7 +741,7 @@ def _oma(sent, emitted):
 
     clk = Clock()
     oma = Oma(Conversation(clock=clk), FakeEar(), FakeBrain(), SimpleNamespace(ready=True),
-              send=lambda c: (emitted if c["cmd"] == "emit" else sent).append(c))
+              send=lambda c: (emitted if c["cmd"] == "emit" else sent).append(c), turn_end=SimpleNamespace(complete=lambda pcm: None))
     return clk, oma
 
 
@@ -2014,3 +2014,81 @@ def test_typed_reply_drops_pending_voice_order():
     run(oma.orders.tell(E[0], "Делай тесты", "тесты"))
     run(oma.command({"do": "ask", "text": "а что с почтой"}))
     assert oma.orders.pending is None and calls == []
+
+
+
+# --- конец реплики по звуку (Smart Turn) и реплика целиком заранее ---
+
+def test_turn_end_sets_send_pause():
+    from agent_voice.conversation import WAIT_MORE
+    for done, wait in ((0.95, 0.0), (0.7, SEND_PAUSE), (0.2, WAIT_MORE), (None, SEND_PAUSE)):
+        clk, cv = _conv()
+        cv.talk(); cv.speech_start(1); cv.phrase("скажи агенту, пусть", 1, done)
+        clk.t += max(wait - 0.05, 0)
+        if wait:
+            assert not any(a[0] == "send" for a in cv.tick()), done
+            clk.t += 0.1
+        assert any(a[0] == "send" for a in cv.tick()), done
+
+
+def test_oma_asks_turn_end_about_whole_utterance():
+    sent, emitted, heard = [], [], []
+    clk, oma = _oma_hearing(sent, emitted, heard)
+    seen = []
+    oma.turn_end = SimpleNamespace(complete=lambda pcm: seen.append(pcm) or 0.97)
+
+    async def go():
+        await oma.command({"do": "talk"})
+        for n, (text, pcm) in enumerate((("какая погода", b"aa"), ("в москве", b"bb")), 1):
+            await oma.event(("start", n))
+            oma.ear.audio[n] = pcm
+            await oma.event(("phrase", text, n))
+        await oma.event(("tick",))  # договорил — без паузы
+    run(go())
+    assert seen == [b"aa", b"aabb"] and oma.brain.texts == ["Какая погода в Москве?"]
+
+
+def test_turn_end_failure_falls_back_to_pause():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    oma.turn_end = SimpleNamespace(complete=lambda pcm: 1 / 0)
+    oma.ear.audio = {1: b"aa"}
+
+    async def go():
+        await oma.command({"do": "talk"})
+        await oma.event(("start", 1))
+        await oma.event(("phrase", "как дела", 1))
+        await oma.event(("tick",))
+        assert oma.brain.texts == []
+        clk.t += SEND_PAUSE
+        await oma.event(("tick",))
+    run(go())
+    assert oma.brain.texts == ["как дела"]
+
+
+def test_smart_turn_features_and_missing_model():
+    import numpy as np
+    from agent_voice.turn import SmartTurn, features
+    from faster_whisper.feature_extractor import FeatureExtractor
+    f = features(np.zeros(16000, np.float32) + 0.1, FeatureExtractor(feature_size=80, chunk_length=8))
+    assert f.shape == (1, 80, 800) and f.dtype == np.float32
+    assert SmartTurn("/нет/такой/модели.onnx").complete(b"\0\0" * 1600) is None
+
+
+def test_whole_utterance_heard_ahead_while_pausing():
+    # реплика целиком распознаётся, пока идёт пауза, а не при отправке: отправка её не ждёт
+    sent, emitted, heard = [], [], []
+    clk, oma = _oma_hearing(sent, emitted, heard)
+
+    async def go():
+        await oma.command({"do": "talk"})
+        for n, (text, pcm) in enumerate((("какая", b"a"), ("погода", b"b"), ("в москве", b"c")), 1):
+            await oma.event(("start", n))
+            oma.ear.audio[n] = pcm
+            await oma.event(("phrase", text, n))
+            await asyncio.sleep(0)
+        assert heard == [b"ab", b"abc"], "распознаётся по мере роста реплики"
+        clk.t += SEND_PAUSE
+        await oma.event(("tick",))
+    run(go())
+    assert heard == [b"ab", b"abc"] and oma.brain.texts == ["Какая погода в Москве?"]

@@ -37,6 +37,13 @@ if ! "$DATA/voice-venv/bin/python" -c 'import faster_whisper, silero_vad, claude
     nvidia-cublas-cu12 'nvidia-cudnn-cu12==9.*' pytest
 fi
 
+# Конец реплики по звуку: Smart Turn v3.2 (pipecat-ai/smart-turn, BSD-2), 8 МБ; нет файла — Ома ждёт паузу, как раньше
+ST=$DATA/smart-turn-v3.2-cpu.onnx
+[[ -f $ST ]] || {
+  curl -fsSL -o "$ST.tmp" https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx &&
+    echo "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f  $ST.tmp" | sha256sum -c --quiet && mv "$ST.tmp" "$ST"
+} || { rm -f "$ST.tmp"; echo "Smart Turn не скачался — Ома будет ждать паузу" >&2; }
+
 systemctl --user daemon-reload
 systemctl --user enable --now agent-speakd.service
 systemctl --user restart agent-speakd.service
