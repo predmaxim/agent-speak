@@ -559,7 +559,7 @@ def test_ear_reports_when_recorder_exits():
 
 
 # --- мозг Омы ---
-from agent_voice.brain import general_chats, find_agent_chat, messages_of, format_agents, find_entry, agent_prompt, OMA_PROMPT
+from agent_voice.brain import general_chats, find_agent_chat, messages_of, format_agents, pick_agent, agent_prompt, OMA_PROMPT
 
 E = [{"id": "s1", "title": "Почтовый клиент", "project": "omarchy-mail", "state": "waiting", "status": "Клод задал вопрос: какой вариант?",
       "since": 940, "focused": False, "feed": [{"at": 900, "kind": "status", "text": "Читаю план"}], "transcript": "/t/s1.jsonl", "cwd": "/p/mail"},
@@ -589,8 +589,8 @@ def test_format_agents_and_find():
     t = format_agents(E, now=1000)
     assert t.splitlines()[0] == "Почтовый клиент (omarchy-mail, id s1) — ждёт ответа, 1 мин: Клод задал вопрос: какой вариант?"
     assert "agent-speak (agent-speak, id s2, в фокусе) — работает, только что: Запускаю тесты" in t
-    assert find_entry(E, "почтов")["id"] == "s1" and find_entry(E, "s2")["id"] == "s2"
-    assert find_entry(E, "") is None and find_entry(E, "нет такого") is None
+    assert pick_agent(E, "почтов")[0]["id"] == "s1" and pick_agent(E, "s2")[0]["id"] == "s2"
+    assert pick_agent(E, "")[0]["id"] == "s2" and pick_agent(E, "нет такого") == (None, "Агент не найден.")
     assert format_agents([], 0) == "Агентов нет."
 
 
@@ -1298,6 +1298,19 @@ def test_tell_refuses_ambiguous_agent():
     run(_tool("tell", two, o).handler({"agent": "s3", "text": "Привет", "gist": "привет", "option": 2}))
     run(_tool("tell", E, o).handler({"text": "Дальше", "gist": "дальше"}))
     assert o.told == [("s3", "Привет", "привет", 2), ("s2", "Дальше", "дальше", 0)], "точный id; пусто — агент в фокусе"
+
+
+def test_agent_by_part_of_id():
+    a = dict(E[0], id="37b11a5e-f794-4e4a-8723-172cbbf96ea7")
+    b = dict(E[1], id="37b2c0de-0000-4e4a-8723-000000000000")
+    o = FakeOrders()
+    run(_tool("tell", [a, b], o).handler({"agent": "37b11a5e", "text": "Привет", "gist": "привет"}))
+    assert o.told == [(a["id"], "Привет", "привет", 0)], "префикс id"
+    r = run(_tool("agent_feed", [a, b], o).handler({"agent": "F794"}))["content"][0]["text"]
+    assert r == "status: Читаю план", "часть id без учёта регистра"
+    e, why = pick_agent([a, b], "37b")
+    assert e is None and a["id"] in why and b["id"] in why
+    assert pick_agent([a, b], "почтов")[0] is a, "название раньше id"
 
 
 def _voice(oma, clk, text, n):

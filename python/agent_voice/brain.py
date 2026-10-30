@@ -140,34 +140,28 @@ def format_agents(entries, now) -> str:
                      for e in entries) or "Агентов нет."
 
 
-def find_entry(entries, query: str):
-    """Агент по id или по части названия/проекта без учёта регистра."""
-    q = (query or "").strip().lower()
-    if not q:
-        return None
-    return (next((e for e in entries if e["id"] == query.strip()), None)
-            or next((e for e in entries if q in e["title"].lower() or q in e["project"].lower()), None))
-
-
 def _text(t: str) -> dict:
     return {"content": [{"type": "text", "text": t}]}
 
 
 def pick_agent(entries, query: str):
-    """Агент для передачи: точный id, иначе единственный по части названия или проекта; пусто — в фокусе.
-    (агент, None) или (None, ответ мозгу) — задание не уходит случайному из двух."""
+    """Агент по запросу: точный id, иначе единственный по части названия или проекта, иначе по части id
+    (без учёта регистра); пусто — в фокусе. (агент, None) или (None, ответ мозгу) — задание не уходит
+    случайному из двух."""
     q = (query or "").strip()
     if not q:
         e = next((x for x in entries if x.get("focused")), None)
         return (e, None) if e else (None, "Нет агента в фокусе — назови, какому.")
-    e = next((x for x in entries if x["id"] == q), None)
-    if e:
-        return e, None
-    hits = [x for x in entries if q.lower() in x["title"].lower() or q.lower() in x["project"].lower()]
-    if len(hits) > 1:
-        return None, ("Под это подходят несколько агентов: " + "; ".join(f'{x["title"]} (id {x["id"]})' for x in hits)
-                      + ". Спроси пользователя, какому.")
-    return (hits[0], None) if hits else (None, "Агент не найден.")
+    ql = q.lower()
+    for hits in ([x for x in entries if x["id"] == q],
+                 [x for x in entries if ql in x["title"].lower() or ql in x["project"].lower()],
+                 [x for x in entries if ql in x["id"].lower()]):
+        if len(hits) > 1:
+            return None, ("Под это подходят несколько агентов: " + "; ".join(f'{x["title"]} (id {x["id"]})' for x in hits)
+                          + ". Спроси пользователя, какому.")
+        if hits:
+            return hits[0], None
+    return None, "Агент не найден."
 
 
 def oma_tools(snapshot, send, orders=None) -> list:
@@ -180,20 +174,18 @@ def oma_tools(snapshot, send, orders=None) -> list:
     @tool("agent_feed", "Лента последних статусов агента. agent — id из agents (названия повторяются; "
                         "подойдёт и часть названия или проекта).", {"agent": str})
     async def agent_feed(args):
-        e = find_entry(snapshot(), args.get("agent", ""))
+        e, why = pick_agent(snapshot(), args.get("agent", ""))
         if not e:
-            return _text("Агент не найден.")
+            return _text(why)
         return _text("\n".join(f'{l["kind"]}: {l["text"]}' for l in e["feed"]) or "Лента пуста.")
 
     @tool("agent_tail", "Конец переписки агента с пользователем. agent — id из agents (подойдёт и часть названия "
                         "или проекта); пусто — агент в фокусе.",
           {"type": "object", "properties": {"agent": {"type": "string"}}})
     async def agent_tail(args):
-        entries = snapshot()
-        q = args.get("agent", "")
-        e = find_entry(entries, q) if q.strip() else next((x for x in entries if x.get("focused")), None)
+        e, why = pick_agent(snapshot(), args.get("agent", ""))
         if not e:
-            return _text("Агент не найден." if q.strip() else "Нет агента в фокусе.")
+            return _text(why)
         return _text(transcript_tail(e.get("transcript") or "") or "Переписка недоступна.")
 
     @tool("selection", "Текст, выделенный пользователем мышью.", {})
@@ -271,7 +263,7 @@ class Brain:
         prompt = OMA_PROMPT
         if self.key.startswith("agent:"):
             aid = self.key[6:]
-            prompt = agent_prompt(find_entry(self.snapshot(), aid) or {"id": aid, "title": aid, "cwd": "?"})
+            prompt = agent_prompt(pick_agent(self.snapshot(), aid)[0] or {"id": aid, "title": aid, "cwd": "?"})
         client = ClaudeSDKClient(ClaudeAgentOptions(
             cwd=OMA_DIR, model=MODEL, system_prompt=prompt, tools=TOOLS, allowed_tools=TOOLS + OMA_TOOLS,
             mcp_servers={"oma": create_sdk_mcp_server("oma", tools=self.tools)}, strict_mcp_config=True,
