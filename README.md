@@ -129,6 +129,11 @@
 - Сокет `$XDG_RUNTIME_DIR/agent-speak.sock`, JSON-строки. Клиенту: строка состояния (в ней `talking`, `agents_voice`, `progress_digest`, `orb_pos`, `orb_over_fullscreen`, `trouble` — агентов со срочной проблемой сторожа), строка `{"agents":[…]}` (у агента `health` — слово сторожа, `ask` — вопрос с вариантами, который ждёт ответа), затем `bubble` (у пузыря агента — `agent`, id сессии; черновик `draft` с `hearing`, `me`), `chat`, `chat_delta`, `chats`. Сервису: `subscribe`, `set`, `say`, `read`, `stop`, `pause`, `oma` (команда Оме: `talk`, `cancel`, `ask`, `open`, `new`, `chats`, `listen` с `key`), от Омы — `voice`, `voice_state` (с `talking`), `hush`, `emit`; хуки — `agent-speak hook <вид>`.
 - Плагин Omarchy `predmaxim.agent-speak` (`plugin/`) — панель `keepLoaded`: орб, пузыри, окно.
 
+
+## Цвета
+
+Цвета состояний (красный) — свои, не из темы: в темах красный и жёлтый бывают любыми. `plugin/FixedColors.qml` берёт их из `~/.config/omarchy/predmaxim/palette.json` (`{"red": "#e5534b", …}`), без файла — цвет тревоги темы (`Color.urgent`).
+
 ## Установка и тесты
 
 `./install.sh` — сборка, сервис `systemd --user`, venv с Silero и voice-venv для Омы, ссылка на плагин. Плагин включается `omarchy plugin enable predmaxim.agent-speak`. Хуки Claude (`~/.claude/settings.json`: `Stop`, `UserPromptSubmit`, `Notification`, `MessageDisplay` → `agent-speak hook <вид>`, `PostToolUse` → `agent-speak hook post-tool-use` — подсказка про лимит, `SessionEnd` → `agent-speak hook session-end` — агент вышел сам, а не упал) и `notify` Codex (`~/.codex/config.toml`) подключаются вручную.

@@ -16,6 +16,8 @@ import "I18n.js" as I18n
 // keeps the current chat's key: Oma's chat lines apply only to that chat.
 Item {
   id: root
+  // Fixed status colours (FixedColors.qml): a theme's red can be any colour.
+  readonly property QtObject fixedColors: FixedColors {}
 
   property var link
   property var draft: null           // Oma's draft bubble, shown at the chat's end
@@ -379,7 +381,7 @@ Item {
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
               text: root.speech.waiting
-              color: Color.urgent
+              color: fixedColors.red
               font.family: root.font
               font.pixelSize: Style.font.displayLarge
               font.bold: true
@@ -578,7 +580,7 @@ Item {
                 width: Style.space(10)
                 height: width
                 radius: width / 2
-                color: ({ working: Color.accent, waiting: Color.urgent, done: Color.foreground })[agentRow.modelData.state] || Color.muted
+                color: ({ working: Color.accent, waiting: fixedColors.red, done: Color.foreground })[agentRow.modelData.state] || Color.muted
                 HoverHandler { id: dotHover }
                 PanelToolTip { visible: dotHover.hovered; text: root.tr(Model.stateLabel(agentRow.modelData.state)) }
               }
@@ -621,7 +623,7 @@ Item {
                   width: parent.width
                   textFormat: Text.PlainText
                   text: agentRow.modelData.health || ""
-                  color: Color.urgent
+                  color: fixedColors.red
                   font.family: root.font
                   font.pixelSize: Style.font.body
                   elide: Text.ElideRight
@@ -751,7 +753,7 @@ Item {
                     label: Qt.formatTime(new Date(modelData.at * 1000), "HH:mm")
                     body: modelData.text
                     images: modelData.images || []
-                    bodyColor: modelData.kind === "question" ? Color.urgent : root.fg
+                    bodyColor: modelData.kind === "question" ? fixedColors.red : root.fg
                   }
                 }
 
