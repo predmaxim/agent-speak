@@ -1,10 +1,9 @@
 //! ~/.config/agent-speak/config.toml; отсутствующие поля — по умолчанию.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(default)]
+#[derive(Serialize, Debug, Clone)]
 pub struct Config {
     pub speaker: String,
     pub rate: String,
@@ -110,12 +109,22 @@ impl Config {
         true
     }
 
-    pub fn load() -> Config {
-        std::fs::read_to_string(path()).ok().and_then(|s| toml::from_str(&s).ok()).unwrap_or_default()
+    /// Файл настроек; нет файла — умолчания. Не читается (битый TOML) — Err: прежние настройки остаются.
+    pub fn load() -> Result<Config, String> {
+        match std::fs::read_to_string(path()) {
+            Ok(s) => parse(&s),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     pub fn save(&self) {
         let p = path();
+        // файл, правленный руками, не читается — не затирать: правку пользователя исправляет он сам
+        if std::fs::read_to_string(&p).is_ok_and(|s| s.parse::<toml::Table>().is_err()) {
+            eprintln!("agent-speak: настройки не сохранены: {} не читается — исправь его", p.display());
+            return;
+        }
         let _ = std::fs::create_dir_all(p.parent().unwrap());
         // атомарно: наблюдатель не должен увидеть обрезанный файл
         let tmp = p.with_extension("toml.tmp");
@@ -125,6 +134,21 @@ impl Config {
     }
 }
 
+/// Текст config.toml: каждое значение проверяет тот же `set`, что и настройку из окна; неверное (hung_after = 0
+/// заставил бы сторожа жать Esc у всех работающих агентов) — умолчание ключа и строка в журнал. Старые ключи
+/// (их нет среди полей) — молча мимо. Битый TOML — Err.
+pub fn parse(text: &str) -> Result<Config, String> {
+    let table: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
+    let mut c = Config::default();
+    let known = serde_json::to_value(&c).map_err(|e| e.to_string())?;
+    for (key, value) in table.into_iter().filter(|(k, _)| known.get(k).is_some()) {
+        if !c.set(&key, &serde_json::to_value(&value).unwrap_or_default()) {
+            eprintln!("agent-speak: настройки: неверно {key} = {value}, беру {}", known[&key]);
+        }
+    }
+    Ok(c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,7 +156,7 @@ mod tests {
     #[test]
     fn defaults_and_partial_file() {
         // старый файл: mode и voice_last_agent больше не поля — игнорируются
-        let c: Config = toml::from_str("speaker = \"baya\"\nmode = \"auto\"\nvoice_last_agent = \"codex\"").unwrap();
+        let c = parse("speaker = \"baya\"\nmode = \"auto\"\nvoice_last_agent = \"codex\"").unwrap();
         assert_eq!(c.speaker, "baya");
         assert_eq!(c.rate, "medium");
         assert_eq!(
@@ -144,7 +168,7 @@ mod tests {
 
     #[test]
     fn old_config_keys_ignored() {
-        let c: Config = toml::from_str("read_intermediate = false\nmax_age_secs = 5\nspeaker = \"baya\"\n").unwrap();
+        let c = parse("read_intermediate = false\nmax_age_secs = 5\nremind_after = 15\nspeaker = \"baya\"\n").unwrap();
         assert_eq!(c.speaker, "baya");
     }
 
@@ -211,11 +235,22 @@ mod tests {
     }
 
     #[test]
+    fn file_values_checked_like_set() {
+        // hung_after = 0, вписанный руками, заставил бы сторожа жать Esc у всех работающих агентов
+        let c = parse("hung_after = 0\nwatch_every = 1\nspeaker = \"nobody\"\nrate = \"fast\"\nquiet_from = \"25:00\"").unwrap();
+        assert_eq!((c.hung_after, c.watch_every, c.speaker.as_str(), c.rate.as_str(), c.quiet_from.as_str()), (12, 60, "xenia", "fast", "23:00"));
+        assert!(parse("hung_after = ").is_err(), "битый файл — ошибка, а не умолчания");
+        let good = Config { speaker: "baya".into(), hung_after: 30, ..Config::default() };
+        let back = parse(&toml::to_string(&good).unwrap()).unwrap();
+        assert_eq!((back.speaker, back.hung_after), (good.speaker, good.hung_after), "сохранённое читается обратно");
+    }
+
+    #[test]
     fn watch_keys_default_and_validate() {
         use serde_json::json;
         let mut c = Config::default();
         assert_eq!((c.watch_every, c.hung_after, c.limit_threshold), (60, 12, 95));
-        let old: Config = toml::from_str("speaker = \"baya\"").unwrap();
+        let old = parse("speaker = \"baya\"").unwrap();
         assert_eq!((old.watch_every, old.hung_after), (60, 12), "старый файл без ключей сторожа");
         assert!(!c.set("hung_after", &json!(1)) && !c.set("limit_threshold", &json!(101)) && !c.set("watch_every", &json!(10)));
         assert!(!c.set("remind_after", &json!(15)), "повторов «ждёт ответа» больше нет");

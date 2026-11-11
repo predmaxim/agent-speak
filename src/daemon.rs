@@ -212,7 +212,10 @@ fn home() -> PathBuf {
 
 pub fn run() {
     let data = home().join(".local/share/agent-speak");
-    let cfg = Config::load();
+    let cfg = Config::load().unwrap_or_else(|e| {
+        eprintln!("agent-speak: настройки не прочитаны, беру умолчания: {e}");
+        Config::default()
+    });
     let runtime = PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()));
     let shared = Arc::new(Shared::new(Queue::new(), cfg.speaker.clone(), cfg.rate.clone()));
     let tts = Tts::new(
@@ -650,8 +653,14 @@ impl State {
 
     /// config.toml изменён (интерфейсом или руками) — применить без перезапуска.
     fn reload(&mut self) {
-        self.cfg = Config::load();
-        self.apply();
+        match Config::load() {
+            Ok(c) => {
+                self.cfg = c;
+                self.apply();
+            }
+            // недописанная правка руками или опечатка: прежние настройки, а не умолчания
+            Err(e) => eprintln!("agent-speak: настройки не прочитаны, остаются прежние: {e}"),
+        }
     }
 
     /// Настройки → поток воспроизведения и очередь, затем — подписчикам.
@@ -2223,6 +2232,22 @@ mod tests {
         let mut l = String::new();
         assert!(r.read_line(&mut l).is_err(), "неверный set ничего не рассылает: {l}");
         assert_eq!((st.cfg.speaker.as_str(), st.cfg.agents_voice), ("baya", true));
+    }
+
+    #[test]
+    fn broken_config_keeps_settings_and_file() {
+        let home = TempHome::new("cfg-broken");
+        let file = home.dir.join(".config/agent-speak/config.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let mut st = test_state();
+        std::fs::write(&file, "speaker = \"baya\"\nhung_after = 0\n").unwrap();
+        st.reload();
+        assert_eq!((st.cfg.speaker.as_str(), st.cfg.hung_after), ("baya", 12), "опасное значение — умолчание ключа");
+        std::fs::write(&file, "speaker = \"baya\"\nrate = ").unwrap(); // правка руками, недописанная
+        st.reload();
+        assert_eq!(st.cfg.speaker, "baya", "битый файл — прежние настройки, не умолчания");
+        st.on_msg(Msg::Set { key: "rate".into(), value: serde_json::json!("fast") });
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "speaker = \"baya\"\nrate = ", "битый файл не затирается");
     }
 
     #[test]
