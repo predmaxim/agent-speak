@@ -115,11 +115,12 @@ pub fn join_letters(names: &[&str]) -> String {
     names.join(" ")
 }
 
-/// Словарное «эн-пи-эм» — по буквам, если частей столько же, сколько букв («w» — «дабл-ю»): дефис → пробел.
-/// Слоги «+ан-тро-пик», «а-пи» и составное «веб-ст+орм» не трогаем — Silero читает их слитно.
+/// Словарное «эн-пи-эм» — по буквам, если частей столько же, сколько букв (или частей в их названиях: «w» — «дабл-ю»):
+/// дефис → пробел. Слоги «+ан-тро-пик», «а-пи» и составное «веб-ст+орм» не трогаем — Silero читает их слитно.
 fn spoken(word: &str, pron: &str) -> String {
     let parts = pron.split('-').count();
-    if parts >= 2 && (parts == word.len() || parts == word.len() + word.matches('w').count()) {
+    let names: usize = word.chars().map(|c| letter(c.to_ascii_lowercase()).split('-').count()).sum();
+    if parts >= 2 && (parts == word.chars().count() || parts == names) {
         pron.replace('-', " ")
     } else {
         pron.to_string()
