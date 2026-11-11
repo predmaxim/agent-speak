@@ -2648,3 +2648,20 @@ def test_failed_brain_queue_task_ends_thinking():
         await settle(oma)
     run(go())
     assert oma.conv.state == "listening" and not oma.conv.turn and "orders сломался" in warned[-1]
+
+
+def test_talk_after_viewing_agent_chat_brings_window_to_conversation():
+    # 2026-11-12 (ревью): клик по агенту только показывает его чат; разговор по орбу шёл в чат мозга, а окно
+    # оставалось на просмотренном — chat_delta разговора отсеивались по ключу, голосом сказанное в окне не видно
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    oma.brain.key = "chat:g"
+    oma.brain.messages = lambda k: []
+    oma.history = [{"role": "me", "text": "прошлое"}]
+
+    async def go():
+        await oma.command({"do": "open", "key": "agent:X"})
+        await oma.command({"do": "talk"})
+    run(go())
+    assert emitted[-1]["line"] == {"chat": {"key": "chat:g", "was": "*", "messages": [{"role": "me", "text": "прошлое"}]}}
+    assert oma.brain.key == "chat:g"

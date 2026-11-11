@@ -140,6 +140,8 @@ class Oma:
             await self.act(c.talk())  # слух — сразу: смена чата и выход прежнего claude начало фразы не задерживают
             if leave:
                 await self.switch(await self.general(), was="*")
+            elif c.active:  # окно могло смотреть другой чат (open только показывает) — оно идёт за разговором
+                self.emit({"chat": {"key": self.brain.key, "was": "*", "messages": self.history}})
             if c.active:
                 self.to_brain(self.brain.warm)  # claude поднимается, пока пользователь говорит
         elif do == "cancel":
