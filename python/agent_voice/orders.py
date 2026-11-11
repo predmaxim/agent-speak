@@ -161,15 +161,18 @@ class Orders:
     async def tell(self, entry, text, gist, option=0):
         n, p, ask = self.n, entry["project"], asked(entry)
         d = self.gate(text, ask, option)  # до чтения экрана: по реплике хода, в котором мозг вызвал tell
-        item, question = chosen(ask, option), f"Передать проекту {p}: {gist}?"
+        item, question, also = chosen(ask, option), f"Передать проекту {p}: {gist}?", ""
         expect = item.split(" — ")[0]  # метка варианта, как её видел мозг: tell жмёт, только если в вызове агента та же
         if option and ask.startswith(PLAN):  # у плана метка пункта — только на экране: читаем до вопроса и называем её
             ok, out = await self.run("menu", entry["id"])
             item = expect = menu_item(out, option) if ok else ""
             if not item:
                 return f"Не передано: {out if not ok else f'на экране нет пункта {option}'}. Скажи пользователю коротко, что не вышло."
-            question = f"Одобрить план проекта {p} — пункт «{item}»?"
-        shown = f"Передам проекту {p}: " + (f"вариант {option} — {item}" if option else f"«{text}»")
+            if item.startswith("Yes"):  # одобрение — пункты «Yes…», как их различает tell службы
+                question = f"Одобрить план проекта {p} — пункт «{item}»?"
+            else:  # не одобрение: «Tell Claude what to change» уходит с текстом правок — их смысл в вопросе, текст в окне
+                question, also = f"Выбрать пункт плана проекта {p} «{item}»: {gist}?", f": «{text}»" if text.strip() else ""
+        shown = f"Передам проекту {p}: " + (f"вариант {option} — {item}{also}" if option else f"«{text}»")
         args = ("tell", entry["id"], str(option), text) + ((expect,) if option and expect else ())
         return await self._order(args, d, n, f"Передала проекту {p}: {gist}.",
                                  f"Передано проекту {p}. Скажи пользователю одной фразой, кому и что: "

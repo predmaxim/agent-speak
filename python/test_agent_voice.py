@@ -2976,6 +2976,16 @@ def test_plan_approval_names_the_screen_option_before_asking():
     assert calls[-1] == ("tell", "s1", "1", "", "Yes, and use auto mode")
 
 
+def test_plan_pick_that_is_not_approval_is_not_called_approval():
+    # «Tell Claude what to change» — не одобрение: вопрос называет пункт и смысл правок, в окне — текст, который уйдёт
+    o, calls, asked_ = _plan_orders()
+    o.turn(True, "скажи ему назвать файл b.txt")
+    run(o.tell(PLAN, "Назови файл b.txt", "назвать файл b.txt", option=3))
+    assert asked_ == ["Выбрать пункт плана проекта omarchy-mail «Tell Claude what to change»: назвать файл b.txt? Скажи: да, передай."]
+    assert "Назови файл b.txt" in o.pending["shown"] and "Одобрить" not in asked_[0]
+    assert o.pending["args"] == ("tell", "s1", "3", "Назови файл b.txt", "Tell Claude what to change")
+
+
 def test_plan_approval_without_menu_is_not_asked():
     o, calls, asked_ = _plan_orders(menu=(False, "на экране агента нет меню"))
     o.turn(True, "одобряю план")

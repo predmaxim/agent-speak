@@ -93,7 +93,7 @@ fn typed(key: Step, text: &str) -> Vec<Step> {
 /// Как передать ответ агенту: вызов, который ждёт пользователя (меню), — клавишами; иначе — текстом в поле ввода.
 /// option — пункт меню (0 — свой ответ текстом); expect — его метка, как её видел спросивший (пусто — не сверять).
 /// Цифра жмётся, только если меню на экране то самое: метка пункта совпала с вариантом вызова, у плана — с expect
-/// (без него — только пункт 1 «Yes…»). Второе в ответе — метка нажатого пункта с экрана (у плана «Yes, and use auto mode» — Ома её зачитывает),
+/// (без него — только пункт 1 «Yes…»); пункт плана «Tell Claude what to change» — с текстом, как option 0. Второе в ответе — метка нажатого пункта с экрана (у плана «Yes, and use auto mode» — Ома её зачитывает),
 /// пусто — пункт не выбирали. Экран не читается только у ответа текстом без вызова в полёте.
 pub fn steps(call: Option<&Value>, text: &str, option: usize, expect: &str, screen: impl FnOnce() -> Result<String, String>) -> Result<(Vec<Step>, String), String> {
     let text = text.trim();
@@ -130,7 +130,12 @@ pub fn steps(call: Option<&Value>, text: &str, option: usize, expect: &str, scre
                         "" => return Err(format!("пункт {o} плана — только с его меткой с экрана")),
                         e => e,
                     };
-                    Ok((vec![press(&screen, o, want)?], want.to_string()))
+                    match want {
+                        // свой отзыв — поле ввода, как у option 0: одна цифра оставила бы агента в пустом поле
+                        PLAN_FEEDBACK if text.is_empty() => Err("пустой ответ".into()),
+                        PLAN_FEEDBACK => Ok((typed(press(&screen, o, want)?, text), want.to_string())),
+                        _ => Ok((vec![press(&screen, o, want)?], want.to_string())),
+                    }
                 }
             }
         }
@@ -294,6 +299,10 @@ mod tests {
         assert!(steps(Some(&plan), "", 2, "Yes, and use auto mode", screen).unwrap_err().contains("не жму"), "метка — другого пункта");
         assert!(steps(Some(&plan), "", 2, "", screen).is_err(), "не первый пункт — только с меткой, как его видел спросивший");
         assert!(steps(Some(&plan), "", 4, "Yes", screen).unwrap_err().contains("не жму"), "пункта нет на экране");
+        // «Tell Claude what to change» — поле ввода: цифра, текст, Enter, как у option 0; без текста агент остался бы в пустом поле
+        assert_eq!(steps(Some(&plan), "Назови файл b.txt", 3, PLAN_FEEDBACK, screen).unwrap(),
+            (vec![Step::Key(Key::Digit(3)), Step::Pause(500), Step::Type("Назови файл b.txt".into()), Step::Key(Key::Enter)], PLAN_FEEDBACK.to_string()));
+        assert!(steps(Some(&plan), " ", 3, PLAN_FEEDBACK, screen).unwrap_err().contains("пустой"));
     }
 
     #[test]
