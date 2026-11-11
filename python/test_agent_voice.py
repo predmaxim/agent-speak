@@ -1745,7 +1745,7 @@ def test_own_voice_through_speakers_is_not_barge_in():
     clk, cv = _speaking_through_speakers("Могу смотреть, что делают твои агенты, и запускать новых.")
     assert cv.speech_start(1) == [], "её же голос в микрофоне — не повод обрывать её"
     assert cv.phrase("Могу смотреть.", 1) == [] and cv.draft == ""
-    acts = cv.audio(False)
+    acts = cv.audio(False, clk.t + 0.7)  # played_at: канал pw-cat доиграет через 0,7 с
     clk.t += 0.5
     cv.speech_start(2)  # хвост pw-cat ещё играет
     clk.t += 0.5
@@ -1806,12 +1806,11 @@ ASK = "Передать проекту почта: запустить тесты
 
 def test_confirmation_after_her_question_is_not_echo():
     # 2026-11-11: через динамики «Да, передай» в первые 3 с после её «…Скажи: да, передай» выбрасывалось как эхо —
-    # окно эха считалось от распознавания; теперь — от начала фразы против конца её звука (хвост pw-cat, TAIL)
-    from agent_voice.conversation import TAIL
+    # окно эха считалось от распознавания; теперь — от начала фразы против конца её звука (played_at службы)
     for answer in ("Да, передай.", "Подтверждаю пуш."):
         clk, cv = _speaking_through_speakers(ASK + " Это пуш. Скажи: подтверждаю пуш.")
-        cv.audio(False)
-        clk.t += TAIL + 0.2  # она смолкла, хвост доигран, пользователь заговорил
+        cv.audio(False, clk.t + 0.7)
+        clk.t += 0.9  # она смолкла, канал доигран, пользователь заговорил
         cv.speech_start(5)
         clk.t += 1.5  # распознано позже
         cv.phrase(answer, 5)
@@ -1824,7 +1823,7 @@ def test_echo_of_her_question_still_dropped():
     # её же голос, начатый, пока она звучит (и в хвосте pw-cat), — эхо, как прежде: подтверждением быть не может
     clk, cv = _speaking_through_speakers(ASK)
     cv.speech_start(5)
-    cv.audio(False)
+    cv.audio(False, clk.t + 0.7)
     clk.t += 2
     assert cv.phrase("Скажи: да, передай.", 5) == [] and cv.draft == ""
     cv.speech_start(6, at=clk.t - 1.5)  # началась в хвосте, а распознана позже
@@ -1840,7 +1839,7 @@ def test_words_while_thinking_through_speakers_interrupt():
     cv.echo = True
     cv.talk(); cv.speech_start(1); cv.phrase("как дела у агентов", 1)
     clk.t += SEND_PAUSE; cv.tick()
-    cv.tool("mcp__oma__agent_feed"); cv.audio(True); cv.audio(False)
+    cv.tool("mcp__oma__agent_feed"); cv.audio(True); cv.audio(False, clk.t + 0.7)
     assert cv.state == "thinking"
     clk.t += 0.5
     cv.speech_start(2)
@@ -1887,23 +1886,24 @@ def test_echo_cut_phrase_skips_whole_retranscription():
 
 
 def test_ear_keeps_echo_cancelled_stream_through_playback_tail():
-    # демон шлёт «audio false», когда записал последний кусок, а pw-cat доигрывает ещё ~0,7 с:
-    # сырой микрофон в это время слышит её голос без эхоподавления
+    # служба шлёт «не говорит», когда записала последний кусок, а pw-cat доигрывает канал до played_at:
+    # сырой микрофон в это время слышал бы её голос без эхоподавления
     sent, emitted = [], []
     clk, oma = _oma(sent, emitted)
     oma.ear.speaking = False
+    tail = 0.2
 
     async def go():
-        await oma.event(("audio", True))
+        await oma.event(("audio", True, 0.0))
         assert oma.ear.speaking
-        await oma.event(("audio", False))
-        assert oma.ear.speaking, "хвост pw-cat ещё звучит"
-        await asyncio.sleep(main_TAIL() / 2)
-        await oma.event(("audio", True))
-        await oma.event(("audio", False))
-        await asyncio.sleep(main_TAIL() * 0.75)
+        await oma.event(("audio", False, time.monotonic() + tail))
+        assert oma.ear.speaking, "канал pw-cat ещё звучит"
+        await asyncio.sleep(tail / 2)
+        await oma.event(("audio", True, 0.0))
+        await oma.event(("audio", False, time.monotonic() + tail))
+        await asyncio.sleep(tail * 0.75)
         assert oma.ear.speaking, "новая фраза продлила хвост"
-        await asyncio.sleep(main_TAIL() / 2)
+        await asyncio.sleep(tail / 2)
         assert not oma.ear.speaking
     run(go())
 
@@ -1929,11 +1929,6 @@ def test_mic_target_forced_to_speakers(monkeypatch):
         return SimpleNamespace(stdout=out)
     assert context.mic_target(fake_run) == ("", False, ""), "наушники в ушах — их микрофон"
     assert context.mic_target(fake_run, out=True) == ("alsa_input.pci", True, "mic_aec"), "спросила в динамики — сырой ноутбука, её голос в нём есть"
-
-
-def main_TAIL():
-    from agent_voice import __main__ as m
-    return m.TAIL
 
 
 def test_ear_hears_echo_cancelled_stream_while_oma_speaks(monkeypatch):
@@ -2217,10 +2212,9 @@ def test_brain_knows_its_own_sound():
     oma.conv.set_quiet(True)
     assert "выключен" in run(ask("где звук"))
     oma.conv.set_quiet(False)
-    run(oma.command({"do": "talk"}))
-    oma.conv.echo = True
+    run(oma.event(("out", "speakers")))  # куда идёт голос — out службы, и при закрытом слухе
     assert "в динамиках" in run(ask("где звук"))
-    oma.conv.echo = False
+    run(oma.event(("out", "headphones")))
     assert "в наушниках" in run(ask("а теперь"))
 
 
@@ -2731,3 +2725,26 @@ def test_brain_takes_snapshot_from_turn_answer(monkeypatch, tmp_path):
     run(go())
     assert "id s1, в фокусе" in made[0].sent[0] and "id s2, в фокусе" not in made[0].sent[0]
     assert "id s2, в фокусе" in made[0].sent[1], "ответа нет — снимок подписки"
+
+
+def test_status_line_events_only_on_change_and_sound_end_by_played_at():
+    # реплика без звука (только код или эмодзи): служба шлёт played_at «сейчас», а speaking так и не загорается —
+    # конец звука Ома видит по смене played_at, иначе осталась бы в «говорю»
+    from agent_voice.__main__ import status_events
+    last = {}
+    line = lambda speaking, played, out="speakers", quiet=False: {"running": True, "speaking": speaking, "played_at": played,
+                                                                  "out": out, "quiet": quiet}
+    assert status_events(line(False, 0.0), last) == [("audio", False, 0.0), ("quiet", False), ("out", "speakers")]
+    assert status_events(line(False, 0.0), last) == [], "повтор «не говорит» до начала звука не заканчивает ответ"
+    assert status_events(line(True, 0.0), last) == [("audio", True, 0.0)]
+    assert status_events(line(True, 0.0, "headphones"), last) == [("out", "headphones")]
+    assert status_events(line(False, 12.5, "headphones"), last) == [("audio", False, 12.5)]
+    assert status_events(line(False, 13.0, "headphones"), last) == [("audio", False, 13.0)], "реплика без звука"
+
+
+def test_reply_without_sound_ends_speaking():
+    clk, cv = _conv()
+    cv.talk(); cv.ask("покажи код")
+    cv.delta("`cargo test`. "); cv.done()
+    assert cv.state == "speaking"
+    assert cv.audio(False, clk.t) == [("state", "listening")], "служба: звука не было — played_at сейчас"

@@ -13,7 +13,7 @@ import traceback
 
 from . import link
 from .context import foreign_capture, locked, mic_outputs, on_ac
-from .conversation import TAIL, Conversation
+from .conversation import Conversation
 from .orders import Orders
 from .turn import SmartTurn
 
@@ -32,6 +32,21 @@ def notify(text):
     with contextlib.suppress(OSError):
         subprocess.Popen(["notify-send", "-t", "4000", "-a", "Озвучка", "Ома", text],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def status_events(d, last):
+    """Строка состояния службы → события Омы, только смены: повтор «не говорит» до начала звука не должен закончить
+    ответ. played_at сменился без «говорит» — реплика без звука (только код или эмодзи): конец звука — сейчас.
+    shortcut: такая реплика прямо перед звучащей (служба ещё не взяла следующую) закончит «говорю» раньше звука;
+    точнее — номер реплики в ответе службы."""
+    speaking, played = bool(d.get("speaking")), d.get("played_at", 0.0)
+    evs = [("audio", speaking, played)] if last.get("speaking") != speaking or (
+        not speaking and last.get("played_at") != played) else []
+    for field, v in (("quiet", bool(d.get("quiet"))), ("out", d.get("out"))):
+        if last.get(field) != v:
+            evs.append((field, v))
+    last.update(speaking=speaking, played_at=played, quiet=bool(d.get("quiet")), out=d.get("out"))
+    return evs
 
 
 def kill_children():
@@ -64,6 +79,7 @@ class Oma:
         self.n = 0         # номер ответа: пузырь oma-<pid>-<n>
         self.tasks = set()
         self.sound = 0     # номер события audio: хвост pw-cat отсчитывается от последнего
+        self.out = None    # куда идёт её голос (out службы): speakers | headphones
         self.notified = (None, 0.0)  # последнее уведомление: текст, время
 
     def _show(self, text):
@@ -199,9 +215,9 @@ class Oma:
         chats = await asyncio.to_thread(self.brain.chats)
         return chats[0]["key"] if chats and time.time() - chats[0]["updated"] < STALE_HOURS * 3600 else "new"
 
-    async def _tail_over(self, sound):
-        await asyncio.sleep(TAIL)
-        if self.sound == sound:  # хвост pw-cat доиграл, новой речи не было — дальше сырой микрофон
+    async def _tail_over(self, sound, until):
+        await asyncio.sleep(max(0.0, until - time.monotonic()))  # played_at — те же часы CLOCK_MONOTONIC
+        if self.sound == sound:  # канал pw-cat доиграл, новой речи не было — дальше сырой микрофон
             self.ear.speaking = False
 
     async def event(self, ev):
@@ -239,16 +255,19 @@ class Oma:
             self.emit({"chat": {"key": self.brain.key, "messages": self.history}})
             self.emit({"chats": await asyncio.to_thread(self.brain.chats)})
         elif kind == "audio":
-            # её голос звучит: в динамиках слух — на входе с эхоподавлением; «смолкла» демон шлёт, записав
-            # последний кусок, а pw-cat доигрывает ещё ~0,7 с — сырой микрофон слышал бы их без эхоподавления
+            # её голос звучит: в динамиках слух — на входе с эхоподавлением; «смолкла» служба шлёт, записав
+            # последний кусок, а pw-cat доигрывает канал до played_at — сырой микрофон слышал бы его без эхоподавления
+            until = ev[2] if len(ev) > 2 else None
             self.sound += 1
             if ev[1]:
                 self.ear.speaking = True
             else:
-                self.bg(self._tail_over(self.sound))
-            await self.act(c.audio(ev[1]))
+                self.bg(self._tail_over(self.sound, until or 0.0))
+            await self.act(c.audio(ev[1], until))
         elif kind == "quiet":
             await self.act(c.set_quiet(ev[1]))
+        elif kind == "out":
+            self.out = ev[1]
         elif kind == "mic":
             self.ear.paused = ev[1]  # микрофон пишет другой (voxtype и т. п.) — кадры не слушаем
             await self.act(c.mic_busy(ev[1]))
@@ -301,12 +320,11 @@ class Oma:
         return whole or text
 
     def _sound(self):
-        """Её звук одной строкой для мозга (тихий режим — из строки состояния демона, куда — по входу слуха)."""
+        """Её звук одной строкой для мозга: тихий режим и куда идёт голос — из строки состояния службы (quiet, out)."""
         if self.conv.quiet:
             return "Твой голос: выключен (тихий режим), ответы только текстом в окне."
-        if not getattr(self.ear, "open", False):
-            return "Твой голос: включён."
-        return f"Твой голос: включён, звучит {'в динамиках' if self.conv.echo else 'в наушниках'}."
+        where = {"speakers": "в динамиках", "headphones": "в наушниках"}.get(self.out)
+        return f"Твой голос: включён, звучит {where}." if where else "Твой голос: включён."
 
     async def _deliver(self, text, ctx, voiced, parts, pre, sound, n):
         """Реплика мозгу или подтверждение поручения, которое передаёт код, — в очереди к мозгу; n — номер её хода."""
@@ -430,12 +448,9 @@ async def main():
 
         last = {}
 
-        def on_status(d):  # только смены: повтор «не говорит» до начала звука не должен закончить ответ
-            for field, kind in (("speaking", "audio"), ("quiet", "quiet")):
-                v = bool(d.get(field))
-                if last.get(field) != v:
-                    last[field] = v
-                    events.put_nowait((kind, v))
+        def on_status(d):
+            for ev in status_events(d, last):
+                events.put_nowait(ev)
 
         async def daemon():
             with contextlib.suppress(OSError):  # демона ещё нет или он закрыл сокет — keep переподключит

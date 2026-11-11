@@ -28,8 +28,6 @@ ANSWER_WORDS = {"да", "ага", "угу", "ок", "окей", "тут", "я", 
 ANSWER_MAX = 8  # слов: ответ Оме короткий; длинное — разговор в комнате, в нём «да» и «нет» есть всегда
 ANSWER_STEMS = ("здес", "слуша", "говор", "рассказ", "давай", "нов", "потом", "позж", "минут", "секунд", "сейчас",
                 "подожд", "занят", "отбо", "отмен", "стоп", "ома", "хорош", "ладн")
-# Хвост её звука после «смолкла» демона (speaker::TAIL): pw-cat доигрывает буфер ~0,7 с — её голос ещё в динамиках
-TAIL = 1.0
 ECHO_SHARE = 0.6    # доля слов фразы из её же речи, с которой фраза — эхо
 ECHO_RUN = 3        # слов её речи по порядку в начале фразы, с которых это начало — эхо
 # Что она делает, пока мозг занят инструментом или раздумьем: тишина хуже повтора; presence — мгновенный, без слова
@@ -130,7 +128,7 @@ class Conversation:
         self.window = None     # разговор открыт окном ответа: {kind, said, first, close}
         self.echo = False      # слух — через эхоподавление (Ома в динамиках): её голос просачивается в микрофон
         self.said = ""         # что она сказала в этом ответе — по нему узнаётся эхо
-        self.spoke_at = None   # когда смолк её звук
+        self.played_at = 0.0   # когда кончается (кончился) звук службы — её played_at, часы time.monotonic()
         self.voiced = False    # последняя реплика сказана голосом, не набрана: опасное по ней — только с подтверждением
         self.asked = False     # в этом ходе код спросил подтверждение поручения: дальше ход молчит
         self.hold = ""         # конец текста, похожий на начало метки MORE: ждёт следующей дельты
@@ -279,10 +277,10 @@ class Conversation:
         return self._stop_turn() + self._drop() + self._send(t, voiced=False)
 
     def _echoing(self, at):
-        """В момент at её голос звучал из динамиков, и слух его слышал: она говорит или хвост pw-cat (TAIL) после
-        «смолкла» ещё не доигран. Речь, начатая после конца её звука, — не эхо, даже если это её же слова
+        """В момент at её голос звучал из динамиков, и слух его слышал: она говорит или канал pw-cat после «смолкла»
+        ещё не доигран (played_at службы). Речь, начатая после конца её звука, — не эхо, даже если это её же слова
         («Скажи: да, передай» → «Да, передай»)."""
-        playing = self.audio_busy or self.state == "speaking" or (self.spoke_at is not None and at < self.spoke_at + TAIL)
+        playing = self.audio_busy or self.state == "speaking" or at < self.played_at
         return self.echo and bool(self.said) and playing
 
     def speech_start(self, n, at=None):
@@ -446,12 +444,14 @@ class Conversation:
         phrase = FILLERS.get(name, "Секунду.")
         return self._discard() + self._speak([phrase]) if phrase else []
 
-    def audio(self, busy):
+    def audio(self, busy, until=None):
+        """Звук службы: busy — звучит; until — played_at, когда он кончается (без него — сейчас). «Не звучит» без
+        «звучит» — реплика, в которой нечего сказать вслух: служба отдала конец звука сразу."""
         self.audio_busy = busy
         if self.suspended:
             return []  # её пауза — не конец речи
         if not busy:
-            self.spoke_at = self.clock()
+            self.played_at = self.clock() if until is None else until
         if not busy and self.state == "speaking":
             return self.end() if self._closing() else self._after_sound()
         return []
