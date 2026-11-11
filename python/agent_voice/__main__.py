@@ -35,17 +35,16 @@ def notify(text):
 
 
 def status_events(d, last):
-    """Строка состояния службы → события Омы, только смены: повтор «не говорит» до начала звука не должен закончить
-    ответ. played_at сменился без «говорит» — реплика без звука (только код или эмодзи): конец звука — сейчас.
-    shortcut: такая реплика прямо перед звучащей (служба ещё не взяла следующую) закончит «говорю» раньше звука;
-    точнее — номер реплики в ответе службы."""
-    speaking, played = bool(d.get("speaking")), d.get("played_at", 0.0)
-    evs = [("audio", speaking, played)] if last.get("speaking") != speaking or (
-        not speaking and last.get("played_at") != played) else []
+    """Строка состояния службы → события Омы, только смены. Её звук — audio(speaking, played_at, voiced): смена
+    speaking или, пока служба молчит, рост voiced (реплика без звука — только код или эмодзи: звука не будет, played_at
+    прежний). Конец её речи решает Ома по voiced, а не по «не говорит»: повтор «не говорит» до начала звука — не конец."""
+    speaking, played, voiced = bool(d.get("speaking")), d.get("played_at"), d.get("voiced")
+    evs = [("audio", speaking, played, voiced)] if last.get("speaking") != speaking or (
+        not speaking and last.get("voiced") != voiced) else []
     for field, v in (("quiet", bool(d.get("quiet"))), ("out", d.get("out"))):
         if last.get(field) != v:
             evs.append((field, v))
-    last.update(speaking=speaking, played_at=played, quiet=bool(d.get("quiet")), out=d.get("out"))
+    last.update(speaking=speaking, voiced=voiced, quiet=bool(d.get("quiet")), out=d.get("out"))
     return evs
 
 
@@ -79,6 +78,7 @@ class Oma:
         self.n = 0         # номер ответа: пузырь oma-<pid>-<n>
         self.tasks = set()
         self.sound = 0     # номер события audio: хвост pw-cat отсчитывается от последнего
+        self.says = 0      # её реплик (voice), принятых сокетом службы: «говорю» кончается, когда служба отработала все (voiced)
         self.out = None    # куда идёт её голос (out службы): speakers | headphones
         self.notified = (None, 0.0)  # последнее уведомление: текст, время
         self.ask_id = None  # id набранной реплики из окна, пока команда ask идёт: её строка в чате вернётся с ним
@@ -262,12 +262,14 @@ class Oma:
             # её голос звучит: в динамиках слух — на входе с эхоподавлением; «смолкла» служба шлёт, записав
             # последний кусок, а pw-cat доигрывает канал до played_at — сырой микрофон слышал бы его без эхоподавления
             until = ev[2] if len(ev) > 2 else None
+            voiced = ev[3] if len(ev) > 3 else None  # нет счётчика — конец её речи по «не говорит», как раньше
             self.sound += 1
             if ev[1]:
                 self.ear.speaking = True
             else:
                 self.bg(self._tail_over(self.sound, until or 0.0))
-            await self.act(c.audio(ev[1], until))
+            # >=, а не ==: лишняя засчитанная реплика оставила бы её в «говорю» навсегда, а не на один ответ раньше
+            await self.act(c.audio(ev[1], until, voiced is None or voiced >= self.says))
         elif kind == "quiet":
             await self.act(c.set_quiet(ev[1]))
         elif kind == "out":
@@ -383,7 +385,8 @@ class Oma:
             elif k == "halt":  # «отбой»: замолчать совсем — и её ответ, и чтение, и новости
                 self.send({"cmd": "stop"})
             elif k == "say":
-                self.send({"cmd": "voice", "text": a[1]})
+                if self.send({"cmd": "voice", "text": a[1]}) is not False:  # не дошла — служба её и не засчитает
+                    self.says += 1
             elif k == "show":
                 self._show(a[1])
             elif k == "draft":

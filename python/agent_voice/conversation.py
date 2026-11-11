@@ -454,15 +454,16 @@ class Conversation:
         phrase = FILLERS.get(name, "Секунду.")
         return self._discard() + self._speak([phrase]) if phrase else []
 
-    def audio(self, busy, until=None):
-        """Звук службы: busy — звучит; until — played_at, когда он кончается (без него — сейчас). «Не звучит» без
-        «звучит» — реплика, в которой нечего сказать вслух: служба отдала конец звука сразу."""
+    def audio(self, busy, until=None, done=True):
+        """Звук службы: busy — звучит; until — played_at, когда он кончается (без него — сейчас); done — все её реплики
+        служба отработала (voiced: записаны, оборваны или звука не будет): «не звучит», пока её реплика ещё в очереди
+        службы, речь не кончает, а реплика без звука — кончает."""
         self.audio_busy = busy
         if self.suspended:
             return []  # её пауза — не конец речи
         if not busy:
             self.played_at = self.clock() if until is None else until
-        if not busy and self.state == "speaking":
+        if not busy and done and self.state == "speaking":
             return self.end() if self._closing() else self._after_sound()
         return []
 

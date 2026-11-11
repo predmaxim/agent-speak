@@ -2736,19 +2736,21 @@ def test_brain_takes_snapshot_from_turn_answer(monkeypatch, tmp_path):
     assert "id s2, в фокусе" in made[0].sent[1], "ответа нет — снимок подписки"
 
 
-def test_status_line_events_only_on_change_and_sound_end_by_played_at():
-    # реплика без звука (только код или эмодзи): служба шлёт played_at «сейчас», а speaking так и не загорается —
-    # конец звука Ома видит по смене played_at, иначе осталась бы в «говорю»
+def test_status_line_events_only_on_change_and_her_sound_by_voiced():
+    # «не говорит» до начала её звука ответ не заканчивает; реплика без звука (только код или эмодзи) звука не даёт —
+    # служба поднимает voiced, и это событие, даже если played_at прежний (хвост прежней фразы ещё в канале pw-cat)
     from agent_voice.__main__ import status_events
     last = {}
-    line = lambda speaking, played, out="speakers", quiet=False: {"running": True, "speaking": speaking, "played_at": played,
-                                                                  "out": out, "quiet": quiet}
-    assert status_events(line(False, 0.0), last) == [("audio", False, 0.0), ("quiet", False), ("out", "speakers")]
-    assert status_events(line(False, 0.0), last) == [], "повтор «не говорит» до начала звука не заканчивает ответ"
-    assert status_events(line(True, 0.0), last) == [("audio", True, 0.0)]
-    assert status_events(line(True, 0.0, "headphones"), last) == [("out", "headphones")]
-    assert status_events(line(False, 12.5, "headphones"), last) == [("audio", False, 12.5)]
-    assert status_events(line(False, 13.0, "headphones"), last) == [("audio", False, 13.0)], "реплика без звука"
+    line = lambda speaking, voiced, played=0.0, out="speakers", quiet=False: {
+        "running": True, "speaking": speaking, "voiced": voiced, "played_at": played, "out": out, "quiet": quiet}
+    assert status_events(line(False, 0), last) == [("audio", False, 0.0, 0), ("quiet", False), ("out", "speakers")]
+    assert status_events(line(False, 0), last) == [], "повтор «не говорит» — не событие"
+    assert status_events(line(True, 0), last) == [("audio", True, 0.0, 0)]
+    assert status_events(line(True, 0, 0.0, "headphones"), last) == [("out", "headphones")]
+    assert status_events(line(False, 1, 12.5, "headphones"), last) == [("audio", False, 12.5, 1)]
+    assert status_events(line(False, 2, 12.5, "headphones"), last) == [("audio", False, 12.5, 2)], "реплика без звука в хвосте"
+    assert status_events({"running": True, "speaking": False}, {})[0] == ("audio", False, None, None), \
+        "played_at нет — None (конец звука — сейчас), а не 0.0"
 
 
 def test_reply_without_sound_ends_speaking():
@@ -2756,8 +2758,39 @@ def test_reply_without_sound_ends_speaking():
     cv.talk(); cv.ask("покажи код")
     cv.delta("`cargo test`. "); cv.done()
     assert cv.state == "speaking"
-    assert cv.audio(False, clk.t) == [("state", "listening")], "служба: звука не было — played_at сейчас"
+    assert cv.audio(False, clk.t, done=False) == [] and cv.state == "speaking", "её реплика у службы ещё не отработана"
+    assert cv.audio(False, clk.t) == [("state", "listening")], "служба: реплика отработана, звука не было"
 
+
+def test_reply_without_sound_in_tail_of_previous_phrase_ends_speaking():
+    # 2026-11-12 (ревью): «🙂» пришла, пока pw-cat доигрывал «Смотрю агентов.» (busy погас, played_at впереди): строка
+    # службы не менялась, и Ома оставалась в «говорю» с открытым микрофоном. Конец её речи — по voiced: все её реплики
+    # служба отработала; «не говорит» до начала её звука ответ не заканчивает
+    from agent_voice.__main__ import status_events
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    last = {}
+
+    async def status(speaking, voiced, played):
+        for ev in status_events({"running": True, "speaking": speaking, "voiced": voiced, "played_at": played}, last):
+            await oma.event(ev)
+
+    async def go():
+        await status(False, 0, 0.0)
+        await oma.command({"do": "talk"})
+        oma.conv.ask("как дела у агентов")
+        await oma.event(("tool", "mcp__oma__agents"))
+        await status(False, 0, 0.0)
+        assert oma.conv.state == "speaking", "её «Смотрю агентов.» ещё не зазвучала"
+        await status(True, 0, 0.0)
+        await status(False, 1, 100.7)
+        assert oma.conv.state == "thinking"
+        await oma.event(("delta", "🙂"))
+        await oma.event(("done", None))
+        assert {"cmd": "voice", "text": "🙂"} in sent and oma.conv.state == "speaking"
+        await status(False, 2, 100.7)
+    run(go())
+    assert oma.conv.state == "listening" and oma.conv.played_at == 100.7
 
 
 HERE = "Эй, ты тут? Есть новости."
