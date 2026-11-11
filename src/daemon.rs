@@ -42,6 +42,7 @@ enum Event {
     Tell(Box<dyn FnOnce() + Send>), // ответ агенту от Омы — в поток действий; ответ CLI шлёт само дело
     Turn(Sender<String>), // ход мозга Омы: свежий фокус, ответ — строка агентов
     Bt(&'static str, bool), // режим наушников переключён (headset | music) и переключала ли его Ома
+    Outs(String, String), // выходы звука сменились: выход по умолчанию, динамики ноутбука — от потока `pactl subscribe`
 }
 
 /// Микрофон наушников для «Ты тут?»: ушёл в наушниках — ответ услышит только он.
@@ -192,8 +193,9 @@ struct State {
     welcome: bool,              // вернулся после долгого отсутствия: следующие новости — с приветствием и обзором
     night_keep: bool,           // тишина настала, пока пользователя нет: накопленное ждёт утра
     facts_src: Box<dyn Fn() -> Option<String>>, // снимок присутствия при старте; в тестах — подделка
-    speakers: Box<dyn Fn() -> String>, // динамики ноутбука для Омы, пока наушники вынуты; в тестах — подделка
-    bt_out: Box<dyn Fn() -> bool>, // звук по умолчанию — в Bluetooth-наушники; в тестах — подделка
+    speakers: String,     // динамики ноутбука для Омы, пока наушники вынуты (Event::Outs)
+    default_sink: String, // выход звука по умолчанию (Event::Outs); bluez_… — Bluetooth-наушники
+    out_sent: &'static str, // out последней разосланной строки состояния
     bt: Sender<&'static str>,      // режим наушников (omarchy-bt-mode) — в своём потоке; в тестах — канал без потока
     headset: Headset,
     watch: Watch,              // сторож: здоровье агентов и что делать
@@ -383,8 +385,9 @@ pub fn run() {
         welcome: false,
         night_keep: false,
         facts_src: Box::new(move || std::fs::read_to_string(&facts).ok()),
-        speakers: Box::new(crate::audio::speakers),
-        bt_out: Box::new(crate::audio::bluetooth_out),
+        speakers: String::new(),
+        default_sink: String::new(),
+        out_sent: "speakers",
         bt,
         headset: Headset::Off,
         watch: Watch::default(),
@@ -401,6 +404,10 @@ pub fn run() {
         alive: |pid| pid > 0 && Path::new(&format!("/proc/{pid}")).exists(),
         trouble_sent: 0,
     };
+    {
+        let tx = tx.clone();
+        crate::audio::watch_outs(move |default, speakers| tx.send(Event::Outs(default, speakers)).is_ok());
+    }
     st.oma_spawn();
     if let Some(t) = (st.facts_src)() {
         st.on_presence(&t);
@@ -426,6 +433,7 @@ pub fn run() {
                 let _ = reply.send(st.turn());
             }
             Event::Bt(mode, switched) => st.on_bt(mode, switched),
+            Event::Outs(default, speakers) => st.on_outs(default, speakers),
         }
     }
 }
@@ -806,7 +814,18 @@ impl State {
     /// Куда идёт голос: выход, выбранный route (динамики ноутбука), иначе выход по умолчанию — Bluetooth значит наушники.
     // shortcut: проводные наушники в гнезде ноутбука — «speakers» (тот же узел alsa); различать по активному порту узла, если понадобится
     fn out(&self) -> &'static str {
-        if self.shared.sink.lock().unwrap().is_empty() && (self.bt_out)() { "headphones" } else { "speakers" }
+        if self.shared.sink.lock().unwrap().is_empty() && self.bt_default() { "headphones" } else { "speakers" }
+    }
+
+    /// Звук по умолчанию идёт в Bluetooth-наушники.
+    fn bt_default(&self) -> bool {
+        self.default_sink.starts_with("bluez_")
+    }
+
+    /// Выходы звука сменились (поток `pactl subscribe`): динамики для route — новые, сменился out — строка подписчикам.
+    fn on_outs(&mut self, default: String, speakers: String) {
+        (self.default_sink, self.speakers) = (default, speakers);
+        self.route();
     }
 
     /// Новому подписчику — строка состояния, затем строка агентов.
@@ -824,6 +843,7 @@ impl State {
 
     fn broadcast(&mut self) {
         let line = self.status_line();
+        self.out_sent = self.out();
         self.waiting_sent = self.registry.waiting();
         self.trouble_sent = self.trouble();
         self.broadcast_line(&line);
@@ -1003,7 +1023,7 @@ impl State {
             }
             match self.headset {
                 // ушёл в наушниках — ответ услышит только их микрофон: гарнитура — до вопроса, переключение роняет звук
-                Headset::Off if self.presence.buds() != presence::Buds::Out && (self.bt_out)() => {
+                Headset::Off if self.presence.buds() != presence::Buds::Out && self.bt_default() => {
                     self.headset = Headset::Switching(now);
                     let _ = self.bt.send("headset");
                     return;
@@ -1290,7 +1310,7 @@ impl State {
         if let Some(t) = self.here_ask.filter(|t| secs >= t + HERE_WAIT && !self.oma.talking && self.silent()) {
             // вставил наушники или взял звонок — слушает и молча
             if self.presence.mode(secs) == Mode::Unsure && self.presence.last_input(secs) < t {
-                if !self.here_speakers && self.presence.buds() != presence::Buds::Out && (self.bt_out)() {
+                if !self.here_speakers && self.presence.buds() != presence::Buds::Out && self.bt_default() {
                     // в наушники не ответил — они, может, лежат на столе (датчик путает или молчит): ещё раз в динамики, слушать ноутбуком
                     self.here_speakers = true;
                     self.route();
@@ -1469,8 +1489,11 @@ impl State {
     /// Куда говорит Ома: наушники вынуты, но подключены (звук по умолчанию идёт в них, лежащих на столе),
     /// или «Ты тут?» в наушники остался без ответа — в динамики ноутбука; иначе — выход по умолчанию.
     fn route(&mut self) {
-        let sink = if self.here_speakers || self.presence.buds() == presence::Buds::Out { (self.speakers)() } else { String::new() };
+        let sink = if self.here_speakers || self.presence.buds() == presence::Buds::Out { self.speakers.clone() } else { String::new() };
         *self.shared.sink.lock().unwrap() = sink; // плеер перезапускает pw-cat, только если выход сменился
+        if self.out() != self.out_sent {
+            self.broadcast();
+        }
     }
 
     /// Пользователь вернулся (absence — сколько его не было): «Ты тут?» ответа больше не ждёт.
@@ -1796,8 +1819,9 @@ mod tests {
             welcome: false,
             night_keep: false,
             facts_src: Box::new(|| None), // снимка нет — как без сервиса присутствия
-            speakers: Box::new(|| "speakers".into()),
-            bt_out: Box::new(|| false),
+            speakers: "speakers".into(),
+            default_sink: String::new(),
+            out_sent: "speakers",
             bt: mpsc::channel().0,
             headset: Headset::Off,
             watch: Watch::default(),
@@ -2068,17 +2092,46 @@ mod tests {
         );
     }
 
+    /// Выход по умолчанию — Bluetooth-наушники (имя узла, как его даёт `pactl get-default-sink`).
+    const BT: &str = "bluez_output.00_11_22_33_44_55.1";
+
     #[test]
     fn status_line_says_where_the_voice_goes() {
         let out = |st: &State| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["out"].clone();
         let mut st = test_state();
-        st.bt_out = Box::new(|| true);
+        st.default_sink = BT.into();
         assert_eq!(out(&st), "headphones", "выход по умолчанию — Bluetooth-наушники");
         *st.shared.sink.lock().unwrap() = "speakers".into(); // наушники вынуты или «Ты тут?» в динамики
         assert_eq!(out(&st), "speakers");
         st.shared.sink.lock().unwrap().clear();
-        st.bt_out = Box::new(|| false);
+        st.default_sink.clear();
         assert_eq!(out(&st), "speakers");
+    }
+
+    #[test]
+    fn output_change_is_an_event_and_reaches_subscribers() {
+        // выход хранится, а не спрашивается у pactl на каждую строку: смена — событием потока `pactl subscribe`
+        let mut st = test_state();
+        let mut r = sub(&mut st);
+        drain(&mut r);
+        let outs = |r: &mut BufReader<UnixStream>| drain(r).into_iter().filter(|l| l.get("running").is_some()).map(|l| l["out"].clone()).collect::<Vec<_>>();
+        st.on_outs(BT.into(), "alsa_output.analog".into());
+        assert_eq!(outs(&mut r), ["headphones"], "подключили наушники — строка сразу");
+        st.on_outs(BT.into(), "alsa_output.analog".into());
+        assert!(outs(&mut r).is_empty(), "не сменился — строки нет");
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 0, "buds": "out"}));
+        assert_eq!(*st.shared.sink.lock().unwrap(), "alsa_output.analog", "наушники вынуты — в динамики, известные из события");
+        assert_eq!(outs(&mut r), ["speakers"], "route сменил выход — строка сразу");
+    }
+
+    #[test]
+    fn output_events_are_server_and_sink_changes() {
+        assert!(crate::audio::outs_changed("Event 'change' on server #4294967295"));
+        assert!(crate::audio::outs_changed("Event 'new' on sink #70"));
+        assert!(crate::audio::outs_changed("Event 'remove' on sink #70"));
+        assert!(!crate::audio::outs_changed("Event 'change' on sink #66"), "громкость — не смена выхода");
+        assert!(!crate::audio::outs_changed("Event 'new' on sink-input #601"));
+        assert!(!crate::audio::outs_changed("Event 'change' on client #600"));
     }
 
     #[test]
@@ -3607,7 +3660,7 @@ mod tests {
     fn headphones_mic_on_before_asking_and_music_back_after() {
         // ушёл в наушниках — ответ услышит только их микрофон: гарнитура — до вопроса, переключение роняет звук
         let (mut st, env) = env_state();
-        st.bt_out = Box::new(|| true);
+        st.default_sink = BT.into();
         let rx = bt(&mut st);
         with_agents(&mut st, &["s", "t"]);
         let now = secs_at(&mut st, 1100);
@@ -3622,7 +3675,7 @@ mod tests {
         st.tick();
         assert_eq!(texts(&st).join(" "), ARE_YOU_THERE);
         assert!(st.listen_after.is_none(), "в наушниках слушает сразу: ответ сразу после «Эй, ты тут?» не теряется");
-        st.bt_out = Box::new(|| false); // в гарнитуре наушники — не Bluetooth-вывод для второго вопроса не важно: проверяем возврат
+        st.default_sink.clear(); // в гарнитуре наушники — не Bluetooth-вывод для второго вопроса не важно: проверяем возврат
         heard(&mut st, &env);
         *now.lock().unwrap() += HERE_WAIT;
         st.tick();
@@ -3636,7 +3689,7 @@ mod tests {
     fn music_back_only_after_the_news_answered_for() {
         // «да» в наушники — и сразу новость: вернуть музыку посреди неё — уронить звук, новость в тишину
         let (mut st, _env) = env_state();
-        st.bt_out = Box::new(|| true);
+        st.default_sink = BT.into();
         let rx = bt(&mut st);
         with_agents(&mut st, &["s", "t"]);
         secs_at(&mut st, 1100);
@@ -3659,7 +3712,7 @@ mod tests {
     #[test]
     fn headset_switch_that_never_reports_does_not_hold_the_question() {
         let (mut st, _env) = env_state();
-        st.bt_out = Box::new(|| true);
+        st.default_sink = BT.into();
         let rx = bt(&mut st);
         with_agents(&mut st, &["s", "t"]);
         let now = secs_at(&mut st, 1100);
@@ -3676,7 +3729,7 @@ mod tests {
     fn bluetooth_out_without_sensor_asks_again_through_speakers() {
         // датчик молчит («неизвестно»), а звук идёт в Bluetooth-наушники — они могут лежать на столе
         let (mut st, env) = env_state();
-        st.bt_out = Box::new(|| true);
+        st.default_sink = BT.into();
         with_agents(&mut st, &["s", "t"]);
         let now = secs_at(&mut st, 1100);
         snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000}));
@@ -3705,7 +3758,7 @@ mod tests {
     fn buds_in_unanswered_asks_again_through_speakers() {
         let (mut st, env) = env_state();
         with_agents(&mut st, &["s", "t"]);
-        st.bt_out = Box::new(|| true);
+        st.default_sink = BT.into();
         let now = secs_at(&mut st, 1100);
         snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000, "buds": "in"}));
         final_s(&mut st);
@@ -3731,7 +3784,7 @@ mod tests {
     fn answer_to_speakers_ask_returns_to_buds() {
         let (mut st, env) = env_state();
         with_agents(&mut st, &["s", "t"]);
-        st.bt_out = Box::new(|| true);
+        st.default_sink = BT.into();
         let now = secs_at(&mut st, 1100);
         snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000, "buds": "in"}));
         final_s(&mut st);
@@ -3785,7 +3838,7 @@ mod tests {
         std::fs::create_dir_all(&h.dir).unwrap();
         let out = h.dir.join("in.txt");
         let (mut st, env) = env_state();
-        st.bt_out = Box::new(|| true);
+        st.default_sink = BT.into();
         with_agents(&mut st, &["s", "t"]);
         st.voice_cmd = vec!["sh".into(), "-c".into(), format!("cat > {}", out.display())];
         st.oma_spawn();

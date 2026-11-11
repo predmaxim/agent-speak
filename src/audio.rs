@@ -1,6 +1,6 @@
 //! Постоянный pw-cat: PCM пишется в stdin; reset — мгновенно оборвать звук.
 
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 use std::process::{Child, Command, Stdio};
@@ -78,13 +78,38 @@ pub fn pick_speakers(list: &str) -> String {
     list.lines().filter_map(|l| l.split('\t').nth(1)).find(|n| !n.starts_with("bluez_")).unwrap_or_default().to_string()
 }
 
-pub fn speakers() -> String {
-    Command::new("pactl").args(["list", "short", "sinks"]).output().map(|o| pick_speakers(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default()
+/// Строка `pactl subscribe` о смене выходов: «change on server» — сменился выход по умолчанию (pipewire-pulse шлёт его
+/// при смене метаданных default), «new/remove on sink» — выход появился или пропал (подключили наушники).
+pub fn outs_changed(line: &str) -> bool {
+    ["on server", "'new' on sink #", "'remove' on sink #"].iter().any(|e| line.contains(e))
 }
 
-/// Звук по умолчанию идёт в Bluetooth-наушники.
-pub fn bluetooth_out() -> bool {
-    Command::new("pactl").arg("get-default-sink").output().is_ok_and(|o| o.stdout.starts_with(b"bluez_"))
+/// Выход по умолчанию и динамики ноутбука сейчас; pactl не ответил за 5 с — None (прежние значения в силе).
+fn outs() -> Option<(String, String)> {
+    let pactl = |args: &[&str]| crate::mux::run(Command::new("pactl").args(args), Duration::from_secs(5)).ok();
+    Some((pactl(&["get-default-sink"])?.trim().to_string(), pick_speakers(&pactl(&["list", "short", "sinks"])?)))
+}
+
+/// Поток выходов: send(выход по умолчанию, динамики) — при старте и при каждой смене (события `pactl subscribe`), а не
+/// опросом на каждую строку состояния. send вернул false — цикл службы кончился. pactl subscribe вышел (pipewire-pulse
+/// перезапущен) — подписка заново через секунду; pactl нет — поток кончается, выход остаётся «динамики».
+pub fn watch_outs(send: impl Fn(String, String) -> bool + Send + 'static) {
+    std::thread::spawn(move || loop {
+        let mut sub = match Command::new("pactl").arg("subscribe").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
+            Ok(c) => c,
+            Err(e) => return eprintln!("agent-speak: не слежу за выходами звука (pactl subscribe): {e}"),
+        };
+        let lines = std::io::BufReader::new(sub.stdout.take().unwrap()).lines();
+        // shortcut: смена в те миллисекунды, пока pactl subscribe подключается, событием не придёт; заметят — читать выходы ещё раз по первой строке подписки
+        let report = || outs().is_none_or(|(d, s)| send(d, s));
+        let alive = report() && lines.map_while(Result::ok).filter(|l| outs_changed(l)).all(|_| report());
+        let _ = sub.kill();
+        let _ = sub.wait();
+        if !alive {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    });
 }
 
 /// Щелчок «услышала»: 90 мс, 880 Гц, края сглажены — без треска. s16 48 кГц моно, как у Player.
@@ -150,6 +175,15 @@ mod tests {
         assert!(!needs_respawn(true, "", ""));
         assert!(needs_respawn(true, "", "echo-cancel-sink"));
         assert!(needs_respawn(true, "echo-cancel-sink", ""));
+    }
+
+    #[test]
+    #[ignore] // живой pipewire-pulse
+    fn outs_are_reported_at_start() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        watch_outs(move |d, s| tx.send((d, s)).is_ok());
+        let (default, _) = rx.recv_timeout(Duration::from_secs(5)).expect("выходы при старте");
+        assert!(!default.is_empty());
     }
 
     #[test]
