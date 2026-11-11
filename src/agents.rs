@@ -512,7 +512,8 @@ impl Registry {
         self.entries.iter().filter(|e| e.state == State::Waiting).count()
     }
 
-    /// Строка для панели: ждущие, работающие, готовые, простаивающие; внутри — свежие первыми.
+    /// Строка для панели: ждущие, работающие, готовые, простаивающие; внутри группы — в порядке появления
+    /// (сортировка устойчивая): по времени события список перетасовывался бы на каждой новости.
     pub fn line(&self) -> String {
         let mut v: Vec<&Entry> = self.entries.iter().collect();
         let group = |s: State| match s {
@@ -521,7 +522,7 @@ impl Registry {
             State::Done => 2,
             State::Idle => 3,
         };
-        v.sort_by_key(|e| (group(e.state), std::cmp::Reverse(e.since)));
+        v.sort_by_key(|e| group(e.state));
         format!("{}\n", serde_json::json!({ "agents": v }))
     }
 }
@@ -792,6 +793,20 @@ mod tests {
         assert!(v["agents"][0].get("heard").is_none());
         assert!(r.sync(vec![live("a", true)], 40) && r.get("b").is_none());
         assert!(!r.sync(vec![live("a", true)], 50));
+    }
+
+    #[test]
+    fn line_order_does_not_follow_news() {
+        let mut r = Registry::new();
+        r.sync(vec![live("a", true), live("b", true)], 10);
+        let ids = |r: &Registry| -> Vec<String> {
+            let v: serde_json::Value = serde_json::from_str(&r.line()).unwrap();
+            v["agents"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap().to_string()).collect()
+        };
+        r.status("b", "работаю", 20);
+        assert_eq!(ids(&r), ["a", "b"], "новость b не ставит его первым");
+        r.status("a", "работаю", 30);
+        assert_eq!(ids(&r), ["a", "b"]);
     }
 
     #[test]
