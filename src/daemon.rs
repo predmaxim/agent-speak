@@ -129,6 +129,7 @@ struct Status<'a> {
     trouble: usize, // агентов со срочной нерешённой проблемой — сигнал орба
     played_at: f64, // когда кончается (кончился) звук последней речи, CLOCK_MONOTONIC, с; 0 — речи не было
     out: &'a str,   // куда идёт голос: speakers | headphones
+    voiced: u64,    // реплик (`voice`) нынешней Омы отработано: звук записан, оборван или его не будет
 }
 
 /// Процесс Омы (python -m agent_voice): команды — строками в stdin, события — через сокет.
@@ -211,6 +212,8 @@ struct State {
     shell_idle: Box<dyn Fn(u32) -> bool>,       // оболочка жива и ничего не запускает
     alive: fn(u32) -> bool,                      // процесс жив: пропавшая из реестра сессия — не падение
     trouble_sent: usize,                         // trouble последней разосланной строки состояния
+    voices: u64,     // реплик Омы (`voice`) с запуска службы — номер последней
+    voice_base: u64, // столько их было до запуска нынешней Омы: voiced считается от него
 }
 
 fn home() -> PathBuf {
@@ -403,6 +406,8 @@ pub fn run() {
         shell_idle: Box::new(shell_idle),
         alive: |pid| pid > 0 && Path::new(&format!("/proc/{pid}")).exists(),
         trouble_sent: 0,
+        voices: 0,
+        voice_base: 0,
     };
     {
         let tx = tx.clone();
@@ -807,6 +812,7 @@ impl State {
             trouble: self.trouble(),
             played_at: *self.shared.played.lock().unwrap(),
             out: self.out(),
+            voiced: self.voices - self.voice_base - self.shared.voices_left(self.voice_base) as u64,
         };
         format!("{}\n", serde_json::to_string(&st).unwrap())
     }
@@ -1132,7 +1138,7 @@ impl State {
         let sentences = if kind == Kind::Preview && !sentences.is_empty() { vec![sentences.join(" ")] } else { sentences };
         let mut q = self.shared.queue.lock().unwrap();
         for text in sentences {
-            q.push(Item { session: session.into(), text, kind: kind.clone() });
+            q.push(Item { session: session.into(), text, kind: kind.clone(), voice: if kind == Kind::Voice { self.voices } else { 0 } });
         }
         drop(q);
         self.shared.cv.notify_all();
@@ -1188,6 +1194,7 @@ impl State {
                 }
                 self.oma.child = Some(c);
                 self.oma.failing = false;
+                self.voice_base = self.voices; // её say считаются с нуля
                 self.oma.started = Some((self.clock)());
             }
             Err(e) => {
@@ -1359,12 +1366,10 @@ impl State {
             Msg::OmaPause { on } => self.oma_pause(on),
             Msg::Hush => self.shared.hush(), // новость, удержанная за Омой, не теряется
             Msg::Voice { text } => {
-                // звучит ли — решает audible; звука не будет (только код, эмодзи, тишина), а прежнее не звучит —
-                // Оме сразу «смолкла» (played_at — сейчас), иначе она ждала бы конца звука вечно
-                if self.enqueue(Agent::Claude, "voice", &text, Kind::Voice) == 0 && self.silent() {
-                    let mut played = self.shared.played.lock().unwrap();
-                    *played = played.max(speaker::mono()); // хвост прежней фразы ещё звучит — его конец не раньше
-                    drop(played);
+                self.voices += 1;
+                // звучит ли — решает audible; звука не будет (только код, эмодзи, тишина) — реплика отработана сразу:
+                // строка с выросшим voiced, иначе Ома ждала бы конца звука вечно
+                if self.enqueue(Agent::Claude, "voice", &text, Kind::Voice) == 0 {
                     self.broadcast();
                 }
             }
@@ -1837,6 +1842,8 @@ mod tests {
             shell_idle: Box::new(|_| false),
             alive: |_| false,
             trouble_sent: 0,
+            voices: 0,
+            voice_base: 0,
         }
     }
 
@@ -2088,7 +2095,7 @@ mod tests {
         let st = test_state();
         assert_eq!(
             st.status_line(),
-            "{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":true,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0,\"trouble\":0,\"played_at\":0.0,\"out\":\"speakers\"}\n"
+            "{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":true,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0,\"trouble\":0,\"played_at\":0.0,\"out\":\"speakers\",\"voiced\":0}\n"
         );
     }
 
@@ -2134,24 +2141,59 @@ mod tests {
         assert!(!crate::audio::outs_changed("Event 'change' on client #600"));
     }
 
+    /// (speaking, voiced, played_at) строк состояния, пришедших подписчику.
+    fn voiced(r: &mut BufReader<UnixStream>) -> Vec<(bool, u64, f64)> {
+        drain(r).into_iter().filter(|l| l.get("running").is_some())
+            .map(|l| (l["speaking"].as_bool().unwrap(), l["voiced"].as_u64().unwrap(), l["played_at"].as_f64().unwrap())).collect()
+    }
+
     #[test]
-    fn voice_that_gives_no_sound_ends_at_once() {
-        // ответ Омы только из кода: звука не будет — «смолкла» сразу, иначе она ждала бы конца звука вечно
+    fn voice_that_gives_no_sound_is_handled_at_once() {
+        // ответ Омы только из кода: звука не будет — voiced растёт сразу, иначе она ждала бы конца звука вечно
         let mut st = test_state();
         let mut r = sub(&mut st);
         drain(&mut r);
-        let before = speaker::mono();
         st.on_msg(Msg::Voice { text: "```\ncargo test --all\n```".into() });
-        let lines = drain(&mut r);
-        let status = lines.iter().find(|l| l.get("running").is_some()).expect("строка состояния");
-        assert_eq!(status["speaking"], false);
-        assert!(status["played_at"].as_f64().unwrap() >= before);
-        // звучит прежнее — его конец придёт обычным путём, а не раньше времени
-        *st.shared.played.lock().unwrap() = before + 100.0;
-        st.shared.busy.store(true, Ordering::SeqCst);
+        assert_eq!(voiced(&mut r), [(false, 1, 0.0)]);
+        // хвост прежней фразы ещё в канале pw-cat (busy погас, played_at впереди): тихая реплика — тоже сразу,
+        // а конец звука остаётся концом прежней фразы
+        let end = speaker::mono() + 100.0;
+        *st.shared.played.lock().unwrap() = end;
         st.on_msg(Msg::Voice { text: "🙂".into() });
-        assert!(drain(&mut r).iter().all(|l| l.get("running").is_none()));
-        assert_eq!(*st.shared.played.lock().unwrap(), before + 100.0);
+        assert_eq!(voiced(&mut r), [(false, 2, end)]);
+        st.shared.busy.store(true, Ordering::SeqCst); // звучит прежнее — счётчик всё равно растёт, «говорю» кончит !speaking
+        st.on_msg(Msg::Voice { text: "🙂".into() });
+        assert_eq!(voiced(&mut r), [(true, 3, end)]);
+    }
+
+    #[test]
+    fn voice_is_handled_when_its_sentences_left_the_queue() {
+        let mut st = test_state();
+        st.on_msg(Msg::Voice { text: "Привет. Слушаю.".into() });
+        let status = |st: &State| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["voiced"].as_u64().unwrap();
+        assert_eq!(status(&st), 0, "фразы ждут звука");
+        texts(&st);
+        assert_eq!(status(&st), 1, "отзвучали");
+        st.on_msg(Msg::Voice { text: "Длинный ответ. Ещё фраза.".into() });
+        st.on_msg(Msg::Hush);
+        assert_eq!(status(&st), 2, "перебили — выброшенная реплика тоже отработана");
+    }
+
+    #[test]
+    fn voiced_counts_from_the_running_oma() {
+        // Ома считает свои say с нуля: перезапущенная не ждёт реплик прежней
+        let _h = TempHome::new("oma-voiced");
+        let mut st = test_state();
+        st.on_msg(Msg::Voice { text: "🙂".into() });
+        st.on_msg(Msg::Voice { text: "Прежняя ещё звучит.".into() });
+        st.voice_cmd = vec!["true".into()];
+        st.oma_spawn();
+        let status = |st: &State| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["voiced"].as_u64().unwrap();
+        assert_eq!(status(&st), 0);
+        st.on_msg(Msg::Voice { text: "🙂".into() });
+        assert_eq!(status(&st), 1);
+        texts(&st);
+        assert_eq!(status(&st), 1, "реплика прежней Омы — не в её счёт");
     }
 
     #[test]

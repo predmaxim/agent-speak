@@ -16,6 +16,7 @@ pub struct Item {
     pub session: String,
     pub text: String,
     pub kind: Kind,
+    pub voice: u64, // номер реплики Омы (`voice`), чья это фраза; 0 — не её
 }
 
 pub struct Queue {
@@ -75,6 +76,11 @@ impl Queue {
         self.items.iter().any(|i| self.playable(i))
     }
 
+    /// Номера реплик Омы, чьи фразы ждут в очереди.
+    pub fn voices(&self) -> impl Iterator<Item = u64> + '_ {
+        self.items.iter().map(|i| i.voice).filter(|&v| v > 0)
+    }
+
     pub fn pause(&mut self) {
         self.paused = true;
     }
@@ -108,7 +114,7 @@ mod tests {
     use super::*;
 
     fn it(text: &str, kind: Kind) -> Item {
-        Item { session: "s".into(), text: text.into(), kind }
+        Item { session: "s".into(), text: text.into(), kind, voice: 0 }
     }
 
     fn all(q: &mut Queue) -> Vec<String> {

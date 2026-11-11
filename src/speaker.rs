@@ -21,6 +21,9 @@ pub struct Shared {
     /// Когда кончается (кончился) звук последней речи — CLOCK_MONOTONIC, с (как time.monotonic() в Python); 0 — речи не было.
     /// «Смолкла» (busy гаснет) приходит раньше: pw-cat ещё доигрывает свой канал.
     pub played: Mutex<f64>,
+    /// Номер реплики Омы, чья фраза у потока воспроизведения (синтез, запись); 0 — ничья. Ставится под замком очереди
+    /// вместе с pop, снимается до «смолкла».
+    pub voice_now: AtomicU64,
 }
 
 /// Синтезатор и приёмник звука — трейты только ради тестов с подделками.
@@ -74,7 +77,17 @@ impl Shared {
             changed: Mutex::new(None),
             sink: Arc::new(Mutex::new(String::new())),
             played: Mutex::new(0.0),
+            voice_now: AtomicU64::new(0),
         }
+    }
+
+    /// Сколько реплик Омы с номером больше after ещё не отработаны: их фразы ждут в очереди или у потока воспроизведения.
+    pub fn voices_left(&self, after: u64) -> usize {
+        let q = self.queue.lock().unwrap();
+        let mut left: Vec<u64> = q.voices().chain([self.voice_now.load(Ordering::SeqCst)]).filter(|&v| v > after).collect();
+        left.sort_unstable();
+        left.dedup(); // у реплики бывает несколько фраз
+        left.len()
     }
 
     /// Речь смолкла, а звучать ей ещё left(): busy гаснет, конец звука — в played. Вызывающий НЕ держит замок played.
@@ -181,8 +194,12 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                 }
                 if let Some(it) = q.pop() {
                     tail = None;
+                    shared.voice_now.store(it.voice, Ordering::SeqCst);
                     break (it, shared.generation.load(Ordering::SeqCst));
                 }
+                // фраза записана, оборвана или вернулась в очередь — у потока её нет; до «смолкла», чтобы строка
+                // состояния с speaking false уже считала реплику отработанной
+                shared.voice_now.store(0, Ordering::SeqCst);
                 shared.idle(|| player.left());
                 let to = if tail.is_some() { Duration::from_millis(100) } else { Duration::from_millis(500) };
                 q = shared.cv.wait_timeout(q, to).unwrap().0;
@@ -300,7 +317,7 @@ mod tests {
 
     fn say(shared: &Shared) {
         let mut q = shared.queue.lock().unwrap();
-        q.push(Item { session: "s".into(), text: "фраза".into(), kind: Kind::Read });
+        q.push(Item { session: "s".into(), text: "фраза".into(), kind: Kind::Read, voice: 0 });
         shared.cv.notify_all();
     }
 
@@ -344,6 +361,23 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(3)).unwrap(); // замолчал
         assert!(!shared.busy.load(Ordering::SeqCst));
         assert_eq!(*shared.current.lock().unwrap(), "s");
+    }
+
+    #[test]
+    fn oma_voice_is_left_until_its_sound_is_written() {
+        // реплика Омы (voice — её номер) не отработана, пока её фраза в очереди или у потока воспроизведения
+        let (shared, ev) = start(0, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        *shared.changed.lock().unwrap() = Some(tx);
+        shared.pause();
+        shared.queue.lock().unwrap().push(Item { session: "voice".into(), text: "ответ".into(), kind: Kind::Voice, voice: 1 });
+        assert_eq!(shared.voices_left(0), 1, "в очереди");
+        assert_eq!(shared.voices_left(1), 0, "номер не новее after — реплика прежней Омы — не считается");
+        shared.resume();
+        rx.recv_timeout(Duration::from_secs(2)).unwrap(); // начала
+        rx.recv_timeout(Duration::from_secs(3)).unwrap(); // смолкла
+        assert_eq!(shared.voices_left(0), 0, "к «смолкла» реплика уже отработана — Ома видит это в той же строке");
+        assert_eq!(count(&ev, "write"), 2);
     }
 
     #[test]
@@ -407,7 +441,7 @@ mod tests {
     #[test]
     fn preview_not_replayed_after_pause() {
         let (shared, ev) = start(0, 0);
-        shared.queue.lock().unwrap().push(Item { session: "s".into(), text: "образец".into(), kind: Kind::Preview });
+        shared.queue.lock().unwrap().push(Item { session: "s".into(), text: "образец".into(), kind: Kind::Preview, voice: 0 });
         shared.cv.notify_all();
         wait(|| count(&ev, "write") == 2);
         shared.pause();
@@ -510,7 +544,7 @@ mod tests {
         });
         let shared = Arc::new(Shared::new(Queue::new(), "xenia".into(), "medium".into()));
         for s in SAY {
-            shared.queue.lock().unwrap().push(Item { session: "s".into(), text: s.into(), kind: Kind::Read });
+            shared.queue.lock().unwrap().push(Item { session: "s".into(), text: s.into(), kind: Kind::Read, voice: 0 });
         }
         let s = shared.clone();
         std::thread::spawn(move || run_with(s, tts, PipeSink(Some(w))));
