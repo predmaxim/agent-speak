@@ -614,17 +614,21 @@ fn notify_ready(socket: Option<std::ffi::OsString>) {
     }
 }
 
-/// Пожать прежнюю Ому: не вышла за after (SIGABRT поймали, дамп завис) — SIGKILL. Две Омы разом держали бы микрофон и GPU.
+/// Пожать прежнюю Ому: не вышла за after (SIGABRT поймали, дамп завис) или ждать её нечем (pidfd) — SIGKILL.
+/// Две Омы разом держали бы микрофон и GPU.
 fn reap(mut c: Child, after: Duration) {
     // уже пожата (tick нашёл её мёртвой): её pid мог достаться другому процессу — pidfd открывать нельзя
     if matches!(c.try_wait(), Ok(Some(_))) {
         return;
     }
-    if !matches!(mux::exit_within(&mut c, after), Ok(Some(_))) {
-        eprintln!("agent-speak: Ома не вышла за {} с — SIGKILL", after.as_secs());
-        let _ = c.kill();
-        let _ = c.wait();
+    match mux::exit_within(&mut c, after) {
+        Ok(Some(_)) => return,
+        Ok(None) => eprintln!("agent-speak: Ома не вышла за {} с — SIGKILL", after.as_secs()),
+        // срока без pidfd не выдержать, а ждать без срока — держать новую Ому (tick ждёт этот поток): убить сразу
+        Err(e) => eprintln!("agent-speak: выхода Омы не дождаться ({e}) — SIGKILL сразу, дамп SIGABRT может не дописаться"),
     }
+    let _ = c.kill();
+    let _ = c.wait();
 }
 
 /// Путь, которым запущен демон (argv[0]): относительный — от его папки (Ома работает в другой), имя без папки — по PATH.
