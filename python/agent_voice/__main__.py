@@ -155,10 +155,7 @@ class Oma:
             self.ear.speakers = None  # разговор по клику — вход по тому, куда она говорит
             leave = c.state == "idle" and self.brain.key.startswith("agent:")  # с Омой-помощником — в общем чате
             await self.act(c.talk())  # слух — сразу: смена чата и выход прежнего claude начало фразы не задерживают
-            if leave:
-                await self.switch(await self.general(), was="*")
-            elif c.active:  # окно могло смотреть другой чат (open только показывает) — оно идёт за разговором
-                self.emit({"chat": {"key": self.brain.key, "was": "*", "messages": self.history}})
+            await self.follow(await self.general() if leave else None)
             if c.active:
                 self.to_brain(self.brain.warm)  # claude поднимается, пока пользователь говорит
         elif do == "cancel":
@@ -170,10 +167,10 @@ class Oma:
             if not await asyncio.to_thread(locked) and not foreign_capture(await asyncio.to_thread(mic_outputs), set()):
                 self.ear.speakers = True if cmd.get("speakers") else None  # «Ты тут?» в динамики — и слушать ноутбуком
                 key = cmd.get("key")  # окно после вопроса — ответ в чат спросившего агента
-                move = key and key != self.brain.key and c.state == "idle"
+                idle = c.state == "idle"
                 await self.act(c.listen(float(cmd.get("secs", 5)), cmd.get("kind", "news"), cmd.get("said", "")))
-                if move:
-                    await self.switch(key)
+                if idle and c.active:  # окно ответа открылось — разговор начался
+                    await self.follow(key if key != self.brain.key else None)
                 if key and c.active:
                     self.to_brain(self.brain.warm)  # ответ агенту: claude поднимается, пока окно слушает
         elif do == "chats":
@@ -198,6 +195,14 @@ class Oma:
                 self.ask_id = cmd.get("id")
                 await self.act(c.ask(cmd.get("text", "")))
                 self.ask_id = None
+
+    async def follow(self, key=None):
+        """Разговор начался — окно идёт за ним (was "*"): в чат key, куда переходит мозг, иначе в текущий чат мозга —
+        окно могло смотреть другой (open только показывает), и chat_delta разговора оно отсеивало бы по ключу."""
+        if key:
+            await self.switch(key, "*")
+        elif self.conv.active:
+            self.emit({"chat": {"key": self.brain.key, "was": "*", "messages": self.history}})
 
     async def switch(self, key, was=None):
         """Перейти в чат key; was — ключ, на который окно ждёт ответа ("*" — любой)."""

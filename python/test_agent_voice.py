@@ -885,9 +885,35 @@ def test_oma_listen_with_key_switches_to_asking_agents_chat(monkeypatch):
         assert oma.ear.open
         await settle(oma)
         assert oma.brain.key == "agent:s"  # ответ на вопрос уйдёт в чат спросившего
-        assert {"chat": {"key": "agent:s", "messages": []}} in [e["line"] for e in emitted]
+        assert {"chat": {"key": "agent:s", "was": "*", "messages": []}} in [e["line"] for e in emitted], "окно идёт за разговором"
 
     asyncio.run(run())
+
+
+def test_answer_window_brings_window_to_conversation(monkeypatch):
+    # 2026-11-12 (ревью): разговор, открытый окном ответа (новости, «Ты тут?», вопрос агента), строку chat с was "*" не
+    # слал — окно, смотревшее другой чат, отсеивало его chat_delta: ответ слышно, а в окне его нет. Окно не открылось
+    # (тихий режим) — разговора нет: ни перехода мозга, ни строки chat
+    import agent_voice.__main__ as m
+    monkeypatch.setattr(m, "locked", lambda: False)
+    monkeypatch.setattr(m, "mic_outputs", lambda: [])
+    for key, quiet in ((None, False), ("agent:s", False), ("agent:s", True)):
+        sent, emitted = [], []
+        clk, oma = _oma(sent, emitted)
+        oma.brain.key, oma.brain.messages = "chat:g", lambda k: []
+        oma.history = [{"role": "me", "text": "прошлое"}]
+        oma.conv.quiet = quiet
+
+        async def go():
+            await oma.command({"do": "open", "key": "agent:X"})
+            await oma.command({"do": "listen", "secs": 5, **({"key": key} if key else {})})
+            await settle(oma)
+        run(go())
+        chats = [e["line"]["chat"] for e in emitted if "chat" in e["line"]][1:]  # после просмотра agent:X
+        if quiet:
+            assert chats == [] and oma.brain.key == "chat:g", key
+        else:
+            assert chats[-1]["key"] == (key or "chat:g") and chats[-1]["was"] == "*", key
 
 
 def test_esc_works_while_brain_send_hangs():
