@@ -54,9 +54,6 @@ enum Headset {
     Asked(bool),
 }
 
-/// «Ты тут?» в наушники слушается с начала фразы: окно длиннее на время самой фразы.
-const HERE_EARLY: u64 = 5;
-
 /// Переключение в гарнитуру дольше этого — спросить всё равно.
 const HEADSET_WAIT: u64 = 10;
 
@@ -74,7 +71,7 @@ const FOCUS_PROMPT: u64 = 120;
 /// После новостей Ома слушает ответ столько секунд.
 const LISTEN_SECS: u64 = 5;
 
-/// После «Ты тут?» ждём ответа столько секунд, затем пользователь — «нет на месте».
+/// «Ты тут?»: Ома слушает с начала вопроса столько секунд — одно окно, — затем пользователь «нет на месте».
 const HERE_WAIT: u64 = 20;
 
 /// Не уверена, что слушают: сначала спросить, новости — после ответа.
@@ -182,7 +179,7 @@ struct State {
     listen_after: Option<(&'static str, String)>, // звучат новости: по их концу Ома слушает ответ — (kind, сказанное)
     listen_at: Option<Instant>, // новости смолкли: окно ответа — когда доиграет хвост pw-cat
     presence: Presence,         // слушает ли пользователь: снимки сервиса оболочки и его слова
-    here_ask: Option<u64>,      // «Ты тут?» спрошен: ответа ждём HERE_WAIT с открытия окна ответа
+    here_ask: Option<u64>,      // «Ты тут?» спрошен (с): Ома слушает с начала вопроса весь HERE_WAIT
     seen_mode: Option<Mode>,    // режим присутствия прошлого тика — смену пишем в журнал
     here_speakers: bool,        // «Ты тут?» в наушники без ответа — спросили ещё раз в динамики: выход — на них, пока не ответит
     presence_at: u64,           // время прошлого снимка присутствия — перерыв пишем в журнал
@@ -1013,14 +1010,19 @@ impl State {
         eprintln!("agent-speak: говорю ({kind}, {mode:?}): {}", text.chars().take(200).collect::<String>());
         if self.enqueue(Agent::Claude, "news", &text, Kind::News) > 0 {
             self.oma_send(&serde_json::json!({"do": "warm"}));
-            if kind == "here" && matches!(self.headset, Headset::Asked(_)) {
-                // в наушниках её голоса в микрофоне нет: слушать сразу — «да» звучит, пока она договаривает
-                self.oma_send(&listen_cmd(kind, &text, None, false, LISTEN_SECS + HERE_EARLY));
-                self.here_ask = Some(now);
+            if kind == "here" {
+                self.listen_here();
             } else {
                 self.listen_after = Some((kind, text));
             }
         }
+    }
+
+    /// «Ты тут?»: слушать с начала вопроса весь HERE_WAIT — и в наушники, и в динамики (там, пока она говорит, слух
+    /// на входе с эхоподавлением): «да», сказанное, пока она договаривает или через 8–10 с, не уходит в закрытый
+    /// микрофон. said — её фраза: своё эхо Ома ответом не считает.
+    fn listen_here(&mut self) {
+        self.oma_send(&listen_cmd("here", ARE_YOU_THERE, None, self.here_speakers, HERE_WAIT));
     }
 
     /// Агент, которым пользователь занят, — его новости не вслух: его чат открыт в окне Омы или его вкладка в фокусе,
@@ -1056,14 +1058,9 @@ impl State {
         self.listen_at = None;
         if self.silent() {
             if let Some((kind, said)) = self.listen_after.take().filter(|_| !self.quiet()) {
-                // ответ на вопрос — в чат спросившего агента; на «Ты тут?» — Оме, даже пока вопрос ждёт ответа
+                // ответ на вопрос — в чат спросившего агента
                 let key = self.board.asked().filter(|_| kind == "question").map(|s| format!("agent:{s}"));
-                let cmd = listen_cmd(kind, &said, key, kind == "here" && self.here_speakers, LISTEN_SECS);
-                self.oma_send(&cmd);
-                // холодный TTS или удержанная речь не съедают время ответа; вернувшийся, пока звучало, ответ уже дал
-                if kind == "here" && self.here_ask.is_some() {
-                    self.here_ask = Some((self.now_secs)());
-                }
+                self.oma_send(&listen_cmd(kind, &said, key, false, LISTEN_SECS));
             }
         }
     }
@@ -1260,8 +1257,8 @@ impl State {
                 self.ask(&s, Ask::Progress, &text, None);
             }
         }
-        // «Ты тут?» отзвучал (окно ответа открыто или фраза оборвана), а ни слова, ни ввода — пользователя нет на месте
-        if let Some(t) = self.here_ask.filter(|t| secs >= t + HERE_WAIT && !self.oma.talking && self.listen_after.is_none()) {
+        // «Ты тут?» отзвучал, окно ответа закрылось, а ни слова, ни ввода — пользователя нет на месте
+        if let Some(t) = self.here_ask.filter(|t| secs >= t + HERE_WAIT && !self.oma.talking && self.silent()) {
             // вставил наушники или взял звонок — слушает и молча
             if self.presence.mode(secs) == Mode::Unsure && self.presence.last_input(secs) < t {
                 if !self.here_speakers && self.presence.buds() != presence::Buds::Out && (self.bt_out)() {
@@ -1271,7 +1268,7 @@ impl State {
                     eprintln!("agent-speak: говорю (here, в динамики): {ARE_YOU_THERE}");
                     if self.enqueue(Agent::Claude, "news", ARE_YOU_THERE, Kind::News) > 0 {
                         self.oma_send(&serde_json::json!({"do": "warm"}));
-                        self.listen_after = Some(("here", ARE_YOU_THERE.to_string()));
+                        self.listen_here();
                     }
                     self.here_ask = Some(secs);
                 } else {
@@ -3186,7 +3183,7 @@ mod tests {
         while listens().len() < 2 && Instant::now() < end { std::thread::sleep(Duration::from_millis(20)); }
         assert_eq!(listens(), [
             serde_json::json!({"do": "listen", "secs": 5, "kind": "question", "said": "plug: Удалить старый код?", "key": "agent:s"}),
-            serde_json::json!({"do": "listen", "secs": 5, "kind": "here", "said": ARE_YOU_THERE}),
+            serde_json::json!({"do": "listen", "secs": HERE_WAIT, "kind": "here", "said": ARE_YOU_THERE}),
         ]);
     }
 
@@ -3451,7 +3448,7 @@ mod tests {
         final_s(&mut st);
         st.tick();
         assert_eq!(texts(&st).join(" "), ARE_YOU_THERE); // в очереди — по предложению
-        assert_eq!(st.listen_after, Some(("here", ARE_YOU_THERE.to_string())));
+        assert!(st.listen_after.is_none(), "слушает с начала вопроса, а не после него");
         st.tick();
         assert!(texts(&st).is_empty());
     }
@@ -3466,13 +3463,20 @@ mod tests {
 
     /// Пользователь простаивает 100 с, итог на доске: Ома спросила «Ты тут?» (фраза ещё звучит).
     fn asked_are_you_there() -> (State, Env, Arc<Mutex<u64>>) {
+        let (st, env, now) = asked_are_you_there_kept();
+        assert_eq!(texts(&st).join(" "), ARE_YOU_THERE);
+        (st, env, now)
+    }
+
+    /// То же, но вопрос ещё в очереди.
+    fn asked_are_you_there_kept() -> (State, Env, Arc<Mutex<u64>>) {
         let (mut st, env) = env_state();
         with_agents(&mut st, &["s", "t"]);
         let now = secs_at(&mut st, 1100);
         snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000}));
         final_s(&mut st);
         st.tick();
-        assert_eq!(texts(&st).join(" "), ARE_YOU_THERE);
+        assert!(!st.shared.queue.lock().unwrap().is_empty());
         (st, env, now)
     }
 
@@ -3634,18 +3638,65 @@ mod tests {
 
     #[test]
     fn are_you_there_unanswered_is_away() {
-        let (mut st, env, now) = asked_are_you_there();
-        *now.lock().unwrap() += HERE_WAIT;
-        st.tick();
-        assert_eq!(st.presence.mode(1100 + HERE_WAIT), Mode::Unsure, "фраза ещё звучит — ответа не ждали");
-        heard(&mut st, &env); // окно ответа открылось: HERE_WAIT — с него
+        // окно одно: с начала вопроса и на весь HERE_WAIT — ответ через 8–10 с после начала не уходит в закрытый микрофон
+        let (mut st, _env, now) = asked_are_you_there();
+        texts(&st); // вопрос отзвучал
         *now.lock().unwrap() += HERE_WAIT - 1;
         st.tick();
-        assert_eq!(st.presence.mode(1100 + 2 * HERE_WAIT - 1), Mode::Unsure);
+        assert_eq!(st.presence.mode(1100 + HERE_WAIT - 1), Mode::Unsure);
         *now.lock().unwrap() += 1;
         st.tick();
-        assert_eq!(st.presence.mode(1100 + 2 * HERE_WAIT), Mode::Away);
+        assert_eq!(st.presence.mode(1100 + HERE_WAIT), Mode::Away);
         assert!(texts(&st).is_empty());
+    }
+
+    #[test]
+    fn are_you_there_not_yet_played_is_not_away() {
+        let (mut st, _env, now) = asked_are_you_there_kept();
+        *now.lock().unwrap() += HERE_WAIT;
+        st.tick();
+        assert_eq!(st.presence.mode(1100 + HERE_WAIT), Mode::Unsure, "вопрос ещё не прозвучал (синтез лежит) — ответа не ждали");
+        texts(&st);
+        st.tick();
+        assert_eq!(st.presence.mode(1100 + HERE_WAIT), Mode::Away);
+    }
+
+    #[test]
+    fn are_you_there_listens_from_the_start_for_the_whole_wait() {
+        // через динамики слушать с начала вопроса весь HERE_WAIT; её фраза — said: своё эхо Ома ответом не считает
+        let h = TempHome::new("oma-here");
+        std::fs::create_dir_all(&h.dir).unwrap();
+        let out = h.dir.join("in.txt");
+        let (mut st, env) = env_state();
+        st.bt_out = Box::new(|| true);
+        with_agents(&mut st, &["s", "t"]);
+        st.voice_cmd = vec!["sh".into(), "-c".into(), format!("cat > {}", out.display())];
+        st.oma_spawn();
+        let now = secs_at(&mut st, 1100);
+        snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1000, "buds": "in"}));
+        final_s(&mut st);
+        st.tick();
+        st.on_bt("headset", false); // гарнитура уже была — спрашивать сразу
+        st.tick();
+        assert_eq!(texts(&st).join(" "), ARE_YOU_THERE);
+        assert!(st.listen_after.is_none(), "окно — сразу, а не после фразы");
+        heard(&mut st, &env);
+        *now.lock().unwrap() += HERE_WAIT;
+        st.tick();
+        assert_eq!(texts(&st).join(" "), ARE_YOU_THERE, "в наушники не ответил — ещё раз, в динамики");
+        assert!(st.listen_after.is_none());
+        drop(st);
+        let listens = || -> Vec<serde_json::Value> {
+            std::fs::read_to_string(&out).unwrap_or_default().lines().filter(|l| l.contains("listen")).filter_map(|l| serde_json::from_str(l).ok()).collect()
+        };
+        let end = Instant::now() + Duration::from_secs(2);
+        while listens().len() < 2 && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(listens(), [
+            serde_json::json!({"do": "listen", "secs": HERE_WAIT, "kind": "here", "said": ARE_YOU_THERE}),
+            serde_json::json!({"do": "listen", "secs": HERE_WAIT, "kind": "here", "said": ARE_YOU_THERE, "speakers": true}),
+        ]);
     }
 
     #[test]
