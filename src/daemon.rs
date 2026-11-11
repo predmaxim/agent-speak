@@ -1126,9 +1126,11 @@ impl State {
         !self.shared.busy.load(Ordering::SeqCst) && !self.shared.queue.lock().unwrap().ready()
     }
 
-    /// Новости смолкли: busy гаснет, пока pw-cat доигрывает хвост, — окно ответа через speaker::TAIL, чтобы Ома не слышала себя.
+    /// Новости смолкли: busy гаснет, пока pw-cat доигрывает свой канал, — окно ответа с конца звука (played_at, тот же,
+    /// что получает Ома), чтобы она не слышала себя.
     fn after_speech(&mut self) {
-        self.listen_at = (self.listen_after.is_some() && self.silent()).then(|| (self.clock)() + speaker::TAIL);
+        let left = Duration::from_secs_f64((*self.shared.played.lock().unwrap() - speaker::mono()).max(0.0));
+        self.listen_at = (self.listen_after.is_some() && self.silent()).then(|| (self.clock)() + left);
     }
 
     /// Из tick: хвост доиграл и всё ещё тихо — Ома слушает ответ LISTEN_SECS.
@@ -3383,15 +3385,20 @@ mod tests {
         st.tick();
         st.after_speech(); // новость ещё в очереди — рано
         pop1(&st);
-        st.shared.set_busy(None); // busy гаснет, а pw-cat ещё доигрывает хвост
+        // busy гаснет, а pw-cat ещё доигрывает свой канал: конец звука — played_at, как его ставит поток воспроизведения
+        *st.shared.played.lock().unwrap() = speaker::mono() + 0.7;
+        st.shared.set_busy(None);
         st.after_speech();
         st.tick();
         assert!(st.listen_after.is_some(), "хвост не доиграл — окно не открываем");
-        *env.1.lock().unwrap() += speaker::TAIL;
+        *env.1.lock().unwrap() += Duration::from_millis(500);
+        st.tick();
+        assert!(st.listen_after.is_some(), "окно — по played_at, а не по константе");
+        *env.1.lock().unwrap() += Duration::from_millis(300);
         st.tick();
         assert!(st.listen_after.is_none());
         st.after_speech(); // окно уже открыто — второй раз не открываем
-        *env.1.lock().unwrap() += speaker::TAIL;
+        *env.1.lock().unwrap() += Duration::from_secs(1);
         st.tick();
         drop(st); // stdin закрыт → cat допишет и выйдет
         let want = "{\"do\":\"warm\"}\n{\"do\":\"listen\",\"kind\":\"news\",\"said\":\"plug: Фича готова.\",\"secs\":5}\n";
@@ -3714,10 +3721,9 @@ mod tests {
         items.into_iter().map(|i| i.text).collect()
     }
 
-    fn heard(st: &mut State, env: &Env) {
-        sound(st);
+    fn heard(st: &mut State, _env: &Env) {
+        sound(st); // played_at — 0: звук уже кончился, окно ответа — сразу
         st.after_speech();
-        *env.1.lock().unwrap() += speaker::TAIL;
         st.tick();
     }
 

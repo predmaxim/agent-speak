@@ -7,6 +7,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 /// Задержка узла pw-cat (`--latency`, как по умолчанию): столько звука сверх канала он держит у себя.
+// shortcut: задержка графа и устройства (ALSA, кодек BT) в left() не входит — pactl даёт 0, pw-dump — кванты без кванта графа;
+// точнее — свой поток PipeWire (pw_stream_get_time_n) вместо pw-cat, если эхо в хвосте начнёт проходить
 const LATENCY: Duration = Duration::from_millis(100);
 /// Байт звука в секунду: s16, 48 кГц, моно — формат pw-cat ниже.
 const BYTES_PER_SEC: f64 = 96000.0;
