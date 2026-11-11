@@ -289,10 +289,10 @@ pub fn run() {
         }
     })
     .expect("inotify");
-    for dir in [home().join(".claude/projects"), home().join(".codex/sessions")] {
-        if let Err(e) = watcher.watch(&dir, RecursiveMode::Recursive) {
-            eprintln!("agent-speak: не слежу за {}: {e}", dir.display());
-        }
+    // только Codex: Claude вживую — хуки, а слежка за ~/.claude/projects (сотни папок) ничего не давала
+    let codex = home().join(".codex/sessions");
+    if let Err(e) = watcher.watch(&codex, RecursiveMode::Recursive) {
+        eprintln!("agent-speak: не слежу за {}: {e}", codex.display());
     }
     let cfg_dir = crate::config::path().parent().unwrap().to_path_buf();
     let _ = std::fs::create_dir_all(&cfg_dir);
@@ -1491,13 +1491,10 @@ impl State {
     }
 
     fn on_file(&mut self, path: &Path) {
+        // Claude вживую — только хук MessageDisplay: id там UUID, в транскрипте msg_…, тексты не совпадают
+        let Some((Agent::Codex, id)) = focus::session_of(path) else { return };
         let lines = self.tail.read_new(path);
         if lines.is_empty() {
-            return;
-        }
-        let Some((agent, id)) = focus::session_of(path) else { return };
-        // Claude вживую — только хук MessageDisplay: id там UUID, в транскрипте msg_…, тексты не совпадают
-        if agent == Agent::Claude {
             return;
         }
         // сообщения — в ленту и на пересказ: дословно агенты не звучат
@@ -1508,11 +1505,7 @@ impl State {
                     self.limits.sample(w, now);
                 }
             }
-            let blocks = match agent {
-                Agent::Claude => claude::parse_line(&line),
-                Agent::Codex => codex::parse_line(&line),
-            };
-            for b in blocks {
+            for b in codex::parse_line(&line) {
                 if self.registry.status(&id, &b.text, now) {
                     self.note(&id, &b.text);
                 }
