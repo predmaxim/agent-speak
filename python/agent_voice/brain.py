@@ -254,7 +254,7 @@ class Brain:
         self.key, self.sid, self.client, self.reader = "new", None, None, None
         self.st, self.used, self.turns = {"skip": False}, time.time(), 0  # turns: запросов без ResultMessage
         self.lock = asyncio.Lock()  # warm и send не поднимают claude дважды
-        self.closing = set()  # прежние claude, закрываемые в фоне
+        self.closing = {}  # прежние claude, закрываемые в фоне: задача → сессия, которую он, может быть, дописывает
 
     def chats(self) -> list:
         return general_chats(list_sessions(OMA_DIR))
@@ -279,7 +279,9 @@ class Brain:
 
     async def _connect(self):
         """Клиент текущего чата: продолжение сессии по id, если она уже есть."""
-        await self.close()  # мёртвый клиент прошлого подключения
+        self._detach()  # мёртвый клиент прошлого подключения
+        # в сессию пишет один claude: ждём выхода прежнего той же сессии; claude других чатов закрываются сами
+        await asyncio.gather(*[t for t, sid in self.closing.items() if sid and sid == self.sid], return_exceptions=True)
         self.st, self.turns = {"skip": False}, 0
         prompt = OMA_PROMPT
         if self.key.startswith("agent:"):
@@ -341,22 +343,22 @@ class Brain:
             await self.client.interrupt()
 
     def _detach(self):
-        """Отцепить клиента и закрыть в фоне: переход в другой чат не ждёт выхода claude (SDK ждёт его до 5 с)."""
-        if self.client or self.reader:
-            t = asyncio.create_task(self._shut(self.client, self.reader))
-            self.closing.add(t)
-            t.add_done_callback(self.closing.discard)
+        """Отцепить клиента: читатель — сразу (ответ старого чата не разберётся под новым ключом и не пометит его
+        сессию чужим тегом), выход claude — в фоне: переход в другой чат его не ждёт (SDK ждёт до 5 с)."""
+        if self.reader:
+            self.reader.cancel()
+        if self.client:
+            t = asyncio.create_task(self._shut(self.client))
+            self.closing[t] = self.sid
+            t.add_done_callback(lambda t: self.closing.pop(t, None))
         self.client = self.reader = None
 
     @staticmethod
-    async def _shut(client, reader):
-        if reader:
-            reader.cancel()
-        if client:
-            with contextlib.suppress(Exception):  # клиент уже мёртв — выбрасываем его в любом случае
-                await client.disconnect()
+    async def _shut(client):
+        with contextlib.suppress(Exception):  # клиент уже мёртв — выбрасываем его в любом случае
+            await client.disconnect()
 
     async def close(self):
-        """Закрыть клиента и дождаться выхода всех прежних claude: новый не пишет в сессию, пока старый её дописывает."""
+        """Закрыть клиента и дождаться выхода всех прежних claude (выход Омы)."""
         self._detach()
         await asyncio.gather(*self.closing, return_exceptions=True)

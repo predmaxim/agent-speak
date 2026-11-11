@@ -704,24 +704,47 @@ def test_brain_reconnects_after_failed_connect_and_dead_stream(monkeypatch, tmp_
 
 
 def test_brain_open_closes_old_claude_in_background(monkeypatch, tmp_path):
-    # переход в другой чат не ждёт выхода прежнего claude (SDK ждёт до 5 с); новый подключится после его выхода
+    # переход в другой чат не ждёт выхода прежнего claude (SDK ждёт до 5 с); новый claude ждёт выхода прежнего
+    # только той же сессии — в сессию пишет один, а чат другой сессии поднимается сразу
     brain, made, _ = _fake_sdk(monkeypatch, tmp_path)
 
     async def run():
-        b = brain.Brain(asyncio.Queue(), lambda: E)
+        ev = asyncio.Queue()
+        b = brain.Brain(ev, lambda: E)
         await b.send("раз")
+        assert [await ev.get(), await ev.get()] == [("opened", "chat:sid-1", "new"), ("done", None)]
         gate = asyncio.Event()
 
         async def slow_exit():
             await gate.wait()
         made[0].disconnect = slow_exit
         await asyncio.wait_for(b.open("agent:s1"), 0.5)
+        await asyncio.wait_for(b.warm(), 0.5)
+        assert len(made) == 2, "чат другой сессии не ждёт выхода прежнего claude"
+        await b.open("chat:sid-1")
         warm = asyncio.create_task(b.warm())
         await asyncio.sleep(0.05)
-        assert len(made) == 1, "новый claude — после выхода старого: в сессию пишет один"
+        assert len(made) == 2, "та же сессия — после выхода старого claude: в сессию пишет один"
         gate.set()
         await warm
-        assert len(made) == 2
+        assert len(made) == 3 and made[2].opts.resume == "sid-1"
+        await b.close()
+
+    asyncio.run(run())
+
+
+def test_brain_open_drops_old_chats_answer_at_once(monkeypatch, tmp_path):
+    # 2026-11-12 (ревью): читатель старого клиента отменялся в фоновой задаче; готовый к запуску, он успевал
+    # разобрать ResultMessage старого чата под новым ключом — сессия общего чата помечалась как чат агента
+    brain, made, tags = _fake_sdk(monkeypatch, tmp_path)
+
+    async def run():
+        ev = asyncio.Queue()
+        b = brain.Brain(ev, lambda: E)
+        await b.send("раз")  # ResultMessage уже в потоке, читатель ещё не разобрал его
+        await b.open("agent:s1")
+        await asyncio.sleep(0.05)
+        assert tags == [] and b.sid is None and b.key == "agent:s1" and ev.empty()
         await b.close()
 
     asyncio.run(run())
