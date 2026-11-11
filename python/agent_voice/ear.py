@@ -179,9 +179,13 @@ class Ear:
     async def _read(self, proc, phrases, aec=None):
         import torch
         seg = Segmenter()
+        k, base = 0, None  # время по звуку: кадр k записан не позже base + k·32 мс; задержка чтения его не сдвигает
         try:
             while True:
                 b = await proc.stdout.readexactly(FRAME * 2)
+                k += 1
+                t = time.monotonic() - k * FRAME / RATE
+                base = t if base is None else min(base, t)
                 if aec is not None:  # читаем оба всё время — иначе отстающий поток копит задержку
                     a = await aec.stdout.readexactly(FRAME * 2)
                     if self.speaking:
@@ -192,8 +196,8 @@ class Ear:
                 x = torch.from_numpy(np.frombuffer(b, np.int16).astype(np.float32) / 32768)
                 for ev in seg.feed(self._vad(x, RATE).item(), b):
                     if ev[0] == "start":
-                        self.seq += 1
-                        await self.out.put(("start", self.seq))
+                        self.seq += 1  # начало речи — первый из start_frames кадров речи подряд
+                        await self.out.put(("start", self.seq, base + (k - seg.start_frames) * FRAME / RATE))
                     else:
                         phrases.put_nowait((self.seq, ev[1]))  # фраза закрывает последнюю начатую речь
         except asyncio.IncompleteReadError:

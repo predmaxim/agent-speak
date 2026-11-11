@@ -110,8 +110,9 @@ def _name(path):
 class Orders:
     """Передача агентам. turn() — перед каждой репликой мозгу: сказана ли она голосом и что именно."""
 
-    def __init__(self, run=cli, clock=time.monotonic, show=None):
+    def __init__(self, run=cli, clock=time.monotonic, show=None, ask=None):
         self.run, self.clock, self.show = run, clock, show  # show — полный текст ждущего поручения в окно
+        self.ask = ask  # ask — вопрос подтверждения голосом: его говорит код, второй проход мозга лишь повторял его (1–5 с)
         self.voiced, self.heard = False, ""
         self.pending = None  # поручение ждёт фразы: {args, what, verb, said, until}
         self.tripped = False  # в этом ходе мозга уже было опасное: до следующей реплики не уходит ничего
@@ -134,17 +135,17 @@ class Orders:
 
     async def _order(self, args, d, said, ok_reply, ask, verb, shown):
         if self.tripped:  # мозг перефразировал поручение в том же ходе — передавать нельзя ничего
-            return "Не передано: поручение уже ждёт подтверждения. Скажи пользователю фразу подтверждения и больше ничего не передавай."
+            return "Не передано: поручение уже ждёт подтверждения, Ома о нём спросила. Ответь ровно «[молчу]» и больше ничего не передавай."
         if d:
             self.tripped = True
             self.pending = {"args": args, "what": d, "verb": verb, "said": said, "until": self.clock() + CONFIRM_WAIT}
             if self.show:
                 self.show(shown)
-            if d is ORDINARY:
-                return (f"Не передано: голосом поручение уходит только после подтверждения. "
-                        f"Скажи пользователю ровно: «{ask} Скажи: да, {verb}.»")
-            return (f"Не передано: это {d[0]}, такое уходит только после подтверждения голосом. "
-                    f"Скажи пользователю ровно: «{ask} Это {d[0]}. Скажи: подтверждаю {d[1]}».")
+            question = f"{ask} Скажи: да, {verb}." if d is ORDINARY else f"{ask} Это {d[0]}. Скажи: подтверждаю {d[1]}."
+            if self.ask:
+                self.ask(question)
+            why = "голосом поручение уходит" if d is ORDINARY else f"это {d[0]}, такое уходит"
+            return f"Не передано: {why} только после подтверждения. Ома уже спросила вслух: «{question}» Ответь ровно «[молчу]»."
         ok, out = await self.run(*args)
         return ok_reply if ok else f"Не передано: {out}. Скажи пользователю коротко, что не вышло."
 

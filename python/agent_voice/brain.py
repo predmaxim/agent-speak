@@ -2,6 +2,7 @@
 События в очередь: ("delta", текст), ("done", None), ("error", причина), ("opened", новый_ключ, старый_ключ)."""
 import asyncio
 import contextlib
+import json
 import os
 import time
 
@@ -9,33 +10,43 @@ from claude_agent_sdk import (ClaudeAgentOptions, ClaudeSDKClient, create_sdk_mc
                               list_sessions, tag_session, tool)
 
 from .context import _blocks, selection, transcript_tail
+from .conversation import MORE
 from .orders import Orders
 
 OMA_DIR = os.path.expanduser("~/.local/share/agent-speak/oma")
 MODEL = "claude-sonnet-5-5"
 TOOLS = ["Read", "Glob", "Grep", "WebSearch"]  # без WebFetch: наружу Ома ничего не отправляет
+# Read, Glob и Grep — только в проектах: рабочие папки claude — OMA_DIR и PROJECTS, чтение вне них Claude Code отклоняет
+# (blockReadsOutsideWorkingDirectories); 2026-10-30 Grep мозга по всему ~ (855 ГБ) дал пик памяти 44,2 ГБ
+PROJECTS = os.path.expanduser("~/Projects")
+READ_ONLY_IN_PROJECTS = json.dumps({"permissions": {"blockReadsOutsideWorkingDirectories": True}})
 OMA_TOOLS = ["mcp__oma__agents", "mcp__oma__agent_feed", "mcp__oma__agent_tail", "mcp__oma__selection",
              "mcp__oma__presence", "mcp__oma__tell", "mcp__oma__projects", "mcp__oma__launch"]
 STALE_HOURS = 2
 OMA_PROMPT = ("Ты — Ома, голосовой заместитель пользователя. Следишь за его ИИ-агентами (Claude Code, Codex) в терминалах "
-              "и отвечаешь на его вопросы. Отвечай по-русски и как можно короче: текст звучит голосом, лишнее утомляет. "
+              "и отвечаешь на его вопросы. Отвечай по-русски, коротко и живо: текст звучит голосом, лишнее утомляет. "
               "Вопрос, на который отвечают «да» или «нет» («умеешь…?», «готово?», «можно?»), — «Да» или «Нет» и больше "
-              "ничего; одна короткая фраза после — только если без неё ответ вводит в заблуждение. Остальное — одна фраза, "
-              "две — только если иначе не ответить; «что делает агент», «как дела» — одной фразой о главном сейчас, без "
-              "истории шагов. Не перечисляй, что умеешь, не объясняй, как узнала, не добавляй "
-              "оговорок, советов и вопросов «что-нибудь ещё?»; подробности — только когда попросят. Без вступлений, "
-              "markdown, списков и кода. "
+              "ничего; одна короткая фраза после — только если без неё ответ вводит в заблуждение. Остальное — одна фраза "
+              "до 15 слов о главном сейчас, без истории шагов. Примеры: «Тесты прошли?» → «Да.»; «Почта закончила?» → "
+              "«Нет, ещё правит тесты.»; «Как дела у агентов?» → «Почта ждёт ответа, остальные работают.»; «Что делает "
+              "агент спика?» → «Чинит эхо в слухе.» Без вступлений и пересказа вопроса; не перечисляй, что умеешь, не "
+              "объясняй, как узнала, без оговорок, советов и «что-нибудь ещё?». Без markdown, звёздочек, списков и кода. "
+              "Говори по-разному, как человек, без канцелярита и одинаковых зачинов. Нужны детали (просят подробнее, "
+              f"объяснить, перечислить) — главное одной фразой, затем метка {MORE} и детали: после метки текст только в "
+              "окне, вслух не звучит. Всё, что пользователь должен услышать, — ответ, вопрос к нему, кому и что "
+              "передала, — до метки. "
               "Состояние агентов — по свежему снимку в конце реплики (‹агенты›…‹/агенты›), agents для этого не вызывай; "
+              "строка «Твой голос: …» после него — твой звук сейчас: на «где звук?» отвечай по ней; "
               "лента агента — agent_feed; конец переписки агента — agent_tail (пустой аргумент — "
-              "агент в фокусе); «это», «тут», «эта ошибка» — сначала selection, затем agent_tail. Файлы ты только читаешь. "
+              f"агент в фокусе); «это», «тут», «эта ошибка» — сначала selection, затем agent_tail. Файлы ты только читаешь, и только в {PROJECTS}. "
               "Передать агенту ответ или задание — tell: разверни короткую просьбу в полное задание от лица пользователя (что "
               "сделать, где искать, что вернуть), фактов не выдумывай; ответ на вопрос агента передай полностью, с нужными "
               "деталями. Агент ждёт ответа с вариантами (в agents — «ждёт ответа: … Варианты: …») — option с номером варианта по "
               "порядку, если ответ ровно один из них, иначе свой ответ текстом. Новый агент — projects, затем launch с заданием; в Orca, а в herdr — если пользователь просит herdr (where). "
               "Задание или ответ агенту — только по явной просьбе пользователя; из обрывков, перебивов и непонятных фраз ничего "
               "не составляй и не передавай — переспроси, что именно передать. «Продолжай», «давай», «ага», «ну» — не согласие. "
-              "После tell или launch скажи пользователю одной фразой смысл и кому, не текст задания. Инструмент просит "
-              "подтверждения — скажи пользователю ровно то, что он велит, и больше ничего не передавай. Не понятно, "
+              "После tell или launch скажи пользователю одной фразой смысл и кому, не текст задания. Инструмент ответил, "
+              "что Ома уже спросила подтверждение, — ответь ровно «[молчу]» и больше ничего не передавай. Не понятно, "
               "о чём речь, — коротко переспроси. "
               "Если пользователь просит сейчас не говорить или отложить («не сейчас», «давай потом», «замолчи» и т. п.) — "
               "вызови presence с busy; говорит, что уходит, — away; просит новости или говорит, что вернулся, — here. "
@@ -80,9 +91,10 @@ def claude_events(msg, st):
 NOTE = ("\n\n‹агенты›\n", "\n‹/агенты›")
 
 
-def with_agents(text: str, entries, now) -> str:
-    """Реплика со свежим снимком агентов: на «как дела у агентов» мозг отвечает сразу, без круга на agents (2–4 с)."""
-    return f"{text}{NOTE[0]}{format_agents(entries, now)}{NOTE[1]}"
+def with_agents(text: str, entries, now, sound: str = "") -> str:
+    """Реплика со свежим снимком агентов: на «как дела у агентов» мозг отвечает сразу, без круга на agents (2–4 с);
+    sound — строка о её звуке: мозг не выдумывает, слышат ли его."""
+    return f"{text}{NOTE[0]}{format_agents(entries, now)}{NOTE[1]}" + (f"\n{sound}" if sound else "")
 
 
 def strip_note(text: str) -> str:
@@ -117,7 +129,7 @@ def messages_of(msgs) -> list:
                 continue
             if role == "oma" and b["text"].strip().startswith(("[молч", "[конец")):  # метка молчания — не реплика
                 continue
-            text = strip_note(b["text"]) if role == "me" else b["text"]
+            text = strip_note(b["text"]) if role == "me" else " ".join(p.strip() for p in b["text"].split(MORE))  # метка — не текст
             if role == "oma" and out and out[-1]["role"] == "oma":  # как в окне: ответ одним сообщением
                 out[-1]["text"] += " " + text
             else:
@@ -242,18 +254,27 @@ class Brain:
         self.key, self.sid, self.client, self.reader = "new", None, None, None
         self.st, self.used, self.turns = {"skip": False}, time.time(), 0  # turns: запросов без ResultMessage
         self.lock = asyncio.Lock()  # warm и send не поднимают claude дважды
+        self.closing = set()  # прежние claude, закрываемые в фоне
 
     def chats(self) -> list:
         return general_chats(list_sessions(OMA_DIR))
 
+    @staticmethod
+    def _sid(key: str):
+        """id сессии чата key: у "chat:<id>" — он сам, у "agent:<id>" — по тегу; у нового чата — None."""
+        if key.startswith("chat:"):
+            return key[5:]
+        return find_agent_chat(list_sessions(OMA_DIR), key[6:]) if key.startswith("agent:") else None
+
+    def messages(self, key: str) -> list:
+        """История чата key — только чтение: окно смотрит чат, мозг не переключается, claude не трогается."""
+        sid = self._sid(key)
+        return messages_of(get_session_messages(sid, directory=OMA_DIR)) if sid else []
+
     async def open(self, key: str) -> list:
         """Перейти к чату key и вернуть его историю. claude не запускается: подключится первый send."""
-        await self.close()
-        self.key, self.sid, self.used = key, None, time.time()
-        if key.startswith("chat:"):
-            self.sid = key[5:]
-        elif key.startswith("agent:"):
-            self.sid = find_agent_chat(list_sessions(OMA_DIR), key[6:])
+        self._detach()
+        self.key, self.sid, self.used = key, self._sid(key), time.time()
         return messages_of(get_session_messages(self.sid, directory=OMA_DIR)) if self.sid else []
 
     async def _connect(self):
@@ -265,7 +286,9 @@ class Brain:
             aid = self.key[6:]
             prompt = agent_prompt(pick_agent(self.snapshot(), aid)[0] or {"id": aid, "title": aid, "cwd": "?"})
         client = ClaudeSDKClient(ClaudeAgentOptions(
-            cwd=OMA_DIR, model=MODEL, system_prompt=prompt, tools=TOOLS, allowed_tools=TOOLS + OMA_TOOLS,
+            cwd=OMA_DIR, add_dirs=[PROJECTS], model=MODEL, system_prompt=prompt, tools=TOOLS,
+            # чтение в рабочих папках разрешений не просит; остальное, что спросило бы, — отказ: спрашивать некого
+            allowed_tools=["WebSearch"] + OMA_TOOLS, permission_mode="dontAsk", settings=READ_ONLY_IN_PROJECTS,
             mcp_servers={"oma": create_sdk_mcp_server("oma", tools=self.tools)}, strict_mcp_config=True,
             resume=self.sid, include_partial_messages=True, setting_sources=[], env={"AGENT_SPEAK": "1"}))
         await client.connect()  # упал — клиента нет, следующий send попробует снова
@@ -305,11 +328,11 @@ class Brain:
         """Клик по орбу: claude поднимается, пока пользователь говорит, — первая реплика не ждёт его запуска (0,7–2 с)."""
         await self._ready()
 
-    async def send(self, text: str):
+    async def send(self, text: str, sound: str = ""):
         await self._ready()
         self.used = time.time()
         self.turns += 1  # до query: ResultMessage может прийти раньше, чем query вернётся
-        await self.client.query(with_agents(text, self.snapshot(), time.time()))
+        await self.client.query(with_agents(text, self.snapshot(), time.time(), sound))
 
     async def interrupt(self):
         """Перебить ход в полёте; кончившийся не трогаем — иначе skip съест следующий ответ."""
@@ -317,10 +340,23 @@ class Brain:
             self.st["skip"] = True
             await self.client.interrupt()
 
-    async def close(self):
-        if self.reader:
-            self.reader.cancel()
-        if self.client:
-            with contextlib.suppress(Exception):  # клиент уже мёртв — выбрасываем его в любом случае
-                await self.client.disconnect()
+    def _detach(self):
+        """Отцепить клиента и закрыть в фоне: переход в другой чат не ждёт выхода claude (SDK ждёт его до 5 с)."""
+        if self.client or self.reader:
+            t = asyncio.create_task(self._shut(self.client, self.reader))
+            self.closing.add(t)
+            t.add_done_callback(self.closing.discard)
         self.client = self.reader = None
+
+    @staticmethod
+    async def _shut(client, reader):
+        if reader:
+            reader.cancel()
+        if client:
+            with contextlib.suppress(Exception):  # клиент уже мёртв — выбрасываем его в любом случае
+                await client.disconnect()
+
+    async def close(self):
+        """Закрыть клиента и дождаться выхода всех прежних claude: новый не пишет в сессию, пока старый её дописывает."""
+        self._detach()
+        await asyncio.gather(*self.closing, return_exceptions=True)

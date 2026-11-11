@@ -28,15 +28,18 @@ ANSWER_WORDS = {"да", "ага", "угу", "ок", "окей", "тут", "я", 
 ANSWER_MAX = 8  # слов: ответ Оме короткий; длинное — разговор в комнате, в нём «да» и «нет» есть всегда
 ANSWER_STEMS = ("здес", "слуша", "говор", "рассказ", "давай", "нов", "потом", "позж", "минут", "секунд", "сейчас",
                 "подожд", "занят", "отбо", "отмен", "стоп", "ома", "хорош", "ладн")
-ECHO_WINDOW = 3     # с после её речи: хвост её голоса из динамиков ещё в микрофоне
+# Хвост её звука после «смолкла» демона (speaker::TAIL): pw-cat доигрывает буфер ~0,7 с — её голос ещё в динамиках
+TAIL = 1.0
 ECHO_SHARE = 0.6    # доля слов фразы из её же речи, с которой фраза — эхо
 ECHO_RUN = 3        # слов её речи по порядку в начале фразы, с которых это начало — эхо
 # Что она делает, пока мозг занят инструментом или раздумьем: тишина хуже повтора; presence — мгновенный, без слова
 FILLERS = {"mcp__oma__agents": "Смотрю агентов.", "mcp__oma__agent_feed": "Смотрю ленту агента.",
            "mcp__oma__agent_tail": "Читаю переписку агента.", "mcp__oma__selection": "Смотрю выделенное.",
-           "mcp__oma__tell": "Передаю агенту.", "mcp__oma__projects": "Смотрю проекты.", "mcp__oma__launch": "Запускаю агента.",
+           "mcp__oma__tell": "Готовлю поручение.", "mcp__oma__projects": "Смотрю проекты.", "mcp__oma__launch": "Готовлю запуск.",
            "Read": "Смотрю файлы.", "Glob": "Смотрю файлы.", "Grep": "Смотрю файлы.", "WebSearch": "Ищу в сети.",
            "thinking": "Секунду, подумаю.", "mcp__oma__presence": ""}
+# Голосом — коротко, текстом — сколько нужно: после этой метки ответ мозга только в окне (формат задаёт мозг, как [молчу])
+MORE = "‹подробно›"
 # Междометие, кашель, вздох — как их пишет whisper («Кхм.», «Эм...», «Э-э-э», «Кхе-кхе»): не реплика
 NOISE = re.compile(r"(?:э+м*|м+|х+м+|к+х+[еам]*|а+|о+х*|ой|ай|эх|ух|уф|ах|фу|ну+)$")
 
@@ -116,17 +119,21 @@ class Conversation:
         self.mic = False       # микрофон занят другим (voxtype и т. п.)
         self.chunker = Chunker()
         self.started = self.heard = self.cut = 0  # номера речи: начата / пришла / отменена до
-        self.echo_n = 0        # номер речи, начатой под её голос: эхо судится по началу фразы, а не по её распознаванию
+        self.echo_n = 0        # номер речи, начатой, пока звучал её голос: эхо судится по началу фразы, а не по распознаванию
         self.held = 0          # номер речи, начатой, пока она думала или говорила: обрывать ли — решает распознанный текст
         self.suspended = False # её речь на паузе по перебиву: перебил не ей («[молчу]», кашель) — продолжит, иначе выбросить
         self.head = ""         # начало хода до первого знака; ход с «[» — метка «[молчу]»/«[конец]», решится в done; None — решено
         self.send_at = None    # когда отправить черновик
+        self.heard_at = 0.0    # когда в черновик вошла последняя фраза
         self.quiet_at = None   # когда закончить разговор от тишины
         self.window = None     # разговор открыт окном ответа: {kind, said, first, close}
         self.echo = False      # слух — через эхоподавление (Ома в динамиках): её голос просачивается в микрофон
         self.said = ""         # что она сказала в этом ответе — по нему узнаётся эхо
         self.spoke_at = None   # когда смолк её звук
         self.voiced = False    # последняя реплика сказана голосом, не набрана: опасное по ней — только с подтверждением
+        self.asked = False     # в этом ходе код спросил подтверждение поручения: дальше ход молчит
+        self.hold = ""         # конец текста, похожий на начало метки MORE: ждёт следующей дельты
+        self.more = None       # подробности после метки MORE (None — метки ещё не было)
 
     @property
     def silence(self):
@@ -165,7 +172,8 @@ class Conversation:
         return acts
 
     def _send(self, text, ctx="", voiced=True):
-        self.turn, self.voiced, self.said = True, voiced, ""
+        self.turn, self.voiced, self.said, self.asked = True, voiced, "", False
+        self.hold, self.more = "", None
         self.head = ""
         self.chunker.reset()
         return [("send", text, ctx)] + self._to("thinking")
@@ -268,17 +276,21 @@ class Conversation:
             return []
         return self._stop_turn() + self._drop() + self._send(t, voiced=False)
 
-    def _echoing(self):
-        """Её голос сейчас (или только что) звучит из динамиков, и слух его слышит."""
-        recent = self.spoke_at is not None and self.clock() - self.spoke_at < ECHO_WINDOW
-        return self.echo and bool(self.said) and (self.audio_busy or self.state == "speaking" or recent)
+    def _echoing(self, at):
+        """В момент at её голос звучал из динамиков, и слух его слышал: она говорит или хвост pw-cat (TAIL) после
+        «смолкла» ещё не доигран. Речь, начатая после конца её звука, — не эхо, даже если это её же слова
+        («Скажи: да, передай» → «Да, передай»)."""
+        playing = self.audio_busy or self.state == "speaking" or (self.spoke_at is not None and at < self.spoke_at + TAIL)
+        return self.echo and bool(self.said) and playing
 
-    def speech_start(self, n):
+    def speech_start(self, n, at=None):
+        """Начало речи n; at — когда она началась (слух меряет по звуку), без него — сейчас."""
         if not self.active or self.state in ("idle", "paused"):
             return []
-        if self._echoing():
+        at = self.clock() if at is None else at
+        if self._echoing(at):
             self.echo_n = n
-        if self._echoing() and (self.audio_busy or self.state == "speaking"):
+        if self._echoing(at) and (self.audio_busy or self.state == "speaking"):
             self.started = n  # её голос или перебив — решит распознанный текст: обрывать её по эху нельзя
             return []
         if self.window and not self.window["first"]:
@@ -297,18 +309,18 @@ class Conversation:
             self.quiet_at = None
         return acts + [("draft", self.draft, True)]
 
-    def phrase(self, text, n, done=None):
+    def phrase(self, text, n):
         self.heard = max(self.heard, n)
         if self.window and not self.window["first"]:
             return []  # на окно уже ответили: речь в комнате — не Оме
         pre = []
-        if self._echoing() or n == self.echo_n:  # пользователь договаривал дольше ECHO_WINDOW — начало всё равно её
+        if n == self.echo_n:  # началась под её голос — начало может быть её, когда бы фразу ни распознали
             if is_echo(text, self.said):
                 return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else []
-            text = strip_echo(text, self.said, tail=n == self.echo_n)
+            text = strip_echo(text, self.said, tail=True)
             if self.state == "speaking" and is_barge(text):
                 pre = self._barge()  # не её слова — перебивает пользователь
-        elif n == self.held and self.state in ("thinking", "speaking"):
+        if n == self.held and self.state in ("thinking", "speaking"):  # и под эхом: пока она думает, слова её обрывают
             if not is_barge(text):  # кашель, «угу» — она продолжает
                 acts = self._resume() if self.suspended else []
                 return acts + ([("draft", self.draft, self.hearing)] if self.draft or self.hearing else [("drop_draft",)])
@@ -319,10 +331,16 @@ class Conversation:
         if len(t) < 2 or is_noise(t):
             return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else [("drop_draft",)]
         self.draft = f"{self.draft} {t}".strip()
-        wait = SEND_PAUSE if done is None else 0.0 if done >= DONE else SEND_PAUSE if done >= UNDONE else WAIT_MORE
-        self.send_at = self.clock() + wait
+        self.heard_at = self.clock()
+        self.send_at = self.heard_at + SEND_PAUSE
         self.quiet_at = self.clock() + self.silence
         return pre + [("draft", self.draft, self.hearing)]
+
+    def turn_end(self, done):
+        """Smart Turn по фразе, вошедшей в черновик (done — вероятность, что договорил; None — не знает): уверен —
+        отправка сразу, оборвал на полуслове — ждать продолжения дольше. Эхо и непринятое он не судит: зря CPU."""
+        if done is not None and self.send_at is not None:
+            self.send_at = self.heard_at + (0.0 if done >= DONE else SEND_PAUSE if done >= UNDONE else WAIT_MORE)
 
     def tick(self):
         now = self.clock()
@@ -358,29 +376,48 @@ class Conversation:
         return acts
 
     def delta(self, text):
-        if not self.turn:
+        if not self.turn or self.asked:
             return []
         if self.head is not None:  # метка молчания — первым знаком хода: до решения ничего не звучит
             self.head += text
             if not self.head.strip() or self.head.lstrip().startswith("["):
                 return []
             text, self.head = self.head, None
-            return self._discard() + self._speak(self.chunker.feed(text))  # ответ по делу — прерванный не нужен
-        return self._speak(self.chunker.feed(text))
+            return self._discard() + self._voice(text)  # ответ по делу — прерванный не нужен
+        return self._voice(text)
+
+    def _voice(self, text):
+        """Текст хода: до метки MORE — голосом и в окне, после — только в окне (одним куском в конце хода)."""
+        if self.more is not None:
+            self.more += text
+            return []
+        buf = self.hold + text
+        i = buf.find(MORE)
+        if i >= 0:
+            self.hold, self.more = "", buf[i + len(MORE):]
+            return self._speak(self.chunker.feed(buf[:i]) + self.chunker.flush())
+        keep = next((k for k in range(min(len(MORE) - 1, len(buf)), 0, -1) if MORE.startswith(buf[-k:])), 0)
+        self.hold = buf[len(buf) - keep:]
+        return self._speak(self.chunker.feed(buf[:len(buf) - keep]))
+
+    def _finish(self):
+        """Конец хода: недосказанное — голосом, подробности после метки — в окно."""
+        rest, more, self.hold, self.more = self.hold, (self.more or "").strip(), "", None
+        return self._speak(self.chunker.feed(rest) + self.chunker.flush()) + ([("show", more)] if more else [])
 
     def done(self):
         if not self.turn:
             return []
         self.turn = False
         head, self.head = (self.head or "").strip(), None
-        if head.lower().startswith("[конец"):  # «ок, спасибо» после её ответа — разговор окончен
+        if head.lower().startswith("[конец") and not self.asked:  # «ок, спасибо» после её ответа — разговор окончен
             return self.end()
-        if head.lower().startswith("[молч"):
+        if head.lower().startswith("[молч") or self.asked:  # после вопроса подтверждения — ждём «да, передай»
             if self.suspended:
                 return self._resume()  # перебили не её — продолжает прерванный ответ
             acts = []
         else:
-            acts = self._discard() + self._speak(self.chunker.feed(self._unmark(head)) + self.chunker.flush())
+            acts = self._discard() + self._voice(self._unmark(head)) + self._finish()
         if self.state == "speaking":
             return acts  # дозвучит — audio(False) вернёт в покой
         if self._closing():
@@ -392,9 +429,17 @@ class Conversation:
         """Ход начался с «[», но это не метка: скобки не читаются."""
         return text.replace("[", "").replace("]", "")
 
+    def question(self, text):
+        """Вопрос подтверждения поручения говорит код, сразу при вызове инструмента; через неё, а не мимо: её слова
+        знает защита от эха. Мозгу велено ответить «[молчу]»; что бы он ни написал, ход дальше молчит — вопрос последний."""
+        if not self.turn or self.asked:
+            return []
+        self.asked = True
+        return self._discard() + self._speak(self.chunker.flush() + [text])
+
     def tool(self, name):
         """Мозг взялся за инструмент (или задумался) — сказать, что она делает, если сейчас не звучит."""
-        if not self.turn or self.audio_busy or self.state == "speaking" or (name == "thinking" and self.said):
+        if not self.turn or self.asked or self.audio_busy or self.state == "speaking" or (name == "thinking" and self.said):
             return []
         phrase = FILLERS.get(name, "Секунду.")
         return self._discard() + self._speak([phrase]) if phrase else []
