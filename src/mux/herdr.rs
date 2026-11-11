@@ -32,9 +32,15 @@ impl Mux for Herdr {
     fn type_text(&self, pane: &Pane, text: &str) -> Result<(), String> {
         ok(&cli(herdr(pane, &["pane", "send-text", &pane.id, text]))?)
     }
-    fn shown(&self, env: &HashMap<String, String>) -> Option<bool> {
-        let pane = self.locate(env)?;
-        Some(focused_pane(&cli(herdr(&pane, &["pane", "list"])).ok()?)? == pane.id)
+    fn shown(&self, envs: &[&HashMap<String, String>]) -> Vec<Option<bool>> {
+        // список панелей — один на сессию herdr (сокет), а не на каждого агента
+        let mut lists: HashMap<String, Option<String>> = HashMap::new();
+        let mut one = |env: &&HashMap<String, String>| -> Option<bool> {
+            let pane = self.locate(env)?;
+            let list = lists.entry(pane.via.clone()).or_insert_with(|| cli(herdr(&pane, &["pane", "list"])).ok());
+            Some(focused_pane(list.as_deref()?)? == pane.id)
+        };
+        envs.iter().map(&mut one).collect()
     }
     fn screen(&self, pane: &Pane) -> Result<String, String> {
         cli(herdr(pane, &["pane", "read", &pane.id, "--source", "visible", "--lines", "40"]))

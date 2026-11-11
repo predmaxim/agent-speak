@@ -40,14 +40,15 @@ impl Mux for Orca {
         let out = cli(orca(pane, &["read", "--screen"]))?;
         screen_text(&out).ok_or_else(|| error_of(&out))
     }
-    fn shown(&self, env: &HashMap<String, String>) -> Option<bool> {
-        // открытую вкладку Orca хранит в своей базе (обновляет за секунду); CLI её не знает, а стоит полсекунды процессора
-        let (tab, worktree, data) = (env.get("ORCA_TAB_ID")?, env.get("ORCA_WORKTREE_ID")?, env.get("ORCA_USER_DATA_PATH")?);
-        let index: Value = serde_json::from_str(&std::fs::read_to_string(format!("{data}/orca-profile-index.json")).ok()?).ok()?;
-        let db = format!("file:{data}/profiles/{}/profile-state.db?mode=ro", index["activeProfileId"].as_str()?);
-        let mut c = Command::new("sqlite3");
-        c.args(["-json", "-readonly", &db, SHOWN_QUERY]);
-        tab_shown(&cli(c).ok()?, worktree, tab)
+    fn shown(&self, envs: &[&HashMap<String, String>]) -> Vec<Option<bool>> {
+        // открытую вкладку Orca хранит в своей базе (обновляет за секунду); CLI её не знает, а стоит полсекунды процессора;
+        // запрос один на всех агентов окна, а не на каждого
+        let mut sessions: HashMap<String, Option<String>> = HashMap::new(); // папка данных Orca → её ответ
+        let mut one = |env: &&HashMap<String, String>| -> Option<bool> {
+            let (tab, worktree, data) = (env.get("ORCA_TAB_ID")?, env.get("ORCA_WORKTREE_ID")?, env.get("ORCA_USER_DATA_PATH")?);
+            tab_shown(sessions.entry(data.clone()).or_insert_with(|| workspace(data)).as_deref()?, worktree, tab)
+        };
+        envs.iter().map(&mut one).collect()
     }
     fn projects(&self) -> Result<Vec<String>, String> {
         let mut c = Command::new(orca_bin());
@@ -92,6 +93,15 @@ fn closed(err: String) -> String {
     } else {
         err
     }
+}
+
+/// Ответ базы Orca о сессии окна (открытый worktree и вкладки), см. SHOWN_QUERY.
+fn workspace(data: &str) -> Option<String> {
+    let index: Value = serde_json::from_str(&std::fs::read_to_string(format!("{data}/orca-profile-index.json")).ok()?).ok()?;
+    let db = format!("file:{data}/profiles/{}/profile-state.db?mode=ro", index["activeProfileId"].as_str()?);
+    let mut c = Command::new("sqlite3");
+    c.args(["-json", "-readonly", &db, SHOWN_QUERY]);
+    cli(c).ok()
 }
 
 const SHOWN_QUERY: &str = "select json_extract(payload,'$.activeWorktreeId') as worktree, json_extract(payload,'$.activeTabIdByWorktree') as tabs from profile_state_documents where domain='workspaceSession'";
@@ -169,6 +179,23 @@ mod tests {
         assert_eq!(tab_shown(out, "w1::/p/a", "tab-a"), Some(false), "вкладка своего worktree, но открыт другой");
         assert_eq!(tab_shown(out, "w2::/p/b", "tab-x"), Some(false));
         assert_eq!(tab_shown("[]", "w2::/p/b", "tab-b"), None, "нет сессии — фокус неизвестен");
+    }
+
+    #[test]
+    fn shown_tabs_of_all_agents_from_one_query() {
+        // база Orca как у живой: индекс профилей и workspaceSession; агенты окна — один запрос на всех
+        let data = std::env::temp_dir().join(format!("oma-orca-{}", std::process::id()));
+        std::fs::create_dir_all(data.join("profiles/p1")).unwrap();
+        std::fs::write(data.join("orca-profile-index.json"), r#"{"activeProfileId":"p1"}"#).unwrap();
+        let payload = r#"{"activeWorktreeId":"w2","activeTabIdByWorktree":{"w1":"tab-a","w2":"tab-b"}}"#;
+        let sql = format!("create table profile_state_documents(domain text, payload text); insert into profile_state_documents values('workspaceSession', '{payload}');");
+        let db = data.join("profiles/p1/profile-state.db");
+        assert!(Command::new("sqlite3").arg(&db).arg(sql).status().unwrap().success());
+        let env = |wt: &str, tab: &str| HashMap::from([("ORCA_TAB_ID".to_string(), tab.to_string()), ("ORCA_WORKTREE_ID".into(), wt.into()),
+            ("ORCA_USER_DATA_PATH".into(), data.to_string_lossy().into_owned())]);
+        let (a, b) = (env("w1", "tab-a"), env("w2", "tab-b"));
+        assert_eq!(Orca.shown(&[&a, &b, &HashMap::new()]), [Some(false), Some(true), None]);
+        let _ = std::fs::remove_dir_all(data);
     }
 
     #[test]

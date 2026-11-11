@@ -48,9 +48,10 @@ pub trait Mux: Sync {
     fn no_project(&self) -> String {
         format!("этого проекта нет в {}", self.name())
     }
-    /// Виден ли сейчас на экране терминал процесса с этим окружением (вкладка Orca, панель herdr); None — не знает.
-    fn shown(&self, _env: &HashMap<String, String>) -> Option<bool> {
-        None
+    /// Видны ли сейчас на экране терминалы процессов с этими окружениями (вкладка Orca, панель herdr), по ответу на
+    /// каждое; None — не знает. Один вызов на всех агентов этого мультиплексора.
+    fn shown(&self, envs: &[&HashMap<String, String>]) -> Vec<Option<bool>> {
+        vec![None; envs.len()]
     }
     /// Новый агент Claude в папке cwd с первым сообщением prompt.
     fn launch(&self, _cwd: &str, _prompt: &str) -> Result<(), String> {
@@ -119,11 +120,26 @@ fn adapter(pane: &Pane) -> Result<&'static dyn Mux, String> {
 }
 
 /// Агент (pid) в видимом терминале, среди агентов под одним окном (Orca держит всех в одном окне).
+/// Вопрос — один на мультиплексор, а не на агента; мультиплексоры (herdr внутри Orca) спрашиваются параллельно.
 pub fn active_among(pids: &[u32]) -> Option<u32> {
-    among(pids, |pid| {
-        let (env, host) = (environ(pid), host_cmdline(pid));
-        adapters().into_iter().find(|m| m.locate(&env).is_some() && m.hosts(&host))?.shown(&env)
-    })
+    let agents: Vec<(u32, HashMap<String, String>, Option<&'static str>)> = pids.iter().map(|&pid| {
+        let env = environ(pid);
+        let mux = pick(&env, &host_cmdline(pid)).map(|p| p.mux);
+        (pid, env, mux)
+    }).collect();
+    let seen: Vec<(u32, Option<bool>)> = std::thread::scope(|s| {
+        let asks: Vec<_> = adapters()
+            .into_iter()
+            .map(|m| (m, agents.iter().filter(|a| a.2 == Some(m.name())).collect::<Vec<_>>()))
+            .filter(|(_, mine)| !mine.is_empty())
+            .map(|(m, mine)| s.spawn(move || {
+                let envs: Vec<&HashMap<String, String>> = mine.iter().map(|a| &a.1).collect();
+                mine.iter().map(|a| a.0).zip(m.shown(&envs)).collect::<Vec<_>>()
+            }))
+            .collect();
+        asks.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    });
+    among(pids, |pid| seen.iter().find(|(p, _)| *p == pid).and_then(|(_, s)| *s))
 }
 
 fn among(pids: &[u32], shown: impl Fn(u32) -> Option<bool>) -> Option<u32> {
