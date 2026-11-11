@@ -77,7 +77,11 @@ Item {
       link.retry()
       if (!omaWindow.shown) omaWindow.open("")
     }
-    function talk(): void { link.send(Model.omaCmd({ do: "talk" })) }
+    // No service: her window, showing Oma off with its switch, instead of a hotkey that does nothing.
+    function talk(): void {
+      if (link.up) link.send(Model.omaCmd({ do: "talk" }))
+      else if (!omaWindow.shown) omaWindow.open("")
+    }
     function cancel(): void {
       link.send(Model.omaCmd({ do: "cancel" }))
       escHold.restart()

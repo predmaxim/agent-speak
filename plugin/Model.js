@@ -125,6 +125,22 @@ function rowIndex(agents, key) {
   return -1
 }
 
+// Oma (the Python half) takes commands: the daemon is up and she has said
+// her state; "off" — she is down or still starting, the daemon drops them.
+function omaUp(st) {
+  return !!st && st.running === true && st.oma !== "off"
+}
+
+// A typed question goes out once, while Oma takes it; the field keeps it
+// until it is `taken`: her chat echoes it back as my line.
+function askable(text, asked, st) {
+  return text !== "" && text !== asked && omaUp(st)
+}
+
+function taken(asked, d) {
+  return asked !== "" && d.role === "me" && d.text === asked
+}
+
 // Time since `since` (seconds): a key for tr(key, n).
 function ago(since, now) {
   var d = Math.max(0, now - since)

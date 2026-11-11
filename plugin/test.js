@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -167,6 +167,21 @@ assert.strictEqual(M.rowIndex(ags, "agent:b"), 2)
 assert.strictEqual(M.rowIndex([{ id: "b" }, { id: "c" }, { id: "a" }], "agent:b"), 1)
 assert.strictEqual(M.rowIndex(ags, "agent:gone"), -1)
 assert.strictEqual(M.rowIndex(ags, ""), -1)
+
+// A typed question: sent once, only while Oma takes commands; the field keeps it until her chat echoes it back
+assert.strictEqual(M.omaUp(st), true)
+assert.strictEqual(M.omaUp(Object.assign({}, st, { oma: "loading" })), true)
+assert.strictEqual(M.omaUp(Object.assign({}, st, { oma: "off" })), false)   // the daemon runs, Oma is down
+assert.strictEqual(M.omaUp(M.OFFLINE), false)                                // no daemon
+assert.strictEqual(M.askable("как дела", "", st), true)
+assert.strictEqual(M.askable("", "", st), false)
+assert.strictEqual(M.askable("как дела", "как дела", st), false)              // already sent, not echoed yet
+assert.strictEqual(M.askable("как дела", "", Object.assign({}, st, { oma: "off" })), false)
+assert.strictEqual(M.askable("как дела", "", M.OFFLINE), false)
+assert.strictEqual(M.taken("как дела", { key: "chat:1", role: "me", text: "как дела" }), true)
+assert.strictEqual(M.taken("как дела", { key: "chat:1", role: "oma", text: "как дела" }), false)
+assert.strictEqual(M.taken("как дела", { key: "chat:1", role: "me", text: "другое" }), false)
+assert.strictEqual(M.taken("", { key: "chat:1", role: "me", text: "" }), false)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }

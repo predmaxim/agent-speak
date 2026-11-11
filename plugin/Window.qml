@@ -57,6 +57,10 @@ Item {
   property var messages: []
   property var chatList: []
   property real now: Date.now() / 1000
+  property string asked: ""          // the question sent, until Oma's chat has it
+  readonly property bool omaUp: Model.omaUp(speech)
+  // Oma went down: what she had not taken is lost with her, Enter sends it again.
+  onOmaUpChanged: if (!omaUp) asked = ""
 
   // One cursor for keys and mouse: a row of the page (-1 none) or, with
   // onHead, the header's button headCol. On the main page it holds the row's
@@ -154,11 +158,13 @@ Item {
     root.showPage("main")
   }
 
+  // The question stays in the field until Oma echoes it into the chat
+  // (onChatDelta): with Oma down it is not lost, the note says why.
   function ask() {
     var text = field.text.trim()
-    if (!text) return
+    if (!Model.askable(text, root.asked, root.speech)) return
+    root.asked = text
     root.send({ do: "ask", text: text, key: root.chatKey })
-    field.text = ""
   }
 
   function showPage(p) {
@@ -289,6 +295,8 @@ Item {
   // The draft is the footer, not the model: it keeps the end only while the chat follows.
   onDraftChanged: if (chatView.follow) root.scrollDown()
   onRowCountChanged: if (root.cursor >= root.rowCount) root.setCursor(root.rowCount - 1)
+  // The service went off: only its switch works (Model.headItems), no page is left to send into nothing.
+  onSpeechChanged: if (speech.running !== true && page !== "main") showPage("main")
 
   Connections {
     target: root.link
@@ -298,7 +306,13 @@ Item {
       root.chatKey = shownChat.key
       root.setMessages(shownChat.messages)
     }
-    function onChatDelta(d) { if (d.key === root.chatKey) root.setMessages(Model.chatApply(root.messages, d)) }
+    function onChatDelta(d) {
+      if (Model.taken(root.asked, d)) {
+        if (field.text.trim() === root.asked) field.text = ""   // not what the user typed since
+        root.asked = ""
+      }
+      if (d.key === root.chatKey) root.setMessages(Model.chatApply(root.messages, d))
+    }
     function onChats(list) { root.chatList = list }
   }
 
@@ -784,11 +798,13 @@ Item {
               anchors.right: parent.right
               anchors.bottom: parent.bottom
               height: Math.max(Style.space(34), Style.font.title + Style.spacing.controlPaddingY * 2)
-              leftPadding: 0; rightPadding: 0; topPadding: 0; bottomPadding: 0
+              leftPadding: 0; topPadding: 0; bottomPadding: 0
+              rightPadding: omaNote.visible ? omaNote.width + Style.space(10) : 0
               background: null
               placeholderText: root.tr("Ask Oma…")
               placeholderTextColor: Util.alpha(root.fg, 0.58)
               foreground: root.fg
+              color: root.asked !== "" && text.trim() === root.asked ? root.dim : root.fg   // sent, Oma has not taken it yet
               font.family: root.font
               font.pixelSize: Style.font.heading
               cursorDelegate: Item {}
@@ -800,6 +816,19 @@ Item {
               Keys.onReturnPressed: root.enter()
               Keys.onEnterPressed: root.enter()
               Keys.onTabPressed: {}   // Tab does nothing in a centred modal
+            }
+
+            // Oma is down (the service runs): a question waits in the field, Enter sends it when she is back.
+            Text {
+              id: omaNote
+              visible: !root.omaUp
+              anchors.right: parent.right
+              anchors.verticalCenter: field.verticalCenter
+              textFormat: Text.PlainText
+              text: root.tr("Oma is not running")
+              color: root.dim
+              font.family: root.font
+              font.pixelSize: Style.font.body
             }
           }
 

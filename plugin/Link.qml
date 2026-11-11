@@ -24,11 +24,13 @@ Item {
   // Reconnect now (the service was just turned on), not at the next 5 s retry.
   function retry() { if (!up) attempt++ }
 
+  // No connection: nothing to queue it for (the service may stay off), the
+  // journal says what was dropped; the window and the orb show Oma off.
   function send(line) {
     if (up && sockLoader.item) {
       sockLoader.item.write(line)
       sockLoader.item.flush()
-    }
+    } else console.warn("predmaxim.oma: no agent-speakd, not sent:", line.trim())
   }
 
   visible: false
