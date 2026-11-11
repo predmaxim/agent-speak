@@ -30,7 +30,7 @@ class SmartTurn:
             from faster_whisper.feature_extractor import FeatureExtractor
             so = ort.SessionOptions()
             so.inter_op_num_threads = 1
-            # потоки по умолчанию после вызова крутятся вхолостую: ~5 с CPU на фразу; так — 18 мс и 34 мс CPU (замер 2026-11-11)
+            # потоки по умолчанию после вызова крутятся вхолостую: ~5 с CPU на фразу; так — 30–70 мс и 50–120 мс CPU на вызов (замер 2026-11-11)
             so.intra_op_num_threads = 2
             so.add_session_config_entry("session.intra_op.allow_spinning", "0")
             self._session = ort.InferenceSession(self.path, sess_options=so, providers=["CPUExecutionProvider"])
