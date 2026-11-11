@@ -40,6 +40,7 @@ enum Event {
     Presence(String), // новый снимок сервиса присутствия
     Acted(mux::Done), // поток действий: исход действия сторожа в терминале агента
     Tell(Box<dyn FnOnce() + Send>), // ответ агенту от Омы — в поток действий; ответ CLI шлёт само дело
+    Turn(Sender<String>), // ход мозга Омы: свежий фокус, ответ — строка агентов
     Bt(&'static str, bool), // режим наушников переключён (headset | music) и переключала ли его Ома
 }
 
@@ -418,6 +419,9 @@ pub fn run() {
             Event::Tell(work) => {
                 let _ = st.act.send(mux::Work::Other(work)); // поток действий упал — дело выброшено, CLI получит ошибку
             }
+            Event::Turn(reply) => {
+                let _ = reply.send(st.turn());
+            }
             Event::Bt(mode, switched) => st.on_bt(mode, switched),
         }
     }
@@ -605,6 +609,14 @@ fn listen_cmd(kind: &str, said: &str, key: Option<String>, speakers: bool, secs:
     cmd
 }
 
+/// Ответ на запрос (tell, turn) — строкой в то же соединение. Клиент, приславший запрос в соединение, которое не
+/// читает, не держит поток вечно: запись ждёт не больше секунды, затем соединение закрывается — клиент переподключится.
+fn answer(conn: &UnixStream, line: &str) -> bool {
+    let _ = conn.set_write_timeout(Some(Duration::from_secs(1)));
+    let mut w = conn;
+    w.write_all(line.as_bytes()).is_ok()
+}
+
 /// Одно соединение: команды построчно до закрытия (CLI и хуки — одна строка).
 /// subscribe — копия потока уходит в основной цикл подписчиком, чтение команд продолжается.
 // ponytail: поток на соединение без лимита — клиенты только свои (CLI, хуки, плагин)
@@ -627,7 +639,14 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
                     Some(Err(e)) => serde_json::json!({"err": e}),
                     None => serde_json::json!({"err": "служба не передала: поток действий не работает"}),
                 };
-                if (&conn).write_all(format!("{reply}\n").as_bytes()).is_err() {
+                if !answer(&conn, &format!("{reply}\n")) {
+                    break;
+                }
+            }
+            Ok(Msg::Turn) => {
+                let (rtx, rrx) = mpsc::channel();
+                let Some(line) = tx.send(Event::Turn(rtx)).ok().and_then(|()| rrx.recv().ok()) else { break };
+                if !answer(&conn, &line) {
                     break;
                 }
             }
@@ -662,12 +681,13 @@ impl State {
         self.focus_cache.as_ref().and_then(|(_, f)| f.clone())
     }
 
-    /// Ома начинает ход (разговор, набранный вопрос, реплика голосом): её снимку агентов — свежий фокус.
-    /// Строка агентов уходит подписчикам раньше, чем команда — Оме.
-    fn refocus(&mut self) {
+    /// Ход мозга Омы (turn): снимку агентов — фокус этой минуты. Ответ — строка агентов: снимок свежий по протоколу,
+    /// а не по порядку двух каналов (подписка и команды); подписчики получают её же, если она сменилась.
+    fn turn(&mut self) -> String {
         self.focus_cache = None;
         self.focused();
         self.push_agents();
+        self.registry.line()
     }
 
     fn quiet(&self) -> bool {
@@ -1277,7 +1297,6 @@ impl State {
                 if audible(&Kind::Voice, self.quiet()) {
                     crate::audio::chime(&self.shared.sink.lock().unwrap()); // туда же, куда её голос
                 }
-                self.refocus(); // реплика ушла мозгу — снимок агентов с фокусом этой минуты
             }
             Msg::VoiceState { state, talking } => {
                 if state == "idle" {
@@ -1288,13 +1307,7 @@ impl State {
                 self.oma.talking = talking;
                 self.purge();
             }
-            Msg::Oma { action } => {
-                // Esc и прочее фокус не ждут
-                if matches!(action["do"].as_str(), Some("talk" | "ask")) {
-                    self.refocus();
-                }
-                self.oma_send(&action)
-            }
+            Msg::Oma { action } => self.oma_send(&action),
             Msg::Emit { mut line } => {
                 // пузырь орба — простой текст, как у пузырей агентов; чат окна разметку рисует и получает её как есть
                 if let Some(t) = line["bubble"]["text"].as_str() {
@@ -1354,7 +1367,7 @@ impl State {
                 self.on_back(back);
             }
             Msg::View { agent } => self.viewing = agent,
-            Msg::Subscribe | Msg::Tell { .. } => {} // приходят как Event::Subscribe и Event::Tell
+            Msg::Subscribe | Msg::Tell { .. } | Msg::Turn => {} // приходят как Event::Subscribe, Event::Tell и Event::Turn
         }
         if changes {
             self.broadcast();
@@ -2472,7 +2485,7 @@ mod tests {
 
     #[test]
     fn focus_is_asked_on_demand_not_polled() {
-        let (mut st, (focus, _now)) = env_state();
+        let (mut st, (focus, clock)) = env_state();
         let calls = Arc::new(Mutex::new(0));
         let c = calls.clone();
         st.focus_src = Box::new(move || {
@@ -2485,19 +2498,43 @@ mod tests {
             st.tick();
         }
         assert_eq!(*calls.lock().unwrap(), 0, "скан состава hyprctl не зовёт");
-        // разговор начат — снимку мозга нужен фокус: строка агентов уходит до команды Оме
-        let mut r = sub(&mut st);
-        drain(&mut r);
-        st.on_msg(Msg::Oma { action: serde_json::json!({"do": "talk"}) });
-        assert_eq!(*calls.lock().unwrap(), 1);
-        let agents = drain(&mut r).into_iter().find(|l| l.get("agents").is_some()).expect("строка агентов");
-        let focused: Vec<&str> = agents["agents"].as_array().unwrap().iter().filter(|e| e["focused"] == true).map(|e| e["id"].as_str().unwrap()).collect();
-        assert_eq!(focused, ["b"]);
-        st.on_msg(Msg::Oma { action: serde_json::json!({"do": "cancel"}) });
-        assert_eq!(*calls.lock().unwrap(), 1, "Esc фокус не ждёт");
+        // команды Оме и щелчок фокус не спрашивают: свежий фокус — по ходу мозга (turn), где снимок и строится
+        let n = calls.clone();
+        let tick_clock = || *clock.lock().unwrap() += Duration::from_secs(1); // кэш фокуса — 500 мс
+        for action in [serde_json::json!({"do": "talk"}), serde_json::json!({"do": "ask", "text": "как дела"}), serde_json::json!({"do": "cancel"})] {
+            tick_clock();
+            st.on_msg(Msg::Oma { action });
+        }
         st.cfg.quiet_override = "on".into(); // щелчок в тесте не звучит
         st.on_msg(Msg::Chime);
-        assert_eq!(*calls.lock().unwrap(), 2, "каждая реплика голосом — свежий фокус");
+        assert_eq!(*n.lock().unwrap(), 0, "talk, ask, Esc и щелчок фокус не ждут");
+        // ход мозга: ответ — строка агентов с фокусом этой минуты; подписчикам — она же
+        let mut r = sub(&mut st);
+        drain(&mut r);
+        tick_clock();
+        let reply: serde_json::Value = serde_json::from_str(&st.turn()).unwrap();
+        assert_eq!(*calls.lock().unwrap(), 1);
+        let focused = |agents: &serde_json::Value| -> Vec<String> {
+            agents["agents"].as_array().unwrap().iter().filter(|e| e["focused"] == true).map(|e| e["id"].as_str().unwrap().to_string()).collect()
+        };
+        assert_eq!(focused(&reply), ["b"]);
+        let pushed = drain(&mut r).into_iter().find(|l| l.get("agents").is_some()).expect("строка агентов подписчикам");
+        assert_eq!(focused(&pushed), ["b"]);
+        tick_clock();
+        st.turn();
+        assert_eq!(*calls.lock().unwrap(), 2, "каждый ход — свежий фокус");
+    }
+
+    #[test]
+    fn turn_is_a_request_answered_with_the_agents_line() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (server, client) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || serve(server, tx));
+        let mut w = client.try_clone().unwrap();
+        w.write_all(b"{\"cmd\":\"turn\"}\n").unwrap();
+        let Ok(Event::Turn(reply)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("turn не дошёл до цикла") };
+        reply.send("{\"agents\":[]}\n".into()).unwrap(); // так ответит основной цикл
+        assert_eq!(next(&mut reader(client)), serde_json::json!({"agents": []}));
     }
 
     #[test]
