@@ -112,6 +112,35 @@ function dismiss(stack, id) {
   return stack.filter(function(b) { return b.id !== id })
 }
 
+// The window's main page: row 0 is Oma's general chat, then the agents. The
+// key cursor keeps a row's chat key, not its number: news and new agents move
+// rows, the cursor stays on its agent; a row that is gone is -1.
+function rowKey(agents, i) {
+  return i === 0 ? "general" : i > 0 && i <= agents.length ? "agent:" + agents[i - 1].id : ""
+}
+
+function rowIndex(agents, key) {
+  if (key === "general") return 0
+  for (var i = 0; i < agents.length; i++) if ("agent:" + agents[i].id === key) return i + 1
+  return -1
+}
+
+// Oma (the Python half) takes commands: the daemon is up and she has said
+// her state; "off" — she is down or still starting, the daemon drops them.
+function omaUp(st) {
+  return !!st && st.running === true && st.oma !== "off"
+}
+
+// A typed question goes out once, while Oma takes it; the field keeps it
+// until it is `taken`: her chat echoes it back as my line.
+function askable(text, asked, st) {
+  return text !== "" && text !== asked && omaUp(st)
+}
+
+function taken(asked, d) {
+  return asked !== "" && d.role === "me" && d.text === asked
+}
+
 // Time since `since` (seconds): a key for tr(key, n).
 function ago(since, now) {
   var d = Math.max(0, now - since)

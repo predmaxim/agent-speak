@@ -24,11 +24,28 @@ Item {
   // Reconnect now (the service was just turned on), not at the next 5 s retry.
   function retry() { if (!up) attempt++ }
 
+  // Oma as a whole (the service): on, the link reconnects at once instead of
+  // in up to 5 s. `agent-speak on` returns when systemctl does: with the
+  // unit's Type=notify, once the daemon's socket is there.
+  function power(on) {
+    powerProc.on = on
+    powerProc.running = true
+  }
+
+  Process {
+    id: powerProc
+    property bool on: false
+    command: [Quickshell.env("HOME") + "/.local/bin/agent-speak", on ? "on" : "off"]
+    onExited: if (on) link.retry()
+  }
+
+  // No connection: nothing to queue it for (the service may stay off), the
+  // journal says what was dropped; the window and the orb show Oma off.
   function send(line) {
     if (up && sockLoader.item) {
       sockLoader.item.write(line)
       sockLoader.item.flush()
-    }
+    } else console.warn("predmaxim.oma: no agent-speakd, not sent:", line.trim())
   }
 
   visible: false

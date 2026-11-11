@@ -1,7 +1,6 @@
 import QtQuick
 import Quickshell
 import Quickshell.Hyprland
-import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
@@ -57,10 +56,21 @@ Item {
   property var messages: []
   property var chatList: []
   property real now: Date.now() / 1000
+  property string asked: ""          // the question sent, until Oma's chat has it
+  readonly property bool omaUp: Model.omaUp(speech)
+  // Oma went down: what she had not taken is lost with her, Enter sends it again.
+  onOmaUpChanged: if (!omaUp) asked = ""
 
   // One cursor for keys and mouse: a row of the page (-1 none) or, with
-  // onHead, the header's button headCol.
-  property int cursor: -1
+  // onHead, the header's button headCol. On the main page it holds the row's
+  // chat key (Model.rowKey), so it stays on its agent when the list changes.
+  readonly property int cursor: page === "main" ? Model.rowIndex(agents, cursorKey) : cursorRow
+  property string cursorKey: ""
+  property int cursorRow: -1
+  function setCursor(i) {
+    if (page === "main") cursorKey = Model.rowKey(agents, i)
+    else cursorRow = i
+  }
   property bool onHead: false
   property int headCol: 0
   property int hoursCol: 0           // the hours row's dropdown: 0 from, 1 to
@@ -85,18 +95,8 @@ Item {
                     sound: quiet ? root.tr("Turn sound on") : root.tr("Turn sound off"), settings: root.tr("Settings"), back: root.tr("Back") }[id] }
   }
 
-  // Oma as a whole (the service): on, the link reconnects at once instead of in up to 5 s.
-  function power(on) {
-    powerProc.on = on
-    powerProc.running = true
-  }
-
-  Process {
-    id: powerProc
-    property bool on: false
-    command: [Quickshell.env("HOME") + "/.local/bin/agent-speak", on ? "on" : "off"]
-    onExited: if (on && root.link) root.link.retry()
-  }
+  // Oma as a whole (the service), through the link: on, it reconnects at once.
+  function power(on) { if (root.link) root.link.power(on) }
 
   function focusedScreen() {
     var name = Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : ""
@@ -147,18 +147,21 @@ Item {
     root.showPage("main")
   }
 
+  // The question stays in the field until Oma echoes it into the chat
+  // (onChatDelta): with Oma down it is not lost, the note says why.
   function ask() {
     var text = field.text.trim()
-    if (!text) return
+    if (!Model.askable(text, root.asked, root.speech)) return
+    root.asked = text
     root.send({ do: "ask", text: text, key: root.chatKey })
-    field.text = ""
   }
 
   function showPage(p) {
     if (p === "history") root.send({ do: "chats" })
     settingsView.contentY = 0
     root.page = p
-    root.cursor = -1
+    root.cursorKey = ""
+    root.cursorRow = -1
     root.onHead = false
     root.headCol = 0
     root.hoursCol = 0
@@ -196,11 +199,11 @@ Item {
     pointerGate.reset()
     if (dy < 0) {
       if (root.onHead) return true
-      if (root.cursor <= 0) { root.onHead = true; root.cursor = -1 }
-      else root.cursor--
+      if (root.cursor <= 0) { root.onHead = true; root.setCursor(-1) }
+      else root.setCursor(root.cursor - 1)
     } else if (dy > 0) {
-      if (root.onHead) { root.onHead = false; root.cursor = root.rowCount > 0 ? 0 : -1 }
-      else root.cursor = Math.min(root.rowCount - 1, root.cursor + 1)
+      if (root.onHead) { root.onHead = false; root.setCursor(root.rowCount > 0 ? 0 : -1) }
+      else root.setCursor(Math.min(root.rowCount - 1, root.cursor + 1))
     } else if (root.onHead) {
       root.headCol = Math.max(0, Math.min(root.headCount - 1, root.headCol + dx))
     } else if (root.page === "settings" && root.cursor >= 0) {
@@ -233,7 +236,7 @@ Item {
   function activate() {
     if (root.onHead) return root.press(root.headCol)
     if (root.cursor < 0 || root.cursor >= root.rowCount) return
-    if (root.page === "main") return root.openChat(root.cursor === 0 ? "general" : "agent:" + root.agents[root.cursor - 1].id)
+    if (root.page === "main") return root.openChat(root.cursorKey)
     if (root.page === "history") return root.openChat(root.chatList[root.cursor].key)
     var row = Model.SETTINGS_ROWS[root.cursor]
     var box = { speaker: speakerBox, rate: rateBox, quiet_hours: root.hoursCol ? toBox : fromBox }[row]
@@ -259,24 +262,12 @@ Item {
     })
   }
 
-  // The open chat's new lines. A new array resets the view to its top: a
-  // following chat goes back to its end; one the user scrolled up goes back
-  // to the line at its top, as far into it, and stays scrolled up.
+  // The open chat's new lines. The view's model (ScriptModel) only adds and
+  // changes lines, the view is not reset: one the user scrolled up stays
+  // there, a selection in it too; a following chat goes on to its end.
   function setMessages(list) {
-    var v = chatView
-    if (v.follow) {
-      root.messages = list
-      return root.scrollDown()
-    }
-    var i = v.indexAt(0, v.contentY)
-    if (i < 0) i = v.indexAt(0, v.contentY + v.spacing)   // the gap between two lines
-    var line = i >= 0 ? v.itemAtIndex(i) : null
-    var off = v.contentY - (line ? line.y : v.originY)    // no line: in the agent's feed above them
     root.messages = list
-    if (line) v.positionViewAtIndex(i, ListView.Beginning)
-    else v.positionViewAtBeginning()
-    v.contentY += off
-    v.returnToBounds()
+    if (chatView.follow) root.scrollDown()
   }
 
   // Hidden: no dropdown stays open into the next time.
@@ -292,7 +283,9 @@ Item {
   }
   // The draft is the footer, not the model: it keeps the end only while the chat follows.
   onDraftChanged: if (chatView.follow) root.scrollDown()
-  onRowCountChanged: if (root.cursor >= root.rowCount) root.cursor = root.rowCount - 1
+  onRowCountChanged: if (root.cursor >= root.rowCount) root.setCursor(root.rowCount - 1)
+  // The service went off: only its switch works (Model.headItems), no page is left to send into nothing.
+  onSpeechChanged: if (speech.running !== true && page !== "main") showPage("main")
 
   Connections {
     target: root.link
@@ -302,7 +295,13 @@ Item {
       root.chatKey = shownChat.key
       root.setMessages(shownChat.messages)
     }
-    function onChatDelta(d) { if (d.key === root.chatKey) root.setMessages(Model.chatApply(root.messages, d)) }
+    function onChatDelta(d) {
+      if (Model.taken(root.asked, d)) {
+        if (field.text.trim() === root.asked) field.text = ""   // not what the user typed since
+        root.asked = ""
+      }
+      if (d.key === root.chatKey) root.setMessages(Model.chatApply(root.messages, d))
+    }
     function onChats(list) { root.chatList = list }
   }
 
@@ -464,7 +463,12 @@ Item {
             clip: true
             spacing: Style.spacing.xs
             boundsBehavior: Flickable.StopAtBounds
-            model: root.agents
+            // Keyed by id, like the bar's module list: each `agents` line only
+            // moves, updates, adds and removes rows, so the scroll stays.
+            model: ScriptModel {
+              objectProp: "id"
+              values: root.agents
+            }
 
             // Row 0: the general chat — Oma as an assistant, not about an agent.
             // Tinted even when not open (the user's choice over an accent bar):
@@ -489,7 +493,7 @@ Item {
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onPositionChanged: function(mouse) {
-                    if (pointerGate.moved(omaArea, mouse)) { root.onHead = false; root.cursor = 0 }
+                    if (pointerGate.moved(omaArea, mouse)) { root.onHead = false; root.setCursor(0) }
                   }
                   onClicked: root.openChat("general")
                 }
@@ -568,7 +572,7 @@ Item {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onPositionChanged: function(mouse) {
-                  if (pointerGate.moved(agentArea, mouse)) { root.onHead = false; root.cursor = agentRow.index + 1 }
+                  if (pointerGate.moved(agentArea, mouse)) { root.onHead = false; root.setCursor(agentRow.index + 1) }
                 }
                 onClicked: root.openChat("agent:" + agentRow.modelData.id)
               }
@@ -688,7 +692,11 @@ Item {
               clip: true
               spacing: Style.space(14)
               boundsBehavior: Flickable.StopAtBounds
-              model: root.messages
+              // Lines have no id: compared by content, a new line is added, the rest stay.
+              model: ScriptModel {
+                values: root.messages
+                comparisonMode: ObjectComparison.Structure
+              }
               header: root.agent ? feedHeader : null
               footer: root.draft ? draftFooter : null
 
@@ -744,7 +752,11 @@ Item {
                 bottomPadding: Style.space(14)
 
                 Repeater {
-                  model: root.agent ? root.agent.feed : []
+                  // Every `agents` line brings the feed anew: by content, only its new lines are made.
+                  model: ScriptModel {
+                    values: root.agent ? root.agent.feed : []
+                    comparisonMode: ObjectComparison.Structure
+                  }
 
                   ChatLine {
                     required property var modelData
@@ -775,15 +787,17 @@ Item {
               anchors.right: parent.right
               anchors.bottom: parent.bottom
               height: Math.max(Style.space(34), Style.font.title + Style.spacing.controlPaddingY * 2)
-              leftPadding: 0; rightPadding: 0; topPadding: 0; bottomPadding: 0
+              leftPadding: 0; topPadding: 0; bottomPadding: 0
+              rightPadding: omaNote.visible ? omaNote.width + Style.space(10) : 0
               background: null
               placeholderText: root.tr("Ask Oma…")
               placeholderTextColor: Util.alpha(root.fg, 0.58)
               foreground: root.fg
+              color: root.asked !== "" && text.trim() === root.asked ? root.dim : root.fg   // sent, Oma has not taken it yet
               font.family: root.font
               font.pixelSize: Style.font.heading
               cursorDelegate: Item {}
-              onTextEdited: { root.cursor = -1; root.onHead = false }
+              onTextEdited: { root.setCursor(-1); root.onHead = false }
               Keys.onUpPressed: root.move(0, -1)
               Keys.onDownPressed: root.move(0, 1)
               Keys.onLeftPressed: function(event) { event.accepted = root.onHead && root.move(-1, 0) }
@@ -791,6 +805,19 @@ Item {
               Keys.onReturnPressed: root.enter()
               Keys.onEnterPressed: root.enter()
               Keys.onTabPressed: {}   // Tab does nothing in a centred modal
+            }
+
+            // Oma is down (the service runs): a question waits in the field, Enter sends it when she is back.
+            Text {
+              id: omaNote
+              visible: !root.omaUp
+              anchors.right: parent.right
+              anchors.verticalCenter: field.verticalCenter
+              textFormat: Text.PlainText
+              text: root.tr("Oma is not running")
+              color: root.dim
+              font.family: root.font
+              font.pixelSize: Style.font.body
             }
           }
 
@@ -820,7 +847,7 @@ Item {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onPositionChanged: function(mouse) {
-                  if (pointerGate.moved(chatArea, mouse)) { root.onHead = false; root.cursor = chatRow.index }
+                  if (pointerGate.moved(chatArea, mouse)) { root.onHead = false; root.setCursor(chatRow.index) }
                 }
                 onClicked: root.openChat(chatRow.modelData.key)
               }
@@ -1196,9 +1223,9 @@ Item {
       anchors.fill: parent
       hoverEnabled: true
       onPositionChanged: function(mouse) {
-        if (pointerGate.moved(rowArea, mouse)) { root.onHead = false; root.cursor = settingRow.row }
+        if (pointerGate.moved(rowArea, mouse)) { root.onHead = false; root.setCursor(settingRow.row) }
       }
-      onClicked: { root.onHead = false; root.cursor = settingRow.row; root.activate() }
+      onClicked: { root.onHead = false; root.setCursor(settingRow.row); root.activate() }
     }
 
     Text {
