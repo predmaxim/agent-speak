@@ -279,8 +279,10 @@ class Conversation:
         return acts + self._to(self._rest())
 
     def ask(self, text):
+        """Набранное в окне. Порог в два знака — только у слуха (шум whisper), набранный знак — намеренный: окно ждёт
+        его строку в чате по id, без неё вопрос остался бы в поле бледным навсегда."""
         t = text.strip()
-        if len(t) < 2:
+        if not t:
             return []
         return self._stop_turn() + self._drop() + self._send(t, voiced=False)
 

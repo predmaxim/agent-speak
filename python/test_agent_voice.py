@@ -184,7 +184,14 @@ def test_quiet_shows_without_saying():
 def test_short_phrases_dropped():
     clk, cv = _conv()
     cv.talk(); cv.speech_start(1)
-    assert cv.phrase(" а ", 1) == [("drop_draft",)] and cv.ask("ж") == []
+    assert cv.phrase(" а ", 1) == [("drop_draft",)]
+
+
+def test_typed_question_of_one_character_is_sent():
+    """Набранное в окне — не шум слуха: и один знак уходит мозгу (окно ждёт его строку в чате), пустое — нет."""
+    clk, cv = _conv()
+    assert ("send", "1") in [a[:2] for a in cv.ask(" 1 ")]
+    assert cv.ask("  ") == []
 
 
 def test_status_audio_does_not_end_draft():
