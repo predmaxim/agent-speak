@@ -114,12 +114,13 @@ class Orders:
         self.run, self.clock, self.show = run, clock, show  # show — полный текст ждущего поручения в окно
         self.ask = ask  # ask — вопрос подтверждения голосом: его говорит код, второй проход мозга лишь повторял его (1–5 с)
         self.voiced, self.heard = False, ""
-        self.pending = None  # поручение ждёт фразы: {args, what, verb, said, until}
+        self.pending = None  # поручение ждёт фразы: {args, what, verb, said, until, n}; ставит его Ома, когда вопрос прозвучал
         self.tripped = False  # в этом ходе мозга уже было опасное: до следующей реплики не уходит ничего
+        self.n = 0           # номер хода реплики (Conversation.turn_no): вопрос прерванного хода не звучит и не ждёт
         self.note = ""       # мозгу — в начало следующей реплики: подтверждённое Ома передала сама
 
-    def turn(self, voiced, heard):
-        self.voiced, self.heard, self.tripped = voiced, heard, False
+    def turn(self, voiced, heard, n=0):
+        self.voiced, self.heard, self.tripped, self.n = voiced, heard, False, n
 
     def gate(self, sent, ask="", option=0):
         """Что ждёт подтверждения: набранное в окне — None; голосом — строка DANGER, иначе ORDINARY (отказ «нет, не пушь»
@@ -133,17 +134,16 @@ class Orders:
             negative(x) and not danger(unnegated(x)) for x in (sent, label.split(" — ")[0]) if x)
         return ORDINARY if not d or refusal else d
 
-    async def _order(self, args, d, said, ok_reply, ask, verb, shown):
+    async def _order(self, args, d, n, said, ok_reply, ask, verb, shown):
         if self.tripped:  # мозг перефразировал поручение в том же ходе — передавать нельзя ничего
             return "Не передано: поручение уже ждёт подтверждения, Ома о нём спросила. Ответь ровно «[молчу]» и больше ничего не передавай."
         if d:
             self.tripped = True
-            self.pending = {"args": args, "what": d, "verb": verb, "said": said, "until": self.clock() + CONFIRM_WAIT}
             if self.show:
                 self.show(shown)
             question = f"{ask} Скажи: да, {verb}." if d is ORDINARY else f"{ask} Это {d[0]}. Скажи: подтверждаю {d[1]}."
-            if self.ask:
-                self.ask(question)
+            if self.ask:  # ждать фразы поручение начнёт, когда вопрос прозвучит в своём ходе: ставит его Ома
+                self.ask(question, {"args": args, "what": d, "verb": verb, "said": said, "until": self.clock() + CONFIRM_WAIT, "n": n})
             why = "голосом поручение уходит" if d is ORDINARY else f"это {d[0]}, такое уходит"
             return f"Не передано: {why} только после подтверждения. Ома уже спросила вслух: «{question}» Ответь ровно «[молчу]»."
         ok, out = await self.run(*args)
@@ -152,7 +152,7 @@ class Orders:
     async def tell(self, entry, text, gist, option=0):
         p, ask = entry["project"], asked(entry)
         shown = f"Передам проекту {p}: " + (f"вариант {option} — {chosen(ask, option)}" if option else f"«{text}»")
-        return await self._order(("tell", entry["id"], str(option), text), self.gate(text, ask, option),
+        return await self._order(("tell", entry["id"], str(option), text), self.gate(text, ask, option), self.n,
                                  f"Передала проекту {p}: {gist}.",
                                  f"Передано проекту {p}. Скажи пользователю одной фразой, кому и что: "
                                  f"«Передала проекту {p}: …» — смысл, не текст задания.",
@@ -160,7 +160,7 @@ class Orders:
 
     async def launch(self, path, task, gist, where="orca"):
         name = _name(path)
-        return await self._order(("launch", path, task, where), self.gate(task), f"Запустила агента в проекте {name}: {gist}.",
+        return await self._order(("launch", path, task, where), self.gate(task), self.n, f"Запустила агента в проекте {name}: {gist}.",
                                  f"Агент запущен в проекте {name}. Скажи пользователю одной фразой: "
                                  f"«Запустила агента в проекте {name}: …» — смысл задания.",
                                  f"Запустить агента в проекте {name}: {gist}?", "запускай", f"Запущу агента в проекте {name}: «{task}»")

@@ -70,9 +70,10 @@ class Oma:
         self.emit({"bubble": {"id": f"oma-{os.getpid()}-{self.n}", "who": "Ома", "text": text, "kind": "oma", "append": True}})
         self._chat("oma", text)
 
-    def _ask(self, text):
-        """Вопрос подтверждения из инструмента мозга (задача SDK) — в очередь диспетчера, по порядку с ходом мозга."""
-        self.events.put_nowait(("confirm", text))
+    def _ask(self, text, order):
+        """Вопрос подтверждения из инструмента мозга (задача SDK) — в очередь диспетчера, по порядку с ходом мозга;
+        order — поручение, которое будет ждать фразы, если вопрос прозвучит."""
+        self.events.put_nowait(("confirm", text, order))
 
     def emit(self, line):
         self.send({"cmd": "emit", "line": line})
@@ -84,15 +85,19 @@ class Oma:
         t.add_done_callback(self._bg_done)
         return t
 
-    def to_brain(self, fn, *args):
+    def to_brain(self, fn, *args, turn=0):
         """В очередь к мозгу: переход в чат, прогрев, реплика с доставкой поручения и перебив идут по порядку в своей
-        задаче — диспетчер их не ждёт: Esc, клик и «стоп» работают, пока claude поднимается или поручение уходит."""
+        задаче — диспетчер их не ждёт: Esc, клик и «стоп» работают, пока claude поднимается или поручение уходит.
+        Сбой — событием error хода turn (0 — не ход): разговор не остаётся в «думаю», ошибка — в уведомление."""
         prev = self.outbox
 
         async def run():
             if prev and not prev.done():
                 await asyncio.wait([prev])  # упавшая предыдущая очередь не держит
-            await fn(*args)
+            try:
+                await fn(*args)
+            except Exception as e:
+                self.events.put_nowait(("error", f"Claude: {e!r}", turn))
         self.outbox = self.bg(run())
 
     def _bg_done(self, t):
@@ -199,6 +204,8 @@ class Oma:
 
     async def event(self, ev):
         kind, c = ev[0], self.conv
+        if kind in ("delta", "done") and len(ev) > 2 and ev[2] != c.turn_no:
+            return  # итог реплики из очереди к мозгу, а ход уже другой: чужой ход он не закрывает
         if kind == "start":
             await self.act(c.speech_start(*ev[1:]))
         elif kind == "phrase":
@@ -220,8 +227,11 @@ class Oma:
             await self.act(c.delta(ev[1]))
         elif kind == "tool":
             await self.act(c.tool(ev[1]))
-        elif kind == "confirm":
-            await self.act(c.question(ev[1]))
+        elif kind == "confirm":  # вопрос — только в ходе, который вызвал инструмент; не прозвучал — поручение не ждёт
+            acts = c.question(ev[1]) if ev[2]["n"] == c.turn_no else []
+            if acts:
+                self.orders.pending = ev[2]
+            await self.act(acts)
         elif kind == "done":
             await self.act(c.done())
             self.emit({"chat": {"key": self.brain.key, "messages": self.history}})
@@ -246,7 +256,7 @@ class Oma:
             self._warn(ev[1])
             if not self.ear.open and c.active:  # слух умер сам
                 await self.act(c.end())
-            elif c.turn and ev[1].startswith("Claude"):  # ход мозга оборвался — в покой
+            elif c.turn and ev[1].startswith("Claude") and (len(ev) < 3 or ev[2] == c.turn_no):  # ход мозга оборвался — в покой
                 await self.act(c.done())
 
     async def _turn_done(self, pcm):
@@ -296,11 +306,11 @@ class Oma:
             return "Твой голос: включён."
         return f"Твой голос: включён, звучит {'в динамиках' if self.conv.echo else 'в наушниках'}."
 
-    async def _deliver(self, text, ctx, voiced, parts, pre, sound):
-        """Реплика мозгу или подтверждение поручения, которое передаёт код, — в очереди к мозгу."""
+    async def _deliver(self, text, ctx, voiced, parts, pre, sound, n):
+        """Реплика мозгу или подтверждение поручения, которое передаёт код, — в очереди к мозгу; n — номер её хода."""
         key, failed = self.brain.key, None
         text = await self._whole(text, parts, pre) if voiced else text
-        self.orders.turn(voiced, text)
+        self.orders.turn(voiced, text, n)
         said = await self.orders.confirm(text)  # подтверждение сверяет код, мозг не зовём; другая реплика снимает ожидание
         if said is None:
             note, self.orders.note = self.orders.note, ""
@@ -314,10 +324,10 @@ class Oma:
         self._chat("me", text)
         self.emit({"bubble": {"id": f"me-{os.getpid()}-{self.n}", "who": "Ты", "text": text, "kind": "me", "append": False}})
         if failed:  # ход уже в «thinking», done() вернёт в покой
-            self.events.put_nowait(("error", f"Claude: {failed}"))
+            self.events.put_nowait(("error", f"Claude: {failed}", n))
         if said is not None:  # фраза кода вместо ответа мозга — как его ход
-            self.events.put_nowait(("delta", said))
-            self.events.put_nowait(("done", None))
+            self.events.put_nowait(("delta", said, n))
+            self.events.put_nowait(("done", None, n))
 
     async def act(self, acts):
         for a in acts:
@@ -335,7 +345,8 @@ class Oma:
                     self.send({"cmd": "chime"})  # «услышала» сразу: до ответа мозга секунды
                 parts, self.sending = self.sending, []  # звук этой реплики — её: следующий черновик его не тронет
                 pre, self.pre_sending = self.pre_sending, None
-                self.to_brain(self._deliver, a[1], a[2], self.conv.voiced, parts, pre, self._sound())
+                n = self.conv.turn_no
+                self.to_brain(self._deliver, a[1], a[2], self.conv.voiced, parts, pre, self._sound(), n, turn=n)
             elif k == "presence":
                 self.send({"cmd": "presence", "state": a[1]})
             elif k == "interrupt":  # после отправки, что ещё в очереди: перебить ход, а не реплику до него

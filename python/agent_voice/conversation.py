@@ -114,6 +114,7 @@ class Conversation:
         self.active = False    # разговор идёт: слух включён
         self.draft = ""
         self.turn = False      # агент отвечает на нашу реплику
+        self.turn_no = 0       # номер хода: итоги очереди к мозгу (доставка, вопрос подтверждения, сбой) — только своему ходу
         self.audio_busy = False
         self.quiet = False
         self.mic = False       # микрофон занят другим (voxtype и т. п.)
@@ -173,6 +174,7 @@ class Conversation:
 
     def _send(self, text, ctx="", voiced=True):
         self.turn, self.voiced, self.said, self.asked = True, voiced, "", False
+        self.turn_no += 1
         self.hold, self.more = "", None
         self.head = ""
         self.chunker.reset()

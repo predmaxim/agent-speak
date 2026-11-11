@@ -1396,7 +1396,9 @@ def _orders(clk=None, ok=True, out=""):
         calls.append(args)
         return ok, out
 
-    return Orders(run=fake, clock=clk or Clock()), calls
+    o = Orders(run=fake, clock=clk or Clock())
+    o.ask = lambda question, order: setattr(o, "pending", order)  # как Ома: вопрос прозвучал — поручение ждёт фразы
+    return o, calls
 
 
 run = asyncio.run
@@ -2264,7 +2266,7 @@ def test_order_question_is_spoken_by_code_not_by_second_brain_pass():
     # вопрос подтверждения строит код — второй проход Sonnet только повторял его (1,0–5,2 с, медиана 1,6 с по 14 ходам)
     o, calls = _orders()
     asked_ = []
-    o.ask = asked_.append
+    o.ask = lambda question, order: asked_.append(question)
     o.turn(True, "пусть запушит")
     r = run(o.tell(E[0], "Запушь", "запушить"))
     assert asked_ == ["Передать проекту omarchy-mail: запушить? Это пуш. Скажи: подтверждаю пуш."]
@@ -2296,7 +2298,7 @@ def test_oma_speaks_order_question_from_tool():
     async def go():
         await oma.command({"do": "talk"})
         oma.conv.ask("пусть агент почты запушит")
-        oma.orders.turn(True, "пусть агент почты запушит")
+        oma.orders.turn(True, "пусть агент почты запушит", oma.conv.turn_no)
         await oma.orders.tell(E[0], "Запушь", "запушить")  # инструмент мозга — в задаче SDK
         await settle(oma)
     run(go())
@@ -2567,3 +2569,82 @@ def test_oma_sends_her_pause_to_daemon():
     clk, oma = _oma(sent, emitted)
     run(oma.act([("pause_voice", True), ("pause_voice", False)]))
     assert [c for c in sent if c["cmd"] == "oma_pause"] == [{"cmd": "oma_pause", "on": True}, {"cmd": "oma_pause", "on": False}]
+
+
+# --- итоги очереди к мозгу — по номеру хода ---
+
+def test_late_order_delivery_does_not_close_next_turn():
+    # 2026-11-12 (ревью): пока CLI передавал подтверждённое поручение, новая реплика начинала ход 2, а «Передала…»
+    # и done хода 1 приходили потом и закрывали его — настоящий ответ на ход 2 выбрасывался
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    gate = asyncio.Event()
+
+    async def slow(*args):
+        await gate.wait()
+        return True, ""
+    oma.orders, _ = _orders(clk)
+    oma.orders.run = slow
+    oma.orders.turn(True, "пусть почта проверит тесты")
+    run(oma.orders.tell(E[0], "Проверь тесты", "проверить тесты"))
+
+    async def go():
+        await oma.command({"do": "talk"})
+        await oma.event(("start", 1)); await oma.event(("phrase", "Да, передай.", 1))
+        clk.t += SEND_PAUSE; await oma.event(("tick",))
+        await asyncio.sleep(0.01)  # доставка ждёт CLI
+        await oma.command({"do": "ask", "text": "как дела у почты"})
+        gate.set()
+        await settle(oma)
+        assert oma.conv.turn, "ход 2 ждёт ответа мозга"
+        await oma.event(("delta", "Почта работает. "))
+        await oma.event(("done", None))
+    run(go())
+    assert {"cmd": "voice", "text": "Почта работает."} in sent
+
+
+def test_question_of_interrupted_turn_is_not_asked_and_waits_for_nothing():
+    # вопрос подтверждения из хода, который уже сменился (перебили, новая реплика): не звучит, и поручение не ждёт
+    # «да, передай» — подтвердить вопрос, которого пользователь не слышал, нельзя
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    oma.orders, calls = _orders(clk)
+    oma.orders.ask = oma._ask
+
+    async def go():
+        await oma.command({"do": "talk"})
+        oma.conv.ask("пусть почта проверит тесты")
+        oma.orders.turn(True, "пусть почта проверит тесты", oma.conv.turn_no)
+        await oma.orders.tell(E[0], "Проверь тесты", "проверить тесты")  # инструмент хода 1 — в задаче SDK
+        oma.conv.ask("а что у спика")  # ход 2 начат раньше, чем диспетчер дошёл до вопроса
+        await settle(oma)
+    run(go())
+    assert not any(c["cmd"] == "voice" and "Скажи" in c["text"] for c in sent) and oma.orders.pending is None
+    assert run(oma.orders.confirm("да, передай")) is None and calls == []
+
+
+def test_confirmation_counts_only_after_question_sounded():
+    o, calls = _orders()
+    o.ask = lambda question, order: None  # вопрос ещё не прозвучал (или ход сменился)
+    o.turn(True, "пусть почта проверит тесты")
+    run(o.tell(E[0], "Проверь тесты", "проверить тесты"))
+    assert run(o.confirm("да, передай")) is None and calls == []
+
+
+def test_failed_brain_queue_task_ends_thinking():
+    # сбой задачи очереди к мозгу (не brain.send) — событием error: разговор не остаётся в «думаю»
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    warned = []
+    oma.notify = warned.append
+
+    async def broken(text):
+        raise RuntimeError("orders сломался")
+    oma.orders.confirm = broken
+
+    async def go():
+        await oma.command({"do": "talk"})
+        await oma.command({"do": "ask", "text": "как дела"})
+        await settle(oma)
+    run(go())
+    assert oma.conv.state == "listening" and not oma.conv.turn and "orders сломался" in warned[-1]
