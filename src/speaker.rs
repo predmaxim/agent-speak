@@ -77,10 +77,10 @@ impl Shared {
         }
     }
 
-    /// Речь смолкла, а звучать ей ещё left: busy гаснет, конец звука — в played. Вызывающий НЕ держит замок played.
-    fn idle(&self, left: Duration) {
+    /// Речь смолкла, а звучать ей ещё left(): busy гаснет, конец звука — в played. Вызывающий НЕ держит замок played.
+    fn idle(&self, left: impl FnOnce() -> Duration) {
         if self.busy.load(Ordering::SeqCst) {
-            *self.played.lock().unwrap() = mono() + left.as_secs_f64();
+            *self.played.lock().unwrap() = mono() + left().as_secs_f64();
         }
         self.set_busy(None);
     }
@@ -183,7 +183,7 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                     tail = None;
                     break (it, shared.generation.load(Ordering::SeqCst));
                 }
-                shared.idle(player.left());
+                shared.idle(|| player.left());
                 let to = if tail.is_some() { Duration::from_millis(100) } else { Duration::from_millis(500) };
                 q = shared.cv.wait_timeout(q, to).unwrap().0;
             }
@@ -204,7 +204,7 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                 player.close();
                 let mut q = shared.queue.lock().unwrap();
                 requeue(&shared, &mut q, item, my_gen);
-                shared.idle(left);
+                shared.idle(|| left);
                 let deadline = Instant::now() + RETRY;
                 while shared.generation.load(Ordering::SeqCst) == my_gen {
                     let left = deadline.saturating_duration_since(Instant::now());
