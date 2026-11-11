@@ -426,7 +426,7 @@ fn final_message(p: &serde_json::Value, transcript: &Path) -> Option<String> {
 /// Факты о агенте без чтения диска: то, что знает реестр.
 fn blank_facts(e: &Entry, activity: u64) -> Facts {
     Facts {
-        id: e.id.clone(), project: e.project.clone(), state: e.state, since: e.since, status: e.status.clone(),
+        id: e.id.clone(), project: e.project.clone(), state: e.state,
         active_at: activity, helpers: 0, call: None, error: None, pane: None, shell: None, resume: String::new(),
         pid: e.pid, turn_over: false, sub_call: None,
     }

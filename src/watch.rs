@@ -24,8 +24,6 @@ pub struct Facts {
     pub id: String,
     pub project: String,
     pub state: State,
-    pub since: u64,
-    pub status: String,
     pub active_at: u64,
     pub helpers: usize,
     pub call: Option<Value>,
@@ -559,7 +557,7 @@ mod tests {
 
     fn f(id: &str) -> Facts {
         Facts {
-            id: id.into(), project: "p".into(), state: State::Working, since: 0, status: String::new(), active_at: 1,
+            id: id.into(), project: "p".into(), state: State::Working, active_at: 1,
             helpers: 0, call: None, error: None, pane: Some(Pane { mux: "herdr", id: "w1:p1".into(), via: "/s".into() }), shell: Some(1),
             resume: "claude --resume id".into(), pid: 7, turn_over: false, sub_call: None,
         }
@@ -778,7 +776,7 @@ mod tests {
     fn waiting_question_is_not_repeated() {
         // вопрос звучит один раз (хук Notification); дальше он виден на орбе и в окне, повторов голосом нет
         let mut w = Watch::default();
-        let q = Facts { state: State::Waiting, since: 0, status: "что с мёртвым кодом?".into(), ..f("a") };
+        let q = Facts { state: State::Waiting, ..f("a") };
         for now in [900, 1800, 86_400] {
             assert!(w.check(&ctx(now, 0), vec![q.clone()], |_| true, |_| false).is_empty());
         }
