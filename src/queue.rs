@@ -76,6 +76,11 @@ impl Queue {
         self.items.iter().any(|i| self.playable(i))
     }
 
+    /// Ждёт ли в очереди фраза сессии session.
+    pub fn has(&self, session: &str) -> bool {
+        self.items.iter().any(|i| i.session == session)
+    }
+
     /// Номера реплик Омы, чьи фразы ждут в очереди.
     pub fn voices(&self) -> impl Iterator<Item = u64> + '_ {
         self.items.iter().map(|i| i.voice).filter(|&v| v > 0)

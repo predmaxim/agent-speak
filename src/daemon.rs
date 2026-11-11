@@ -433,10 +433,7 @@ pub fn run() {
             Event::File(p) => st.on_file(&p),
             Event::Config => st.reload(),
             Event::Subscribe(s) => st.subscribe(s),
-            Event::Busy => {
-                st.broadcast();
-                st.after_speech();
-            }
+            Event::Busy => st.on_busy(),
             Event::Sound(session) => st.on_sound(&session),
             Event::Digest(d) => st.on_digest(d),
             Event::Presence(t) => st.on_presence(&t),
@@ -1097,9 +1094,22 @@ impl State {
         }
     }
 
-    /// «Ты тут?» выброшен из очереди, не прозвучав (стоп, тишина): ответа не ждём.
+    /// Заговорила или смолкла (поток воспроизведения).
+    fn on_busy(&mut self) {
+        self.broadcast();
+        self.after_speech();
+        self.here_unqueue(); // «Ты тут?», выброшенный потоком без звука (синтез не смог, запись не прошла), — здесь
+    }
+
+    /// «Ты тут?» ушёл, не прозвучав: его нет ни в очереди, ни у потока воспроизведения (молчит) — ответа не ждём.
+    /// Зовётся на каждом «смолкла» и там, где фразы выбрасывают из очереди, не меняя busy (стоп, тишина).
     fn here_unqueue(&mut self) {
-        if self.here_ask == Some(HereAsk::Queued) {
+        let gone = {
+            let q = self.shared.queue.lock().unwrap();
+            // busy включается под замком очереди вместе с pop: снятая фраза уже у потока, и он не молчит
+            !self.shared.busy.load(Ordering::SeqCst) && !q.has("here")
+        };
+        if gone && self.here_ask == Some(HereAsk::Queued) {
             self.here_ask = None;
         }
     }
@@ -3909,6 +3919,24 @@ mod tests {
         st.tick();
         assert_eq!(st.presence.mode(1100 + HERE_WAIT), Mode::Away);
         assert!(texts(&st).is_empty());
+    }
+
+    #[test]
+    fn are_you_there_dropped_without_sound_is_not_awaited() {
+        // поток воспроизведения выбросил «Ты тут?», не дав звука (синтез не смог, запись не прошла второй раз): busy
+        // погас, в очереди его нет — ответа не ждём; иначе новости молчали бы, а гарнитура не вернулась бы в музыку
+        let (mut st, _env, _now) = asked_are_you_there_kept();
+        st.on_busy();
+        assert_eq!(st.here_ask, Some(HereAsk::Queued), "ещё в очереди — ждёт звука");
+        let q = || st.shared.queue.lock().unwrap();
+        let held: Vec<Item> = std::iter::from_fn(|| q().pop()).collect();
+        st.shared.set_busy(Some("here"));
+        st.on_busy();
+        assert_eq!(st.here_ask, Some(HereAsk::Queued), "у потока воспроизведения — ещё зазвучит");
+        st.shared.set_busy(None);
+        st.on_busy();
+        assert_eq!(st.here_ask, None, "смолкла без звука вопроса");
+        assert!(held.iter().all(|i| i.session == "here"));
     }
 
     #[test]

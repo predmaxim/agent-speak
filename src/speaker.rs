@@ -204,6 +204,8 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                 if let Some(it) = q.pop() {
                     tail = None;
                     shared.voice_now.store(it.voice, Ordering::SeqCst);
+                    // под замком очереди, вместе с pop: фраза всегда или в очереди, или у потока при busy (daemon here_unqueue)
+                    shared.set_busy(Some(&it.session));
                     break (it, shared.generation.load(Ordering::SeqCst));
                 }
                 // фраза записана, оборвана или вернулась в очередь — у потока её нет; до «смолкла», чтобы строка
@@ -214,7 +216,6 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                 q = shared.cv.wait_timeout(q, to).unwrap().0;
             }
         };
-        shared.set_busy(Some(&item.session));
         let (speaker, rate) = shared.voice.lock().unwrap().clone();
         let pcm = match tts.synth(&item.text, &speaker, &rate) {
             Ok(pcm) => pcm,
