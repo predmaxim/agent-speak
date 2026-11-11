@@ -2,6 +2,7 @@
 События в очередь: ("delta", текст), ("done", None), ("error", причина), ("opened", новый_ключ, старый_ключ)."""
 import asyncio
 import contextlib
+import json
 import os
 import time
 
@@ -14,6 +15,10 @@ from .orders import Orders
 OMA_DIR = os.path.expanduser("~/.local/share/agent-speak/oma")
 MODEL = "claude-sonnet-5-5"
 TOOLS = ["Read", "Glob", "Grep", "WebSearch"]  # без WebFetch: наружу Ома ничего не отправляет
+# Read, Glob и Grep — только в проектах: рабочие папки claude — OMA_DIR и PROJECTS, чтение вне них Claude Code отклоняет
+# (blockReadsOutsideWorkingDirectories); 2026-10-30 Grep мозга по всему ~ (855 ГБ) дал пик памяти 44,2 ГБ
+PROJECTS = os.path.expanduser("~/Projects")
+READ_ONLY_IN_PROJECTS = json.dumps({"permissions": {"blockReadsOutsideWorkingDirectories": True}})
 OMA_TOOLS = ["mcp__oma__agents", "mcp__oma__agent_feed", "mcp__oma__agent_tail", "mcp__oma__selection",
              "mcp__oma__presence", "mcp__oma__tell", "mcp__oma__projects", "mcp__oma__launch"]
 STALE_HOURS = 2
@@ -27,7 +32,7 @@ OMA_PROMPT = ("Ты — Ома, голосовой заместитель пол
               "markdown, списков и кода. "
               "Состояние агентов — по свежему снимку в конце реплики (‹агенты›…‹/агенты›), agents для этого не вызывай; "
               "лента агента — agent_feed; конец переписки агента — agent_tail (пустой аргумент — "
-              "агент в фокусе); «это», «тут», «эта ошибка» — сначала selection, затем agent_tail. Файлы ты только читаешь. "
+              f"агент в фокусе); «это», «тут», «эта ошибка» — сначала selection, затем agent_tail. Файлы ты только читаешь, и только в {PROJECTS}. "
               "Передать агенту ответ или задание — tell: разверни короткую просьбу в полное задание от лица пользователя (что "
               "сделать, где искать, что вернуть), фактов не выдумывай; ответ на вопрос агента передай полностью, с нужными "
               "деталями. Агент ждёт ответа с вариантами (в agents — «ждёт ответа: … Варианты: …») — option с номером варианта по "
@@ -265,7 +270,9 @@ class Brain:
             aid = self.key[6:]
             prompt = agent_prompt(pick_agent(self.snapshot(), aid)[0] or {"id": aid, "title": aid, "cwd": "?"})
         client = ClaudeSDKClient(ClaudeAgentOptions(
-            cwd=OMA_DIR, model=MODEL, system_prompt=prompt, tools=TOOLS, allowed_tools=TOOLS + OMA_TOOLS,
+            cwd=OMA_DIR, add_dirs=[PROJECTS], model=MODEL, system_prompt=prompt, tools=TOOLS,
+            # чтение в рабочих папках разрешений не просит; остальное, что спросило бы, — отказ: спрашивать некого
+            allowed_tools=["WebSearch"] + OMA_TOOLS, permission_mode="dontAsk", settings=READ_ONLY_IN_PROJECTS,
             mcp_servers={"oma": create_sdk_mcp_server("oma", tools=self.tools)}, strict_mcp_config=True,
             resume=self.sid, include_partial_messages=True, setting_sources=[], env={"AGENT_SPEAK": "1"}))
         await client.connect()  # упал — клиента нет, следующий send попробует снова

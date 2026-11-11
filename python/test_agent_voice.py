@@ -656,7 +656,12 @@ def test_brain_chat_keys_tag_and_stale(monkeypatch, tmp_path):
         assert [await ev.get(), await ev.get()] == [("opened", "chat:sid-1", "new"), ("done", None)]
         o = made[0].opts
         assert o.cwd == str(tmp_path) and o.resume is None and o.system_prompt == OMA_PROMPT
-        assert o.tools == brain.TOOLS and o.allowed_tools == brain.TOOLS + brain.OMA_TOOLS and o.env == {"AGENT_SPEAK": "1"}
+        assert o.tools == brain.TOOLS and o.env == {"AGENT_SPEAK": "1"}
+        # Read/Glob/Grep — только в ~/Projects (2026-10-30 Grep по ~ дал пик памяти 44 ГБ): чтение не разрешено правилом
+        # на всё, вне рабочих папок Claude Code его отклоняет, спрашивать некого — отказ
+        assert not {"Read", "Glob", "Grep"} & set(o.allowed_tools) and set(brain.OMA_TOOLS) <= set(o.allowed_tools)
+        assert o.add_dirs == [os.path.expanduser("~/Projects")] and o.permission_mode == "dontAsk"
+        assert json.loads(o.settings) == {"permissions": {"blockReadsOutsideWorkingDirectories": True}}
         assert o.strict_mcp_config and list(o.mcp_servers) == ["oma"]
         assert await b.open("agent:s1") == [] and len(made) == 1  # open только читает историю: claude не запускается
         await b.send("что там")
