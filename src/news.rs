@@ -198,6 +198,7 @@ impl Board {
         self.drain(Class::Final)
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
