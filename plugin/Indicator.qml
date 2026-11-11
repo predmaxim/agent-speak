@@ -24,8 +24,13 @@ BarIndicator {
 
   onPressed: function(button) {
     if (button !== Qt.RightButton) Quickshell.execDetached(["omarchy-shell", "predmaxim.oma", "toggle"])
-    // through the orb's link: it reconnects as soon as the service is up, not at its next 5 s retry
-    else if (!running) Quickshell.execDetached(["omarchy-shell", "predmaxim.oma", "start"])
+    // A link reconnects when its own `agent-speak on` returns (the unit is
+    // Type=notify: the socket is up), not at its next 5 s retry: this one
+    // here, the orb's through IPC start (each runs `agent-speak on`).
+    else if (!running) {
+      link.power(true)
+      Quickshell.execDetached(["omarchy-shell", "predmaxim.oma", "start"])
+    }
     else link.send(Model.set("quiet_override", link.speech.quiet ? "off" : "on"))
   }
 
