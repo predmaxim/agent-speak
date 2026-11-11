@@ -1115,6 +1115,8 @@ impl State {
             .env("AGENT_SPEAK", "1") // хуки сессий Омы до демона не доходят
             // потоки OpenBLAS после каждого расчёта признаков whisper крутятся вхолостую: 0,9–1,5 с процессора на вызов
             .env("OPENBLAS_NUM_THREADS", "1")
+            // зависшая Ома получает SIGABRT: перед дампом faulthandler пишет в журнал трассу всех её потоков
+            .env("PYTHONFAULTHANDLER", "1")
             // Ома передаёт агентам через `agent-speak tell`; путь — каким запущена служба (ExecStart, ссылка в ~/.local/bin):
             // current_exe() после пересборки — «… (deleted)»
             .env("AGENT_SPEAK_BIN", own_path(&std::env::args_os().next().unwrap_or_default(), &std::env::current_dir().unwrap_or_default()))
@@ -1151,6 +1153,14 @@ impl State {
         };
         if let Err(e) = w.write_all(format!("{action}\n").as_bytes()) {
             eprintln!("agent-speak: Ома не принимает команды: {e}");
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                // труба полна — Ома жива, но не читает (висит): SIGABRT, а не SIGKILL — дамп в systemd-coredump и
+                // трасса потоков Python в журнал (PYTHONFAULTHANDLER), чтобы было что разбирать
+                if let Some(c) = &self.oma.child {
+                    // SAFETY: сигнал своему дочернему процессу; он не пожат (wait ниже), pid не переиспользован
+                    unsafe { libc::kill(c.id() as libc::pid_t, libc::SIGABRT) };
+                }
+            }
             self.oma_down();
         }
     }
@@ -1166,8 +1176,10 @@ impl State {
         eprintln!("agent-speak: Ома поднимется через {wait} с");
         self.oma.stdin = None; // EOF — если ещё жива, выйдет сама
         if let Some(mut c) = self.oma.child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
+            // пожать в стороне: дамп упавшей по SIGABRT пишется секунды, цикл службы его не ждёт
+            std::thread::spawn(move || {
+                let _ = c.wait();
+            });
         }
         self.oma.state = "off".into();
         self.oma.talking = false;
@@ -2459,9 +2471,18 @@ mod tests {
     #[test]
     fn stuck_oma_does_not_block_the_loop() {
         // Ома жива, но stdin не читает (зависший цикл): запись не держит цикл демона — Ома считается упавшей
-        let _h = TempHome::new("oma-stuck");
-        let mut st = test_state(); // voice_cmd — sleep 30: stdin не читается
+        let h = TempHome::new("oma-stuck");
+        std::fs::create_dir_all(&h.dir).unwrap();
+        let (abrt, ready) = (h.dir.join("abrt"), h.dir.join("ready"));
+        let mut st = test_state();
+        // stdin не читается; SIGABRT ловит сама (ловушка — до записи), чтобы тест не оставлял дампов в systemd-coredump
+        st.voice_cmd = vec!["sh".into(), "-c".into(), format!("trap 'echo abrt > {}; kill $!; exit 0' ABRT; : > {}; sleep 30 & wait", abrt.display(), ready.display())];
         st.oma_spawn();
+        let end = Instant::now() + Duration::from_secs(3);
+        while !ready.exists() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "заглушка не поставила ловушку");
         use std::os::fd::AsRawFd;
         let fd = st.oma.stdin.as_ref().unwrap().as_raw_fd();
         // SAFETY: F_GETFL на своём дескрипторе
@@ -2471,6 +2492,12 @@ mod tests {
             st.oma_send(&big); // ~800 КБ в трубу на 64 КиБ
         }
         assert!(st.oma.stdin.is_none() && st.oma.state == "off" && st.oma.retry_at.is_some());
+        // висит — SIGABRT, а не SIGKILL: дамп и трасса Python для разбора, почему
+        let end = Instant::now() + Duration::from_secs(3);
+        while !abrt.exists() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(abrt.exists(), "Оме пришёл SIGABRT");
     }
 
     /// В фокусе окно агента id, его последний ответ — text.
