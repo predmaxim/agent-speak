@@ -1498,7 +1498,7 @@ impl State {
         let now = (self.now_secs)();
         let facts: Vec<Facts> = self.registry.entries().iter().map(|e| (self.facts_of)(e, self.activity.get(&e.id).copied().unwrap_or(0))).collect();
         let panes: HashMap<String, Pane> = facts.iter().filter_map(|f| f.pane.clone().map(|p| (f.id.clone(), p))).collect();
-        let ctx = Ctx { now, idle: now.saturating_sub(self.presence.last_input(now)), hung_after: self.cfg.hung_after * 60, remind_after: self.cfg.remind_after * 60 };
+        let ctx = Ctx { now, idle: now.saturating_sub(self.presence.last_input(now)), hung_after: self.cfg.hung_after * 60 };
         let (shell_idle, alive) = (&self.shell_idle, self.alive);
         let acts = self.watch.check(&ctx, facts, |pid| shell_idle(pid), alive);
         for a in acts {
@@ -1511,7 +1511,6 @@ impl State {
     fn on_act(&mut self, a: Act, panes: &HashMap<String, Pane>) {
         match a {
             Act::Say { session, text, urgent } => self.watch_say(&session, &text, if urgent { Class::Urgent } else { Class::Restore }),
-            Act::Remind { session, text } => self.watch_say(&session, &text, Class::Question),
             Act::Judge { session, text } => {
                 // экран — CLI мультиплексора, до 10 с: в своём потоке, затем задание модели
                 let (digest, pane, screen) = (self.digest.clone(), panes.get(&session).cloned(), self.screen);

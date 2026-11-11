@@ -45,13 +45,11 @@ pub struct Ctx {
     pub now: u64,
     pub idle: u64,
     pub hung_after: u64,
-    pub remind_after: u64,
 }
 
 #[derive(Debug)]
 pub enum Act {
     Say { session: String, text: String, urgent: bool },
-    Remind { session: String, text: String },
     Judge { session: String, text: String },
     Run(Job),
 }
@@ -119,7 +117,6 @@ struct Track {
     net: Vec<u64>,
     net_said: bool,
     limited: Option<(u64, bool)>, // (сброс, встал по строке «Остановился по лимиту»)
-    reminded: u64,
 }
 
 impl Track {
@@ -339,18 +336,6 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, ctx: &Ctx, f: &Facts) -> V
     let running = !f.turn_over || f.helpers > 0;
     if f.state == State::Working && f.active_at > 0 && quiet >= ctx.hung_after && running && t.limited.is_none() && !asks {
         return hang(t, ctx, f, quiet);
-    }
-    if f.state == State::Waiting {
-        if now.saturating_sub(f.since) >= ctx.remind_after && now.saturating_sub(t.reminded) >= ctx.remind_after {
-            t.reminded = now;
-            t.health = "ждёт ответа давно".into();
-            return vec![Act::Remind { session: f.id.clone(), text: format!("{p} всё ещё ждёт ответа: {}", f.status) }];
-        }
-    } else {
-        t.reminded = 0;
-        if t.health == "ждёт ответа давно" {
-            t.health.clear();
-        }
     }
     vec![]
 }
@@ -580,7 +565,7 @@ mod tests {
         }
     }
     fn ctx(now: u64, idle: u64) -> Ctx {
-        Ctx { now, idle, hung_after: 720, remind_after: 900 }
+        Ctx { now, idle, hung_after: 720 }
     }
     fn run_of(a: &Act) -> Option<&Job> {
         if let Act::Run(j) = a { Some(j) } else { None }
@@ -790,14 +775,14 @@ mod tests {
     }
 
     #[test]
-    fn forgotten_question_reminded_every_interval() {
+    fn waiting_question_is_not_repeated() {
+        // вопрос звучит один раз (хук Notification); дальше он виден на орбе и в окне, повторов голосом нет
         let mut w = Watch::default();
         let q = Facts { state: State::Waiting, since: 0, status: "что с мёртвым кодом?".into(), ..f("a") };
-        assert!(w.check(&ctx(800, 0), vec![q.clone()], |_| true, |_| false).is_empty());
-        let acts = w.check(&ctx(900, 0), vec![q.clone()], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Remind { text, .. }] if text == "p всё ещё ждёт ответа: что с мёртвым кодом?"), "{acts:?}");
-        assert!(w.check(&ctx(1000, 0), vec![q.clone()], |_| true, |_| false).is_empty());
-        assert_eq!(w.check(&ctx(1800, 0), vec![q], |_| true, |_| false).len(), 1);
+        for now in [900, 1800, 86_400] {
+            assert!(w.check(&ctx(now, 0), vec![q.clone()], |_| true, |_| false).is_empty());
+        }
+        assert_eq!(w.health("a"), "");
     }
 
     #[test]

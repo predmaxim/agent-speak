@@ -27,8 +27,6 @@ pub struct Config {
     pub watch_every: u64,
     /// агент «работает», а событий нет столько минут — завис
     pub hung_after: u64,
-    /// вопрос агента ждёт ответа — напоминать раз в столько минут
-    pub remind_after: u64,
     /// процент лимита, с которого Ома считает прогноз и подсказывает агентам
     pub limit_threshold: u64,
 }
@@ -37,7 +35,7 @@ impl Default for Config {
     fn default() -> Config {
         Config { speaker: "xenia".into(), rate: "medium".into(),
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: true, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
-            orb_over_fullscreen: true, watch_every: 60, hung_after: 12, remind_after: 15, limit_threshold: 95 }
+            orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95 }
     }
 }
 
@@ -106,7 +104,6 @@ impl Config {
             "orb_over_fullscreen" if value.is_boolean() => self.orb_over_fullscreen = value.as_bool().unwrap(),
             "watch_every" if in_range(value, 15, 3600) => self.watch_every = value.as_u64().unwrap(),
             "hung_after" if in_range(value, 2, 240) => self.hung_after = value.as_u64().unwrap(),
-            "remind_after" if in_range(value, 1, 1440) => self.remind_after = value.as_u64().unwrap(),
             "limit_threshold" if in_range(value, 50, 100) => self.limit_threshold = value.as_u64().unwrap(),
             _ => return false,
         }
@@ -217,12 +214,13 @@ mod tests {
     fn watch_keys_default_and_validate() {
         use serde_json::json;
         let mut c = Config::default();
-        assert_eq!((c.watch_every, c.hung_after, c.remind_after, c.limit_threshold), (60, 12, 15, 95));
+        assert_eq!((c.watch_every, c.hung_after, c.limit_threshold), (60, 12, 95));
         let old: Config = toml::from_str("speaker = \"baya\"").unwrap();
         assert_eq!((old.watch_every, old.hung_after), (60, 12), "старый файл без ключей сторожа");
         assert!(!c.set("hung_after", &json!(1)) && !c.set("limit_threshold", &json!(101)) && !c.set("watch_every", &json!(10)));
-        assert!(!c.set("remind_after", &json!("15")) && !c.set("hung_after", &json!(12.5)));
-        assert!(c.set("hung_after", &json!(20)) && c.set("watch_every", &json!(15)) && c.set("remind_after", &json!(1440)) && c.set("limit_threshold", &json!(50)));
-        assert_eq!((c.watch_every, c.hung_after, c.remind_after, c.limit_threshold), (15, 20, 1440, 50));
+        assert!(!c.set("remind_after", &json!(15)), "повторов «ждёт ответа» больше нет");
+        assert!(!c.set("hung_after", &json!(12.5)));
+        assert!(c.set("hung_after", &json!(20)) && c.set("watch_every", &json!(15)) && c.set("limit_threshold", &json!(50)));
+        assert_eq!((c.watch_every, c.hung_after, c.limit_threshold), (15, 20, 50));
     }
 }
