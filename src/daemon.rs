@@ -1014,6 +1014,8 @@ impl State {
             .args(&self.voice_cmd[1..])
             .current_dir(&data)
             .env("AGENT_SPEAK", "1") // хуки сессий Омы до демона не доходят
+            // потоки OpenBLAS после каждого расчёта признаков whisper крутятся вхолостую: 0,9–1,5 с процессора на вызов
+            .env("OPENBLAS_NUM_THREADS", "1")
             .env("AGENT_SPEAK_BIN", std::env::current_exe().unwrap_or_default()) // Ома передаёт агентам через `agent-speak tell`
             .stdin(std::process::Stdio::piped())
             .spawn();
