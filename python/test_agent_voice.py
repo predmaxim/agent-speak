@@ -2859,17 +2859,21 @@ HERE = "Эй, ты тут? Есть новости."
 
 def test_are_you_there_echo_judged_by_its_own_question():
     # окно «Ты тут?» открыто с начала вопроса: эхо узнаётся по её вопросу (said службы), а не по прошлому ответу —
-    # с прошлым «Да, тут всё готово.» ответ «Да, тут.» под её голос выбросился бы как эхо
-    clk, cv = _conv()
-    cv.echo, cv.said = True, "Да, тут всё готово."
-    cv.listen(20, "here", HERE)
-    cv.audio(True)  # вопрос звучит, окно уже слушает
-    cv.speech_start(1)
-    assert cv.phrase("Тут? Есть новости.", 1) == [] and cv.draft == "", "её же вопрос из динамиков — не ответ"
-    cv.speech_start(2)
-    cv.phrase("Да, тут.", 2)
-    clk.t += SEND_PAUSE
-    assert ("presence", "here") in cv.tick()
+    # с прошлым «Да, тут всё готово.» ответ «Да, тут.» под её голос выбросился бы как эхо. listen служба шлёт в миг, когда
+    # пошёл звук вопроса, строку «говорит» — тогда же, другим каналом: порядок любой
+    for sound_first in (False, True):
+        clk, cv = _conv()
+        cv.echo, cv.said = True, "Да, тут всё готово."
+        if sound_first:
+            cv.audio(True)
+        cv.listen(20, "here", HERE)
+        cv.audio(True)  # вопрос звучит, окно уже слушает
+        cv.speech_start(1)
+        assert cv.phrase("Тут? Есть новости.", 1) == [] and cv.draft == "", "её же вопрос из динамиков — не ответ"
+        cv.speech_start(2)
+        cv.phrase("Да, тут.", 2)
+        clk.t += SEND_PAUSE
+        assert ("presence", "here") in cv.tick(), sound_first
 
 
 def test_are_you_there_window_is_not_cut_by_echo_or_room_talk():
