@@ -168,10 +168,10 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
         let pcm = match tts.synth(&item.text, &speaker, &rate) {
             Ok(pcm) => pcm,
             Err(Failed::Text) => {
-                // модель не берёт этот текст (причина — в журнале от silero_tts): повтор не поможет, очередь не держим
+                // модель не берёт этот текст (причина — в журнале от silero_tts): повтор не поможет, очередь не держим;
+                // пустой звук, а не close: pw-cat доигрывает прежнюю фразу, следующая — в него же, а не в новый поверх
                 eprintln!("agent-speak: синтез не смог фразу, пропущена: {}", item.text);
-                player.close();
-                continue;
+                Vec::new()
             }
             Err(Failed::Down) => {
                 // синтез упал: очередь ждёт, а не теряет фразу
@@ -336,9 +336,11 @@ mod tests {
         say(&shared);
         wait(|| *fails.lock().unwrap() == 0 && !shared.busy.load(Ordering::SeqCst));
         assert!(shared.queue.lock().unwrap().is_empty(), "повтор того же текста не поможет — очередь не стоит");
-        assert_eq!(count(&ev, "close"), 1); // pw-cat не простаивает
         say(&shared); // следующая фраза звучит сразу, без паузы RETRY
         wait(|| count(&ev, "write") == 2);
+        // пустой звук — как доигранная фраза: pw-cat не закрыт посреди хвоста прежней, новый поверх не запущен
+        assert_eq!(ev.lock().unwrap()[..2], ["write", "write"]);
+        wait(|| count(&ev, "close") == 1); // хвост доигран — закрыт, как после любой фразы
     }
 
     #[test]
