@@ -608,8 +608,9 @@ fn listen_cmd(kind: &str, said: &str, key: Option<String>, speakers: bool, secs:
     cmd
 }
 
-/// Ответ на запрос (tell, turn) — строкой в то же соединение. Клиент, приславший запрос в соединение, которое не
-/// читает, не держит поток вечно: запись ждёт не больше секунды, затем соединение закрывается — клиент переподключится.
+/// Ответ на запрос (tell, turn) — строкой в то же соединение (не подписанное: там запрос получает отказ). Ответ ложится
+/// в буфер сокета; клиент, который его не читает, не держит поток вечно: буфер полон — запись ждёт не больше секунды,
+/// затем соединение закрывается — клиент переподключится.
 fn answer(conn: &UnixStream, line: &str) -> bool {
     let _ = conn.set_write_timeout(Some(Duration::from_secs(1)));
     let mut w = conn;
@@ -623,10 +624,19 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
     let Ok(input) = conn.try_clone() else { return };
     // молчун без первой строки не держит поток вечно; подписка снимает таймаут
     let _ = input.set_read_timeout(Some(Duration::from_secs(1)));
+    let mut subscribed = false;
     for line in BufReader::new(input).lines() {
         let Ok(line) = line else { break };
         let _ = conn.set_read_timeout(None); // первая строка пришла — постоянное соединение (agent_voice) живёт молча
         match serde_json::from_str::<Msg>(&line) {
+            // ответ лёг бы между строками рассылки, а его таймаут записи (общий у клонов сокета) — на подписчика:
+            // запрос не исполняется, отказ пишется с таймаутом подписки
+            Ok(Msg::Tell { .. } | Msg::Turn) if subscribed => {
+                let err = serde_json::json!({"err": "запрос — отдельным соединением: это подписано на рассылку"});
+                if (&conn).write_all(format!("{err}\n").as_bytes()).is_err() {
+                    break;
+                }
+            }
             Ok(Msg::Tell { session, option, text, expect }) => {
                 // ответ агенту — в очередь потока действий; эта строка ждёт исхода и пишет его клиенту
                 let (rtx, rrx) = mpsc::channel();
@@ -652,6 +662,7 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
             Ok(Msg::Subscribe) => match conn.try_clone() {
                 Ok(w) => {
                     let _ = conn.set_read_timeout(None); // таймаут общий для клонов сокета
+                    subscribed = true;
                     let _ = tx.send(Event::Subscribe(w));
                 }
                 Err(_) => break,
@@ -2609,6 +2620,24 @@ mod tests {
         let Ok(Event::Turn(reply)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("turn не дошёл до цикла") };
         reply.send("{\"agents\":[]}\n".into()).unwrap(); // так ответит основной цикл
         assert_eq!(next(&mut reader(client)), serde_json::json!({"agents": []}));
+    }
+
+    #[test]
+    fn request_on_subscribed_connection_is_refused_and_keeps_its_timeout() {
+        // таймаут записи общий для клонов сокета: ответ запроса с 1 с поднял бы и таймаут подписчика (100 мс)
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (server, client) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || serve(server, tx));
+        let mut w = client.try_clone().unwrap();
+        w.write_all(b"{\"cmd\":\"subscribe\"}\n").unwrap();
+        let Ok(Event::Subscribe(sub)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("подписка не дошла до цикла") };
+        sub.set_write_timeout(Some(Duration::from_millis(100))).unwrap(); // так её ставит subscribe()
+        w.write_all(b"{\"cmd\":\"turn\"}\n{\"cmd\":\"tell\",\"session\":\"s\",\"option\":1,\"text\":\"\"}\n").unwrap();
+        let mut r = reader(client);
+        assert!(next(&mut r)["err"].as_str().unwrap().contains("отдельным соединением"));
+        assert!(next(&mut r)["err"].as_str().unwrap().contains("отдельным соединением"));
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "ни ход, ни поручение не исполняются");
+        assert_eq!(sub.write_timeout().unwrap(), Some(Duration::from_millis(100)));
     }
 
     #[test]
