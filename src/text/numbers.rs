@@ -10,6 +10,7 @@ const HUNDREDS: [&str; 10] = ["", "сто", "двести", "триста", "ч�
 
 pub fn numbers_to_words(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
+    let digits_at = |i: usize| chars.get(i..).map_or(0, |r| r.iter().take_while(|c| c.is_ascii_digit()).count());
     let mut out = String::new();
     let mut i = 0;
     while i < chars.len() {
@@ -18,21 +19,28 @@ pub fn numbers_to_words(s: &str) -> String {
             i += 1;
             continue;
         }
-        // группа: цифры, разделённые одиночными '.' или ',' (версия/десятичное)
-        let mut parts = vec![String::new()];
-        while i < chars.len() {
-            let c = chars[i];
-            if c.is_ascii_digit() {
-                parts.last_mut().unwrap().push(c);
-            } else if (c == '.' || c == ',') && chars.get(i + 1).is_some_and(char::is_ascii_digit) {
-                parts.push(String::new());
-            } else {
-                break;
+        // целое; разряды по три цифры через пробел или запятую — одно число («1 000», «1,000,000»)
+        let n = digits_at(i);
+        let mut int: String = chars[i..i + n].iter().collect();
+        i += n;
+        if n <= 3 && !int.starts_with('0') {
+            while matches!(chars.get(i), Some(' ' | ',')) && digits_at(i + 1) == 3 {
+                int.extend(&chars[i + 1..i + 4]);
+                i += 4;
             }
-            i += 1;
         }
-        let words: Vec<String> = parts.iter().map(|p| int_words(p)).collect();
-        out.push_str(&words.join(" точка "));
+        out.push_str(&int_words(&int));
+        // дальше через одиночные '.' или ',' (версия/десятичное) и время «12:30»
+        loop {
+            let n = digits_at(i + 1);
+            match chars.get(i) {
+                Some('.' | ',') if n > 0 => out.push_str(" точка "),
+                Some(':') if n == 2 => out.push(' '),
+                _ => break,
+            }
+            out.push_str(&int_words(&chars[i + 1..i + 1 + n].iter().collect::<String>()));
+            i += 1 + n;
+        }
         // процент: "50%" или "50 %"
         let mut j = i;
         if chars.get(j) == Some(&' ') {
@@ -46,9 +54,10 @@ pub fn numbers_to_words(s: &str) -> String {
     out
 }
 
+/// Ведущий ноль («05» в «0.05», код «0502») — по цифрам, иначе ноль потеряется.
 fn int_words(digits: &str) -> String {
     let n: u64 = match digits.parse() {
-        Ok(n) if n < 1_000_000_000 => n,
+        Ok(n) if n < 1_000_000_000 && !(digits.len() > 1 && digits.starts_with('0')) => n,
         _ => return digits.chars().map(|c| ONES[c.to_digit(10).unwrap() as usize]).collect::<Vec<_>>().join(" "),
     };
     if n == 0 {
@@ -125,6 +134,29 @@ mod tests {
         assert_eq!(numbers_to_words("2.1.284"), "два точка один точка двести восемьдесят четыре");
         assert_eq!(numbers_to_words("50 %"), "пятьдесят процентов");
         assert_eq!(numbers_to_words("7%"), "семь процентов");
+    }
+
+    #[test]
+    fn leading_zeros_kept() {
+        assert_eq!(numbers_to_words("Порог 0.05 и 0.5"), "Порог ноль точка ноль пять и ноль точка пять");
+        assert_eq!(numbers_to_words("код 0502"), "код ноль пять ноль два");
+        assert_eq!(numbers_to_words("2.10"), "два точка десять");
+    }
+
+    #[test]
+    fn thousand_separators() {
+        assert_eq!(
+            numbers_to_words("1 000 строк, 1,000,000 байт, 13 984 токена"),
+            "одна тысяча строк, один миллион байт, тринадцать тысяч девятьсот восемьдесят четыре токена"
+        );
+        assert_eq!(numbers_to_words("1, 2, 3 и 1,8 с"), "один, два, три и один точка восемь с");
+        assert_eq!(numbers_to_words("1 000,5 и 2024 100"), "одна тысяча точка пять и две тысячи двадцать четыре сто");
+    }
+
+    #[test]
+    fn time() {
+        assert_eq!(numbers_to_words("в 12:30 и 9:05"), "в двенадцать тридцать и девять ноль пять");
+        assert_eq!(numbers_to_words("3:1"), "три:один");
     }
 
     #[test]

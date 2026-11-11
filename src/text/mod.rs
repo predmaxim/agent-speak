@@ -55,6 +55,13 @@ mod tests {
     }
 
     #[test]
+    fn prepare_numbers() {
+        let t = Terms::from_str("gb\tгигаб+айт\n");
+        let (s, _) = prepare("Порог 0.05, всего 1 000 строк к 12:30, файл 5GB, код E0502.", &t);
+        assert_eq!(s, vec!["Порог ноль точка ноль пять, всего одна тысяча строк к двенадцать тридцать, файл пять гигаб+айт, код е ноль пять ноль два."]);
+    }
+
+    #[test]
     fn prepare_abbreviations_and_letters() {
         let t = Terms::from_str("pr\tп+и-+ар\n");
         let (s, _) = prepare("По ТЗ, т. е. так: PR #42, версия v5, пункт б. Всё и т. д.", &t);

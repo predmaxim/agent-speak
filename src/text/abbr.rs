@@ -29,8 +29,11 @@ pub fn abbreviations(s: &str) -> String {
             }
         }
         out.push(c[i]);
-        // «v5» → «v 5»: иначе число приклеивается к букве; «0x1F», «3D» не трогаем
-        if c[i].is_ascii_alphabetic() && c.get(i + 1).is_some_and(char::is_ascii_digit) && !prev.is_some_and(|p| p.is_ascii_digit()) {
+        // «v5» → «v 5», «5GB» → «5 GB»: иначе число приклеивается к букве; «0x1F», «mp3v2» не трогаем
+        if c[i].is_ascii_alphabetic() && c.get(i + 1).is_some_and(char::is_ascii_digit) && !prev.is_some_and(|p| p.is_ascii_digit())
+            || c[i].is_ascii_digit() && c.get(i + 1).is_some_and(char::is_ascii_alphabetic)
+                && !prev.is_some_and(|p| p.is_ascii_alphabetic()) && !c.get(i + 2).is_some_and(char::is_ascii_digit)
+        {
             out.push(' ');
         }
         i += 1;
@@ -144,7 +147,8 @@ mod tests {
     #[test]
     fn latin_glued_to_digit() {
         assert_eq!(abbreviations("версии v5 и x86, utf8"), "версии v 5 и x 86, utf 8");
-        assert_eq!(abbreviations("3D и 2FA"), "3D и 2FA");
+        assert_eq!(abbreviations("3D и 2FA, 5GB, 10x"), "3 D и 2 FA, 5 GB, 10 x");
+        assert_eq!(abbreviations("0x1F и mp3v2"), "0x1F и mp 3v2");
     }
 
     #[test]
