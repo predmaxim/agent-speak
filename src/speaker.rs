@@ -24,6 +24,9 @@ pub struct Shared {
     /// Номер реплики Омы, чья фраза у потока воспроизведения (синтез, запись); 0 — ничья. Ставится под замком очереди
     /// вместе с pop, снимается до «смолкла».
     pub voice_now: AtomicU64,
+    /// Чей звук уже идёт: сессия фразы, первый кусок которой записан в pw-cat (busy загорается раньше — до синтеза,
+    /// а он бывает долгим); пусто — смолкла. Смена — тем же сигналом changed.
+    pub sounding: Mutex<String>,
 }
 
 /// Синтезатор и приёмник звука — трейты только ради тестов с подделками.
@@ -78,6 +81,19 @@ impl Shared {
             sink: Arc::new(Mutex::new(String::new())),
             played: Mutex::new(0.0),
             voice_now: AtomicU64::new(0),
+            sounding: Mutex::new(String::new()),
+        }
+    }
+
+    /// Пошёл звук фразы сессии session; сообщает основному циклу, только если до этого звучала другая или никакая.
+    fn sound(&self, session: &str) {
+        let mut s = self.sounding.lock().unwrap();
+        if *s != session {
+            *s = session.to_string();
+            drop(s);
+            if let Some(tx) = &*self.changed.lock().unwrap() {
+                let _ = tx.send(());
+            }
         }
     }
 
@@ -124,6 +140,9 @@ impl Shared {
     /// Some(сессия) — говорит, None — молчит. Сообщает основному циклу только об изменении.
     pub fn set_busy(&self, session: Option<&str>) {
         let was = self.busy.swap(session.is_some(), Ordering::SeqCst);
+        if session.is_none() {
+            self.sounding.lock().unwrap().clear();
+        }
         let mut cur = self.current.lock().unwrap();
         let changed = was != session.is_some() || session.is_some_and(|s| *cur != s);
         if let Some(s) = session {
@@ -234,7 +253,7 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
             }
         };
         let mut done = true;
-        for chunk in pcm.chunks(CHUNK) {
+        for (i, chunk) in pcm.chunks(CHUNK).enumerate() {
             if shared.generation.load(Ordering::SeqCst) != my_gen {
                 player.reset();
                 let mut q = shared.queue.lock().unwrap();
@@ -253,6 +272,9 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                 }
                 done = false;
                 break;
+            }
+            if i == 0 {
+                shared.sound(&item.session);
             }
         }
         if done {
@@ -364,20 +386,32 @@ mod tests {
     }
 
     #[test]
-    fn oma_voice_is_left_until_its_sound_is_written() {
-        // реплика Омы (voice — её номер) не отработана, пока её фраза в очереди или у потока воспроизведения
+    fn sound_start_is_reported_once_per_session() {
+        // busy загорается до синтеза; звук идёт с первым записанным куском — по нему «Ты тут?» отсчитывает окно ответа
         let (shared, ev) = start(0, 0);
         let (tx, rx) = std::sync::mpsc::channel();
         *shared.changed.lock().unwrap() = Some(tx);
+        shared.pause();
+        say(&shared);
+        say(&shared); // вторая фраза той же сессии — звук уже идёт, второго сигнала нет
+        shared.resume();
+        wait(|| count(&ev, "write") == 4 && !shared.busy.load(Ordering::SeqCst));
+        assert_eq!(rx.try_iter().count(), 3, "начала, звук пошёл, смолкла");
+        assert!(shared.sounding.lock().unwrap().is_empty(), "смолкла — ничей звук не идёт");
+    }
+
+    #[test]
+    fn oma_voice_is_left_until_its_sound_is_written() {
+        // реплика Омы (voice — её номер) не отработана, пока её фраза в очереди или у потока воспроизведения
+        let (shared, ev) = start(0, 0);
         shared.pause();
         shared.queue.lock().unwrap().push(Item { session: "voice".into(), text: "ответ".into(), kind: Kind::Voice, voice: 1 });
         assert_eq!(shared.voices_left(0), 1, "в очереди");
         assert_eq!(shared.voices_left(1), 0, "номер не новее after — реплика прежней Омы — не считается");
         shared.resume();
-        rx.recv_timeout(Duration::from_secs(2)).unwrap(); // начала
-        rx.recv_timeout(Duration::from_secs(3)).unwrap(); // смолкла
-        assert_eq!(shared.voices_left(0), 0, "к «смолкла» реплика уже отработана — Ома видит это в той же строке");
-        assert_eq!(count(&ev, "write"), 2);
+        wait(|| count(&ev, "write") == 2 && !shared.busy.load(Ordering::SeqCst));
+        // busy гаснет после того, как поток отпустил реплику: строка с speaking false её уже считает
+        assert_eq!(shared.voices_left(0), 0);
     }
 
     #[test]
