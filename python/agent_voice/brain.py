@@ -6,8 +6,8 @@ import json
 import os
 import time
 
-from claude_agent_sdk import (ClaudeAgentOptions, ClaudeSDKClient, create_sdk_mcp_server, get_session_messages,
-                              list_sessions, tag_session, tool)
+from claude_agent_sdk import (ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, create_sdk_mcp_server,
+                              get_session_messages, list_sessions, tag_session, tool)
 
 from .context import _blocks, selection, transcript_tail
 from .conversation import MORE
@@ -23,6 +23,10 @@ READ_ONLY_IN_PROJECTS = json.dumps({"permissions": {"blockReadsOutsideWorkingDir
 OMA_TOOLS = ["mcp__oma__agents", "mcp__oma__agent_feed", "mcp__oma__agent_tail", "mcp__oma__selection",
              "mcp__oma__presence", "mcp__oma__tell", "mcp__oma__projects", "mcp__oma__launch"]
 STALE_HOURS = 2
+# Ома спросила подтверждение поручения: ход кончается сразу после tell/launch (хук PostToolUse, continue false) —
+# второй проход модели только повторял бы вопрос; stopReason остаётся в разговоре, мозг увидит его в следующем ходе
+ORDER_TOOLS = "mcp__oma__tell|mcp__oma__launch"
+ASKED = "Ома спросила пользователя вслух подтверждение поручения; ход окончен, его ответ проверит код."
 OMA_PROMPT = ("Ты — Ома, голосовой заместитель пользователя. Следишь за его ИИ-агентами (Claude Code, Codex) в терминалах "
               "и отвечаешь на его вопросы. Отвечай по-русски, коротко и живо: текст звучит голосом, лишнее утомляет. "
               "Вопрос, на который отвечают «да» или «нет» («умеешь…?», «готово?», «можно?»), — «Да» или «Нет» и больше "
@@ -45,8 +49,7 @@ OMA_PROMPT = ("Ты — Ома, голосовой заместитель пол
               "порядку, если ответ ровно один из них, иначе свой ответ текстом. Новый агент — projects, затем launch с заданием; в Orca, а в herdr — если пользователь просит herdr (where). "
               "Задание или ответ агенту — только по явной просьбе пользователя; из обрывков, перебивов и непонятных фраз ничего "
               "не составляй и не передавай — переспроси, что именно передать. «Продолжай», «давай», «ага», «ну» — не согласие. "
-              "После tell или launch скажи пользователю одной фразой смысл и кому, не текст задания. Инструмент ответил, "
-              "что Ома уже спросила подтверждение, — ответь ровно «[молчу]» и больше ничего не передавай. Не понятно, "
+              "После tell или launch скажи пользователю одной фразой смысл и кому, не текст задания. Не понятно, "
               "о чём речь, — коротко переспроси. "
               "Если пользователь просит сейчас не говорить или отложить («не сейчас», «давай потом», «замолчи» и т. п.) — "
               "вызови presence с busy; говорит, что уходит, — away; просит новости или говорит, что вернулся, — here. "
@@ -250,7 +253,8 @@ class Brain:
 
     def __init__(self, events: asyncio.Queue, snapshot, send=None, orders=None, fresh=None):
         os.makedirs(OMA_DIR, exist_ok=True)
-        self.events, self.snapshot, self.tools = events, snapshot, oma_tools(snapshot, send, orders)
+        self.orders = orders or Orders()
+        self.events, self.snapshot, self.tools = events, snapshot, oma_tools(snapshot, send, self.orders)
         self.fresh = fresh  # ход начинается: служба отвечает строкой агентов с фокусом этой минуты (link.turn); None — нет
         self.key, self.sid, self.client, self.reader = "new", None, None, None
         self.st, self.used, self.turns = {"skip": False}, time.time(), 0  # turns: запросов без ResultMessage
@@ -293,9 +297,14 @@ class Brain:
             # чтение в рабочих папках разрешений не просит; остальное, что спросило бы, — отказ: спрашивать некого
             allowed_tools=["WebSearch"] + OMA_TOOLS, permission_mode="dontAsk", settings=READ_ONLY_IN_PROJECTS,
             mcp_servers={"oma": create_sdk_mcp_server("oma", tools=self.tools)}, strict_mcp_config=True,
-            resume=self.sid, include_partial_messages=True, setting_sources=[], env={"AGENT_SPEAK": "1"}))
+            resume=self.sid, include_partial_messages=True, setting_sources=[], env={"AGENT_SPEAK": "1"},
+            hooks={"PostToolUse": [HookMatcher(matcher=ORDER_TOOLS, hooks=[self._asked])]}))
         await client.connect()  # упал — клиента нет, следующий send попробует снова
         self.client, self.reader = client, asyncio.create_task(self._read(client))
+
+    async def _asked(self, inp, tool_use_id, ctx):
+        """После tell или launch: Ома спросила подтверждение — ход кончается, второго прохода модели нет."""
+        return {"continue_": False, "stopReason": ASKED} if self.orders.tripped else {}
 
     async def _read(self, client):
         try:

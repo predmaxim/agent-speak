@@ -2320,12 +2320,33 @@ def test_order_question_is_spoken_by_code_not_by_second_brain_pass():
     o.turn(True, "пусть запушит")
     r = run(o.tell(E[0], "Запушь", "запушить"))
     assert asked_ == ["Передать проекту omarchy-mail: запушить? Это пуш. Скажи: подтверждаю пуш."]
-    assert "[молчу]" in r and not calls
-    assert "[молчу]" in run(o.tell(E[0], "Запушь всё", "запушить всё")) and len(asked_) == 1, "второй раз в ходе — не спрашивает"
+    assert "[молчу]" not in r and not calls, "второго прохода мозга нет: ход кончает хук PostToolUse"
+    r2 = run(o.tell(E[0], "Запушь всё", "запушить всё"))
+    assert r2.startswith("Не передано: поручение уже ждёт") and len(asked_) == 1, "второй раз в ходе — не спрашивает"
+
+
+def test_order_question_ends_brain_turn_right_after_the_tool(monkeypatch, tmp_path):
+    # второй проход мозга после вопроса («[молчу]») — лишний запрос к API и флаг вокруг поведения модели; ход кончается
+    # сразу после tell/launch штатно: хук PostToolUse с continue false, stopReason мозг увидит в следующем ходе
+    brain, made, _ = _fake_sdk(monkeypatch, tmp_path)
+    o, calls = _orders()
+
+    async def go():
+        b = brain.Brain(asyncio.Queue(), lambda: E, orders=o)
+        await b.warm()
+        (m,) = made[0].opts.hooks["PostToolUse"]
+        assert m.matcher == "mcp__oma__tell|mcp__oma__launch"
+        o.turn(True, "пусть почта проверит тесты")
+        assert await m.hooks[0]({}, "toolu_1", {}) == {}, "вопроса не было — ход идёт дальше"
+        await o.tell(E[0], "Проверь тесты", "проверить тесты")
+        out = await m.hooks[0]({}, "toolu_1", {})
+        assert out["continue_"] is False and "подтвержд" in out["stopReason"]
+        await b.close()
+    run(go())
 
 
 def test_code_question_sounds_through_conversation_and_ends_the_turn():
-    # через Conversation: её слова знает защита от эха; после вопроса ход молчит — вопрос звучит последним
+    # через Conversation: её слова знает защита от эха; ход кончается вопросом — он звучит последним
     clk, cv = _conv()
     cv.echo = True
     cv.talk(); cv.speech_start(1); cv.phrase("пусть агент почты запушит", 1)
@@ -2333,8 +2354,7 @@ def test_code_question_sounds_through_conversation_and_ends_the_turn():
     assert ("say", "Готовлю поручение.") in cv.tool("mcp__oma__tell")
     acts = cv.question(ASK)
     assert ("say", ASK) in acts and ("show", ASK) in acts and ASK in cv.said
-    assert cv.delta("Передать проекту почта") == [] and cv.tool("thinking") == []
-    assert cv.delta("[конец]") == [] and cv.done() == [] and cv.active, "разговор открыт: ждёт «да, передай»"
+    assert cv.done() == [] and cv.active, "ход кончился сразу после вопроса (хук мозга): разговор открыт, ждёт «да, передай»"
     cv.audio(True); cv.audio(False)
     assert cv.state == "listening"
 

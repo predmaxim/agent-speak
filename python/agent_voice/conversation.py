@@ -130,7 +130,6 @@ class Conversation:
         self.said = ""         # что она сказала в этом ответе — по нему узнаётся эхо
         self.played_at = 0.0   # когда кончается (кончился) звук службы — её played_at, часы time.monotonic()
         self.voiced = False    # последняя реплика сказана голосом, не набрана: опасное по ней — только с подтверждением
-        self.asked = False     # в этом ходе код спросил подтверждение поручения: дальше ход молчит
         self.hold = ""         # конец текста, похожий на начало метки MORE: ждёт следующей дельты
         self.more = None       # подробности после метки MORE (None — метки ещё не было)
 
@@ -177,7 +176,7 @@ class Conversation:
         return acts
 
     def _send(self, text, ctx="", voiced=True):
-        self.turn, self.voiced, self.said, self.asked = True, voiced, "", False
+        self.turn, self.voiced, self.said = True, voiced, ""
         self.turn_no += 1
         self.hold, self.more = "", None
         self.head = ""
@@ -386,7 +385,7 @@ class Conversation:
         return acts
 
     def delta(self, text):
-        if not self.turn or self.asked:
+        if not self.turn:
             return []
         if self.head is not None:  # метка молчания — первым знаком хода: до решения ничего не звучит
             self.head += text
@@ -420,9 +419,9 @@ class Conversation:
             return []
         self.turn = False
         head, self.head = (self.head or "").strip(), None
-        if head.lower().startswith("[конец") and not self.asked:  # «ок, спасибо» после её ответа — разговор окончен
+        if head.lower().startswith("[конец"):  # «ок, спасибо» после её ответа — разговор окончен
             return self.end()
-        if head.lower().startswith("[молч") or self.asked:  # после вопроса подтверждения — ждём «да, передай»
+        if head.lower().startswith("[молч"):
             if self.suspended:
                 return self._resume()  # перебили не её — продолжает прерванный ответ
             acts = []
@@ -441,15 +440,14 @@ class Conversation:
 
     def question(self, text):
         """Вопрос подтверждения поручения говорит код, сразу при вызове инструмента; через неё, а не мимо: её слова
-        знает защита от эха. Мозгу велено ответить «[молчу]»; что бы он ни написал, ход дальше молчит — вопрос последний."""
-        if not self.turn or self.asked:
+        знает защита от эха. Ход мозга на нём кончается (хук PostToolUse в brain.py) — вопрос звучит последним."""
+        if not self.turn:
             return []
-        self.asked = True
         return self._discard() + self._speak(self.chunker.flush() + [text])
 
     def tool(self, name):
         """Мозг взялся за инструмент (или задумался) — сказать, что она делает, если сейчас не звучит."""
-        if not self.turn or self.asked or self.audio_busy or self.state == "speaking" or (name == "thinking" and self.said):
+        if not self.turn or self.audio_busy or self.state == "speaking" or (name == "thinking" and self.said):
             return []
         phrase = FILLERS.get(name, "Секунду.")
         return self._discard() + self._speak([phrase]) if phrase else []
