@@ -15,7 +15,12 @@ pub fn numbers_to_words(s: &str) -> String {
     let mut i = 0;
     while i < chars.len() {
         if !chars[i].is_ascii_digit() {
-            out.push(chars[i]);
+            // «-3» — минус; «5-7», «2026-11» — дефис
+            if chars[i] == '-' && (i == 0 || chars[i - 1].is_whitespace() || chars[i - 1] == '(') && digits_at(i + 1) > 0 {
+                out.push_str("минус ");
+            } else {
+                out.push(chars[i]);
+            }
             i += 1;
             continue;
         }
@@ -157,6 +162,11 @@ mod tests {
     fn time() {
         assert_eq!(numbers_to_words("в 12:30 и 9:05"), "в двенадцать тридцать и девять ноль пять");
         assert_eq!(numbers_to_words("3:1"), "три:один");
+    }
+
+    #[test]
+    fn minus_before_number() {
+        assert_eq!(numbers_to_words("-3 и (-2), 5-7, 2026-11"), "минус три и (минус два), пять-семь, две тысячи двадцать шесть-одиннадцать");
     }
 
     #[test]

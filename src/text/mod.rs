@@ -21,7 +21,8 @@ pub fn plus_stress(p: &str) -> String {
 }
 
 pub fn prepare(raw: &str, terms: &Terms) -> (Vec<String>, Vec<String>) {
-    let cleaned = abbr::abbreviations(&clean::clean(&plus_stress(raw)));
+    // ударение — после clean: там буквальный «+» становится словом «плюс»
+    let cleaned = abbr::abbreviations(&plus_stress(&clean::clean(raw)));
     let mut out = Vec::new();
     let mut unknown = Vec::new();
     for s in sentences::drop_gutted(sentences::split(&cleaned)) {
@@ -52,6 +53,12 @@ mod tests {
         let (s, u) = prepare("## Готово\nПоправил `~/.config/hypr/hyprland.lua`, 3 правки → Hyprland.\n```\nx\n```", &t);
         assert_eq!(s, vec!["Готово.", "Поправил хайпрлэнд точка луа, три правки в хайпрлэнд."]);
         assert_eq!(u, vec!["lua"]);
+    }
+
+    #[test]
+    fn prepare_plus_is_not_stress() {
+        let (s, _) = prepare("Стало +5 строк на C++, ударе\u{301}ние на месте.", &Terms::from_str(""));
+        assert_eq!(s, vec!["Стало плюс пять строк на си плюс плюс, удар+ение на месте."]);
     }
 
     #[test]
