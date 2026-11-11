@@ -248,9 +248,10 @@ def oma_tools(snapshot, send, orders=None) -> list:
 class Brain:
     """Текущий чат Омы: key — "new", "chat:<id сессии>" или "agent:<id агента>"."""
 
-    def __init__(self, events: asyncio.Queue, snapshot, send=None, orders=None):
+    def __init__(self, events: asyncio.Queue, snapshot, send=None, orders=None, fresh=None):
         os.makedirs(OMA_DIR, exist_ok=True)
         self.events, self.snapshot, self.tools = events, snapshot, oma_tools(snapshot, send, orders)
+        self.fresh = fresh  # ход начинается: служба отвечает строкой агентов с фокусом этой минуты (link.turn); None — нет
         self.key, self.sid, self.client, self.reader = "new", None, None, None
         self.st, self.used, self.turns = {"skip": False}, time.time(), 0  # turns: запросов без ResultMessage
         self.lock = asyncio.Lock()  # warm и send не поднимают claude дважды
@@ -331,10 +332,16 @@ class Brain:
         await self._ready()
 
     async def send(self, text: str, sound: str = ""):
-        await self._ready()
+        fresh = asyncio.ensure_future(self.fresh()) if self.fresh else None  # служба спрашивает фокус, пока claude поднимается
+        try:
+            await self._ready()
+            entries = await fresh if fresh else None
+        finally:
+            if fresh:
+                fresh.cancel()  # connect упал — ответ не нужен
         self.used = time.time()
         self.turns += 1  # до query: ResultMessage может прийти раньше, чем query вернётся
-        await self.client.query(with_agents(text, self.snapshot(), time.time(), sound))
+        await self.client.query(with_agents(text, self.snapshot() if entries is None else entries, time.time(), sound))
 
     async def interrupt(self):
         """Перебить ход в полёте; кончившийся не трогаем — иначе skip съест следующий ответ."""

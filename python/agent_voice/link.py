@@ -47,3 +47,24 @@ async def watch(on_status, on_agents, sock=SOCK):
                 on_agents(d["agents"])
     finally:
         w.close()
+
+
+async def request(cmd, sock=SOCK, timeout=1.0):
+    """Запрос с ответом — своим соединением: строка туда, строка обратно (dict); службы нет, молчит или ответила
+    не JSON — None. Не через send: непрочитанный ответ служба ждёт секунду и закрывает соединение с командами."""
+    try:
+        r, w = await asyncio.wait_for(asyncio.open_unix_connection(sock, limit=1 << 22), timeout)
+        try:
+            w.write((json.dumps(cmd, ensure_ascii=False) + "\n").encode())
+            await w.drain()
+            return json.loads(await asyncio.wait_for(r.readline(), timeout))  # фокус служба спрашивает ~0,16 с
+        finally:
+            w.close()
+    except (OSError, ValueError, asyncio.TimeoutError):
+        return None
+
+
+async def turn(sock=SOCK):
+    """Ход мозга начинается: служба заново спрашивает окно в фокусе и отвечает строкой агентов — снимок для реплики."""
+    d = await request({"cmd": "turn"}, sock)
+    return d.get("agents") if isinstance(d, dict) else None

@@ -2688,3 +2688,46 @@ def test_talk_after_viewing_agent_chat_brings_window_to_conversation():
     run(go())
     assert emitted[-1]["line"] == {"chat": {"key": "chat:g", "was": "*", "messages": [{"role": "me", "text": "прошлое"}]}}
     assert oma.brain.key == "chat:g"
+
+
+# --- сигналы службы: turn, played_at, out ---
+
+def test_turn_request_reads_agents_line_on_its_own_connection(tmp_path):
+    import socket, threading
+    from agent_voice import link
+    path = str(tmp_path / "s.sock")
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind(path)
+    srv.listen(2)
+    got = []
+
+    def serve():
+        c, _ = srv.accept()
+        got.append(c.makefile().readline())
+        c.sendall('{"agents":[{"id":"a","focused":true}]}\n'.encode())
+        c.close()
+        c, _ = srv.accept()  # служба закрыла соединение без ответа — снимка нет
+        c.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    assert run(link.turn(path)) == [{"id": "a", "focused": True}] and json.loads(got[0]) == {"cmd": "turn"}
+    assert run(link.turn(path)) is None
+    assert run(link.turn(str(tmp_path / "нет.sock"))) is None, "службы нет — без снимка, ход не падает"
+
+
+def test_brain_takes_snapshot_from_turn_answer(monkeypatch, tmp_path):
+    # фокус для снимка служба спрашивает по turn перед каждым ходом (и в тихом режиме, и набранным), а не по chime
+    brain, made, _ = _fake_sdk(monkeypatch, tmp_path)
+    answers = [[dict(E[0], focused=True)], None]
+
+    async def fresh():
+        return answers.pop(0)
+
+    async def go():
+        b = brain.Brain(asyncio.Queue(), lambda: E, fresh=fresh)
+        await b.send("что тут")
+        await b.send("а теперь")
+        await b.close()
+    run(go())
+    assert "id s1, в фокусе" in made[0].sent[0] and "id s2, в фокусе" not in made[0].sent[0]
+    assert "id s2, в фокусе" in made[0].sent[1], "ответа нет — снимок подписки"

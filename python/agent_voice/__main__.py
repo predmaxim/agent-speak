@@ -422,7 +422,7 @@ async def main():
         loop = asyncio.get_running_loop()
         whisper = Whisper()
         orders = Orders()  # один на мозг и Ому: ждущее подтверждения опасное видят оба
-        oma = Oma(Conversation(), Ear(events, whisper), Brain(events, lambda: agents, send=link.send, orders=orders), whisper,
+        oma = Oma(Conversation(), Ear(events, whisper), Brain(events, lambda: agents, send=link.send, orders=orders, fresh=link.turn), whisper,
                   orders=orders, events=events)
 
         def on_agents(lst):
