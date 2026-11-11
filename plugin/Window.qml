@@ -28,9 +28,9 @@ Item {
   }
 
   // Opens on the focused screen (and stays there while open) with the chat
-  // `key`, an agent's from its bubble; "" asks Oma for her current chat (a
-  // keyless `open` switches nothing; her answer, `was` "*", is adopted), so
-  // after a shell restart the window follows her chat again.
+  // `key`, an agent's from its bubble; "" asks Oma for her current chat (her
+  // answer, `was` "*", is adopted), so after a shell restart the window
+  // follows her chat again.
   function open(key) {
     openScreen = focusedScreen()
     now = Date.now() / 1000
@@ -132,7 +132,11 @@ Item {
   function tellView(): void { if (root.link) root.link.send(Model.view(root.shown, root.chatKey)) }
   onChatKeyChanged: tellView()
 
-  // A chat on the right; its messages come back in Oma's `chat` line.
+  // A chat on the right; its messages come back in Oma's `chat` line. `open`
+  // only shows it (an agent's row or bubble, a history row, Esc to «Ома»):
+  // her brain moves there with the first question typed in it; talk goes to
+  // her current chat (the general one instead of an agent's) and the window
+  // follows it (`chat` with `was` "*").
   function openChat(key) {
     if (key !== root.chatKey) { root.chatKey = key; root.messages = [] }
     root.scrollDown()
