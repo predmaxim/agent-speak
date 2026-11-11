@@ -19,8 +19,8 @@ impl Terms {
         let map = s
             .lines()
             .filter_map(|l| l.split_once('\t'))
-            .map(|(w, p)| (w.trim().to_lowercase(), p.trim().to_string()))
-            .filter(|(w, p)| !w.is_empty() && !p.is_empty())
+            .filter_map(|(w, p)| Some((w.trim().to_lowercase(), speakable(p.trim())?)))
+            .filter(|(w, _)| !w.is_empty())
             .collect();
         Terms { map, path: None }
     }
@@ -53,7 +53,7 @@ impl Terms {
             }
             let w = word.to_lowercase();
             match self.map.get(&w) {
-                Some(p) => out.push_str(&spoken(p)),
+                Some(p) => out.push_str(&spoken(&w, p)),
                 None => {
                     out.push_str(&speak_unknown(word));
                     if !unknown.contains(&w) {
@@ -115,14 +115,27 @@ pub fn join_letters(names: &[&str]) -> String {
     names.join(" ")
 }
 
-/// Словарное «пи-ар» (все части ≤3 букв) — аббревиатура по буквам: дефис → пробел; «веб-ст+орм» не трогаем.
-fn spoken(pron: &str) -> String {
-    let parts: Vec<&str> = pron.split('-').collect();
-    if parts.len() >= 2 && parts.iter().all(|p| p.chars().filter(|&c| c != '+').count() <= 3) {
-        parts.join(" ")
+/// Словарное «эн-пи-эм» — по буквам, если частей столько же, сколько букв («w» — «дабл-ю»): дефис → пробел.
+/// Слоги «+ан-тро-пик», «а-пи» и составное «веб-ст+орм» не трогаем — Silero читает их слитно.
+fn spoken(word: &str, pron: &str) -> String {
+    let parts = pron.split('-').count();
+    if parts >= 2 && (parts == word.len() || parts == word.len() + word.matches('w').count()) {
+        pron.replace('-', " ")
     } else {
         pron.to_string()
     }
+}
+
+/// Произношение, которое Silero прочтёт как написано: одно слово из русских букв, «-» и «+» перед гласной.
+/// Пояснения модели, пробелы и чужие буквы («кѝ» Silero читает как «к») — None; «+» не перед гласной убирается.
+pub fn speakable(pron: &str) -> Option<String> {
+    let ru = |c: char| matches!(c, 'а'..='я' | 'А'..='Я' | 'ё' | 'Ё');
+    let c: Vec<char> = pron.chars().collect();
+    if !c.iter().any(|&x| ru(x)) || !c.iter().all(|&x| ru(x) || x == '+' || x == '-') {
+        return None;
+    }
+    let stressed = |i: usize| c.get(i + 1).is_some_and(|v| "аеёиоуыэюяАЕЁИОУЫЭЮЯ".contains(*v));
+    Some(c.iter().enumerate().filter(|&(i, &x)| x != '+' || stressed(i)).map(|(_, &x)| x).collect())
 }
 
 fn letter(c: char) -> &'static str {
@@ -198,6 +211,24 @@ mod tests {
     fn dictionary_hyphen_only_between_letter_names() {
         let t = Terms::from_str("vrr\tви-+ар-+ар\nwebstorm\tвеб-ст+орм\njson\tджей-сон\n");
         assert_eq!(t.apply("vrr webstorm json").0, "ви +ар +ар веб-ст+орм джей-сон");
+    }
+
+    #[test]
+    fn syllables_not_split_into_words() {
+        let t = Terms::from_str("anthropic\t+ан-тро-пик\nhw\tэйч-дабл-+ю\napi\tа-пи\n");
+        assert_eq!(t.apply("Anthropic, hw, API").0, "+ан-тро-пик, эйч дабл +ю, а-пи");
+    }
+
+    #[test]
+    fn only_speakable_entries_loaded() {
+        let t = Terms::from_str(
+            "key\tкѝ\nacpi\t+а-сі-пі-+ай\nstdin\tстандартный вход (или \"стдин\")\nbuttongroup\tбатон+гр+уп или бат+онгр+уп\n\
+             plugins\tп+лагинс\ntfs\tте-эф-++эс\nnpm\tэн-пи-эм\n",
+        );
+        assert!(!t.contains("key") && !t.contains("acpi") && !t.contains("stdin") && !t.contains("buttongroup"));
+        assert_eq!(t.get("plugins"), Some("плагинс"), "«+» не перед гласной — не ударение");
+        assert_eq!(t.get("tfs"), Some("те-эф-+эс"));
+        assert_eq!(t.get("npm"), Some("эн-пи-эм"));
     }
 
     #[test]
