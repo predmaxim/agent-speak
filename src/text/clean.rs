@@ -11,7 +11,8 @@ pub fn clean(raw: &str) -> String {
             in_code = !in_code;
             continue;
         }
-        if in_code || l.is_empty() {
+        // подчёркивание заголовка «=====» (setext) — разметка, не «равно равно»
+        if in_code || l.is_empty() || l.chars().all(|c| c == '=') {
             continue;
         }
         let l = if l.starts_with('|') {
@@ -46,7 +47,7 @@ pub fn plain(raw: &str) -> String {
         if in_code || l.is_empty() {
             continue;
         }
-        let l = strip_marker(l).replace("**", "").replace("__", "").replace('`', "");
+        let l = strip_marker(l).replace("**", "").replace("__", "").replace("~~", "").replace('`', "");
         out.push(l.split_whitespace().collect::<Vec<_>>().join(" "));
     }
     out.join(" ")
@@ -96,7 +97,7 @@ fn inline(l: &str) -> String {
     }
     s.push_str(rest);
     let s = links(&s);
-    let s = s.replace("**", "").replace("__", "").replace('*', "");
+    let s = s.replace("**", "").replace("__", "").replace("~~", "").replace('*', "");
     let s = s.replace('→', " в ").replace('←', " из ").replace('·', ",");
     let s = SAY.iter().fold(s, |s, (sign, said)| s.replace(sign, said));
     s.chars().filter(|c| !is_emoji(*c)).collect()
@@ -104,8 +105,9 @@ fn inline(l: &str) -> String {
 
 /// Знаков нет в алфавите Silero: модель выбросила бы их молча и склеила слова («да/нет» → «данет»).
 /// «+» у неё — ударение, а в тексте агента это плюс («C++», «+5»); ударение из U+0301 ставится позже.
-const SAY: [(&str, &str); 12] = [
-    ("==", " равно "), ("=", " равно "), ("≠", " не равно "), ("≥", " не меньше "), ("≤", " не больше "),
+/// Составные операторы — раньше одиночного «=»: иначе «!=» рвал бы фразу на «!» и терял «не».
+const SAY: [(&str, &str); 16] = [
+    ("!=", " не равно "), (">=", " не меньше "), ("<=", " не больше "), ("=>", " в "), ("==", " равно "), ("=", " равно "), ("≠", " не равно "), ("≥", " не меньше "), ("≤", " не больше "),
     ("≈", " около "), ("~", " около "), ("×", " на "), ("№", " номер "), ("−", " минус "), ("+", " плюс "), ("/", " "),
 ];
 
@@ -142,11 +144,17 @@ fn strip_line(s: &str) -> &str {
     }
 }
 
+/// Имя файла с расширением: «x.rs», «Model.js»; «.claude», «1.0» — нет.
+fn has_ext(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(a, e)| !a.is_empty() && e.bytes().all(|b| b.is_ascii_alphanumeric()) && e.bytes().any(|b| b.is_ascii_alphabetic()))
+}
+
 /// Относительный путь «src/x.rs:120»: у последней части «:строка» или расширение; «и/или», «МБ/с» — не путь.
+/// При одной «/» слева должна быть папка: не файл и без заглавных — «TypeScript/Node.js», «README.md/CHANGELOG.md» — перечисление.
 fn is_rel_path(t: &str) -> bool {
-    let name = path_name(t);
-    let ext = name.rsplit_once('.').is_some_and(|(a, e)| !a.is_empty() && e.bytes().all(|b| b.is_ascii_alphanumeric()) && e.bytes().any(|b| b.is_ascii_alphabetic()));
-    t.contains('/') && (ext || strip_line(t).len() < t.len())
+    let parts: Vec<&str> = strip_line(t).trim_end_matches('/').split('/').collect();
+    let dir = parts.len() > 2 || !has_ext(parts[0]) && !parts[0].chars().any(char::is_uppercase);
+    t.contains('/') && (strip_line(t).len() < t.len() || has_ext(&path_name(t)) && dir)
 }
 
 /// [текст](url) → текст; голый URL → домен.
@@ -287,6 +295,9 @@ mod tests {
     fn relative_paths_become_file_name() {
         assert_eq!(clean("Правка в src/speaker.rs:120 и ветке feature/oma-x."), "Правка в speaker.rs и ветке feature oma-x.");
         assert_eq!(clean("Смотри (docs/rules.md), и/или Да/нет, МБ/с, 0.5/1.0"), "Смотри (rules.md), и или Да нет, МБ с, 0.5 1.0.");
+        assert_eq!(clean("Правка в ./x.rs, plugin/Model.js и .claude/settings.json"), "Правка в x.rs, Model.js и settings.json.");
+        // слева от «/» не папка — слово с заглавной или файл: это перечисление, а не путь
+        assert_eq!(clean("На TypeScript/Node.js, см. README.md/CHANGELOG.md"), "На TypeScript Node.js, см. README.md CHANGELOG.md.");
     }
 
     #[test]
@@ -300,6 +311,19 @@ mod tests {
             clean("Да/нет, МБ/с, два×три, №5, ≥ 10, ≤2, −3, ~20, ≈7, a = b, x == y, a≠b"),
             "Да нет, МБ с, два на три, номер 5, не меньше 10, не больше 2, минус 3, около 20, около 7, a равно b, x равно y, a не равно b."
         );
+    }
+
+    #[test]
+    fn compound_operators_keep_their_meaning() {
+        // по одиночному «=» «!=» рвал бы фразу на «!» и терял «не», «>=» давал бы «> равно»
+        assert_eq!(clean("x != y, a >= 1, b <= 2, a => b, x == y"), "x не равно y, a не меньше 1, b не больше 2, a в b, x равно y.");
+    }
+
+    #[test]
+    fn strikethrough_and_setext_underline_are_markup() {
+        assert_eq!(clean("~~старое~~ новое, ~20"), "старое новое, около 20.");
+        assert_eq!(clean("Заголовок\n=====\nТекст"), "Заголовок.\nТекст.");
+        assert_eq!(plain("~~старое~~ новое"), "старое новое");
     }
 
     #[test]
