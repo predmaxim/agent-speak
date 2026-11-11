@@ -59,8 +59,15 @@ Item {
   property real now: Date.now() / 1000
 
   // One cursor for keys and mouse: a row of the page (-1 none) or, with
-  // onHead, the header's button headCol.
-  property int cursor: -1
+  // onHead, the header's button headCol. On the main page it holds the row's
+  // chat key (Model.rowKey), so it stays on its agent when the list changes.
+  readonly property int cursor: page === "main" ? Model.rowIndex(agents, cursorKey) : cursorRow
+  property string cursorKey: ""
+  property int cursorRow: -1
+  function setCursor(i) {
+    if (page === "main") cursorKey = Model.rowKey(agents, i)
+    else cursorRow = i
+  }
   property bool onHead: false
   property int headCol: 0
   property int hoursCol: 0           // the hours row's dropdown: 0 from, 1 to
@@ -158,7 +165,8 @@ Item {
     if (p === "history") root.send({ do: "chats" })
     settingsView.contentY = 0
     root.page = p
-    root.cursor = -1
+    root.cursorKey = ""
+    root.cursorRow = -1
     root.onHead = false
     root.headCol = 0
     root.hoursCol = 0
@@ -196,11 +204,11 @@ Item {
     pointerGate.reset()
     if (dy < 0) {
       if (root.onHead) return true
-      if (root.cursor <= 0) { root.onHead = true; root.cursor = -1 }
-      else root.cursor--
+      if (root.cursor <= 0) { root.onHead = true; root.setCursor(-1) }
+      else root.setCursor(root.cursor - 1)
     } else if (dy > 0) {
-      if (root.onHead) { root.onHead = false; root.cursor = root.rowCount > 0 ? 0 : -1 }
-      else root.cursor = Math.min(root.rowCount - 1, root.cursor + 1)
+      if (root.onHead) { root.onHead = false; root.setCursor(root.rowCount > 0 ? 0 : -1) }
+      else root.setCursor(Math.min(root.rowCount - 1, root.cursor + 1))
     } else if (root.onHead) {
       root.headCol = Math.max(0, Math.min(root.headCount - 1, root.headCol + dx))
     } else if (root.page === "settings" && root.cursor >= 0) {
@@ -233,7 +241,7 @@ Item {
   function activate() {
     if (root.onHead) return root.press(root.headCol)
     if (root.cursor < 0 || root.cursor >= root.rowCount) return
-    if (root.page === "main") return root.openChat(root.cursor === 0 ? "general" : "agent:" + root.agents[root.cursor - 1].id)
+    if (root.page === "main") return root.openChat(root.cursorKey)
     if (root.page === "history") return root.openChat(root.chatList[root.cursor].key)
     var row = Model.SETTINGS_ROWS[root.cursor]
     var box = { speaker: speakerBox, rate: rateBox, quiet_hours: root.hoursCol ? toBox : fromBox }[row]
@@ -292,7 +300,7 @@ Item {
   }
   // The draft is the footer, not the model: it keeps the end only while the chat follows.
   onDraftChanged: if (chatView.follow) root.scrollDown()
-  onRowCountChanged: if (root.cursor >= root.rowCount) root.cursor = root.rowCount - 1
+  onRowCountChanged: if (root.cursor >= root.rowCount) root.setCursor(root.rowCount - 1)
 
   Connections {
     target: root.link
@@ -464,7 +472,12 @@ Item {
             clip: true
             spacing: Style.spacing.xs
             boundsBehavior: Flickable.StopAtBounds
-            model: root.agents
+            // Keyed by id, like the bar's module list: each `agents` line only
+            // moves, updates, adds and removes rows, so the scroll stays.
+            model: ScriptModel {
+              objectProp: "id"
+              values: root.agents
+            }
 
             // Row 0: the general chat — Oma as an assistant, not about an agent.
             // Tinted even when not open (the user's choice over an accent bar):
@@ -489,7 +502,7 @@ Item {
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onPositionChanged: function(mouse) {
-                    if (pointerGate.moved(omaArea, mouse)) { root.onHead = false; root.cursor = 0 }
+                    if (pointerGate.moved(omaArea, mouse)) { root.onHead = false; root.setCursor(0) }
                   }
                   onClicked: root.openChat("general")
                 }
@@ -568,7 +581,7 @@ Item {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onPositionChanged: function(mouse) {
-                  if (pointerGate.moved(agentArea, mouse)) { root.onHead = false; root.cursor = agentRow.index + 1 }
+                  if (pointerGate.moved(agentArea, mouse)) { root.onHead = false; root.setCursor(agentRow.index + 1) }
                 }
                 onClicked: root.openChat("agent:" + agentRow.modelData.id)
               }
@@ -783,7 +796,7 @@ Item {
               font.family: root.font
               font.pixelSize: Style.font.heading
               cursorDelegate: Item {}
-              onTextEdited: { root.cursor = -1; root.onHead = false }
+              onTextEdited: { root.setCursor(-1); root.onHead = false }
               Keys.onUpPressed: root.move(0, -1)
               Keys.onDownPressed: root.move(0, 1)
               Keys.onLeftPressed: function(event) { event.accepted = root.onHead && root.move(-1, 0) }
@@ -820,7 +833,7 @@ Item {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onPositionChanged: function(mouse) {
-                  if (pointerGate.moved(chatArea, mouse)) { root.onHead = false; root.cursor = chatRow.index }
+                  if (pointerGate.moved(chatArea, mouse)) { root.onHead = false; root.setCursor(chatRow.index) }
                 }
                 onClicked: root.openChat(chatRow.modelData.key)
               }
@@ -1196,9 +1209,9 @@ Item {
       anchors.fill: parent
       hoverEnabled: true
       onPositionChanged: function(mouse) {
-        if (pointerGate.moved(rowArea, mouse)) { root.onHead = false; root.cursor = settingRow.row }
+        if (pointerGate.moved(rowArea, mouse)) { root.onHead = false; root.setCursor(settingRow.row) }
       }
-      onClicked: { root.onHead = false; root.cursor = settingRow.row; root.activate() }
+      onClicked: { root.onHead = false; root.setCursor(settingRow.row); root.activate() }
     }
 
     Text {

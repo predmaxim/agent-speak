@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -158,6 +158,15 @@ assert.strictEqual(M.chatFor("chat:2", { key: "chat:1", messages: m1 }), null)
 assert.deepStrictEqual(M.chatFor("new", { key: "new" }).messages, [])
 assert.deepStrictEqual(M.chatFor("new", { key: "chat:x", was: "*", messages: m1 }), { key: "chat:x", messages: m1 })
 assert.deepStrictEqual(M.chatFor("chat:2", { key: "agent:a", was: "*", messages: m1 }), { key: "agent:a", messages: m1 })
+
+// The main page's key cursor holds its row by chat key: a reordered list keeps it on the same agent
+const ags = [{ id: "a" }, { id: "b" }, { id: "c" }]
+assert.deepStrictEqual([-1, 0, 1, 3, 4].map(i => M.rowKey(ags, i)), ["", "general", "agent:a", "agent:c", ""])
+assert.strictEqual(M.rowIndex(ags, "general"), 0)
+assert.strictEqual(M.rowIndex(ags, "agent:b"), 2)
+assert.strictEqual(M.rowIndex([{ id: "b" }, { id: "c" }, { id: "a" }], "agent:b"), 1)
+assert.strictEqual(M.rowIndex(ags, "agent:gone"), -1)
+assert.strictEqual(M.rowIndex(ags, ""), -1)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
