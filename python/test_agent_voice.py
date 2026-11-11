@@ -762,7 +762,7 @@ def _oma(sent, emitted):
 
     class FakeBrain:
         key, texts, warmed = "new", [], False
-        async def send(self, t): self.texts.append(t)
+        async def send(self, t, sound=""): self.texts.append(t); self.sound = sound
         async def warm(self): self.warmed = True
         async def open(self, k): self.key = k; return []
         async def interrupt(self): pass
@@ -867,7 +867,7 @@ def test_esc_works_while_brain_send_hangs():
     clk, oma = _oma(sent, emitted)
     gate, calls = asyncio.Event(), []
 
-    async def send(t):
+    async def send(t, sound=""):
         calls.append(("send", t))
         await gate.wait()
 
@@ -991,7 +991,7 @@ def test_oma_stale_chat_line_lands_in_new_chat_and_done_syncs():
         key = "new"
         async def open(self, k): self.key = k; return [{"role": "me", "text": "давно"}]
         def messages(self, k): return [{"role": "me", "text": "давно"}]
-        async def send(self, t):
+        async def send(self, t, sound=""):
             if self.key.startswith("chat:"):  # как Brain при устаревшем чате: "opened" в очередь, ключ уже "new"
                 self.pending, self.key = ("opened", "new", self.key), "new"
             else:  # новый чат получил id посреди ответа
@@ -1115,7 +1115,7 @@ def test_serve_eof_cuts_hung_dispatch():
 
     class HangBrain:
         key = "new"
-        async def send(self, t):
+        async def send(self, t, sound=""):
             hung.append(t)
             await asyncio.Event().wait()  # connect/query повис навсегда
 
@@ -2175,6 +2175,28 @@ def test_agents_snapshot_rides_with_reply_and_hides_from_chat():
     assert messages_of([m("user", text)]) == [{"role": "me", "text": "как дела у агентов"}]
     info = SimpleNamespace(session_id="s", custom_title=None, summary=None, first_prompt=text, last_modified=0, tag=None)
     assert general_chats([info])[0]["title"] == "как дела у агентов"
+
+
+def test_brain_knows_its_own_sound():
+    # 2026-11-07 на «А где звук-то?» мозг выдумал «озвучивает их ваша система»: в снимке — строка о её звуке
+    from agent_voice.brain import with_agents, strip_note, OMA_PROMPT
+    text = with_agents("где звук", [], 0, "Твой голос: выключен (тихий режим), ответы только текстом.")
+    assert "тихий режим" in text and strip_note(text) == "где звук" and "Твой голос" in OMA_PROMPT
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+
+    async def ask(text):
+        await oma.command({"do": "ask", "text": text})
+        await settle(oma)
+        return oma.brain.sound
+    oma.conv.set_quiet(True)
+    assert "выключен" in run(ask("где звук"))
+    oma.conv.set_quiet(False)
+    run(oma.command({"do": "talk"}))
+    oma.conv.echo = True
+    assert "в динамиках" in run(ask("где звук"))
+    oma.conv.echo = False
+    assert "в наушниках" in run(ask("а теперь"))
 
 
 def test_brain_warms_once_and_send_reuses_it():

@@ -288,7 +288,15 @@ class Oma:
             print(f"agent_voice: реплика целиком распознана иначе, чем по кускам ({len(whole)} и {len(text)} знаков)", file=sys.stderr, flush=True)
         return whole or text
 
-    async def _deliver(self, text, ctx, voiced, parts, pre):
+    def _sound(self):
+        """Её звук одной строкой для мозга (тихий режим — из строки состояния демона, куда — по входу слуха)."""
+        if self.conv.quiet:
+            return "Твой голос: выключен (тихий режим), ответы только текстом в окне."
+        if not getattr(self.ear, "open", False):
+            return "Твой голос: включён."
+        return f"Твой голос: включён, звучит {'в динамиках' if self.conv.echo else 'в наушниках'}."
+
+    async def _deliver(self, text, ctx, voiced, parts, pre, sound):
         """Реплика мозгу или подтверждение поручения, которое передаёт код, — в очереди к мозгу."""
         key, failed = self.brain.key, None
         text = await self._whole(text, parts, pre) if voiced else text
@@ -297,7 +305,7 @@ class Oma:
         if said is None:
             note, self.orders.note = self.orders.note, ""
             try:
-                await self.brain.send(note + ctx + text)
+                await self.brain.send(note + ctx + text, sound=sound)
             except Exception as e:
                 failed = e
         if key.startswith("chat:") and self.brain.key == "new":  # устаревший чат сменился новым: реплика — первая в нём
@@ -327,7 +335,7 @@ class Oma:
                     self.send({"cmd": "chime"})  # «услышала» сразу: до ответа мозга секунды
                 parts, self.sending = self.sending, []  # звук этой реплики — её: следующий черновик его не тронет
                 pre, self.pre_sending = self.pre_sending, None
-                self.to_brain(self._deliver, a[1], a[2], self.conv.voiced, parts, pre)
+                self.to_brain(self._deliver, a[1], a[2], self.conv.voiced, parts, pre, self._sound())
             elif k == "presence":
                 self.send({"cmd": "presence", "state": a[1]})
             elif k == "interrupt":  # после отправки, что ещё в очереди: перебить ход, а не реплику до него

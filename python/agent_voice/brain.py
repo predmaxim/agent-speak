@@ -36,6 +36,7 @@ OMA_PROMPT = ("Ты — Ома, голосовой заместитель пол
               "окне, вслух не звучит. Всё, что пользователь должен услышать, — ответ, вопрос к нему, кому и что "
               "передала, — до метки. "
               "Состояние агентов — по свежему снимку в конце реплики (‹агенты›…‹/агенты›), agents для этого не вызывай; "
+              "строка «Твой голос: …» после него — твой звук сейчас: на «где звук?» отвечай по ней; "
               "лента агента — agent_feed; конец переписки агента — agent_tail (пустой аргумент — "
               f"агент в фокусе); «это», «тут», «эта ошибка» — сначала selection, затем agent_tail. Файлы ты только читаешь, и только в {PROJECTS}. "
               "Передать агенту ответ или задание — tell: разверни короткую просьбу в полное задание от лица пользователя (что "
@@ -90,9 +91,10 @@ def claude_events(msg, st):
 NOTE = ("\n\n‹агенты›\n", "\n‹/агенты›")
 
 
-def with_agents(text: str, entries, now) -> str:
-    """Реплика со свежим снимком агентов: на «как дела у агентов» мозг отвечает сразу, без круга на agents (2–4 с)."""
-    return f"{text}{NOTE[0]}{format_agents(entries, now)}{NOTE[1]}"
+def with_agents(text: str, entries, now, sound: str = "") -> str:
+    """Реплика со свежим снимком агентов: на «как дела у агентов» мозг отвечает сразу, без круга на agents (2–4 с);
+    sound — строка о её звуке: мозг не выдумывает, слышат ли его."""
+    return f"{text}{NOTE[0]}{format_agents(entries, now)}{NOTE[1]}" + (f"\n{sound}" if sound else "")
 
 
 def strip_note(text: str) -> str:
@@ -326,11 +328,11 @@ class Brain:
         """Клик по орбу: claude поднимается, пока пользователь говорит, — первая реплика не ждёт его запуска (0,7–2 с)."""
         await self._ready()
 
-    async def send(self, text: str):
+    async def send(self, text: str, sound: str = ""):
         await self._ready()
         self.used = time.time()
         self.turns += 1  # до query: ResultMessage может прийти раньше, чем query вернётся
-        await self.client.query(with_agents(text, self.snapshot(), time.time()))
+        await self.client.query(with_agents(text, self.snapshot(), time.time(), sound))
 
     async def interrupt(self):
         """Перебить ход в полёте; кончившийся не трогаем — иначе skip съест следующий ответ."""
