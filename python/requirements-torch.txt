@@ -1,0 +1,3 @@
+# torch для обоих venv — CPU-сборка: видеокарта нужна только whisper, у него свой CTranslate2.
+--index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1

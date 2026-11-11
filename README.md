@@ -135,7 +135,7 @@
 
 ## Установка и тесты
 
-`./install.sh` — сборка, сервис `systemd --user`, venv с Silero и voice-venv для Омы, ссылка на плагин. Плагин включается `omarchy plugin enable predmaxim.agent-speak`. Хуки Claude (`~/.claude/settings.json`: `Stop`, `UserPromptSubmit`, `Notification`, `MessageDisplay` → `agent-speak hook <вид>`, `PostToolUse` → `agent-speak hook post-tool-use` — подсказка про лимит, `SessionEnd` → `agent-speak hook session-end` — агент вышел сам, а не упал) и `notify` Codex (`~/.codex/config.toml`) подключаются вручную.
+`./install.sh` — сборка, сервис `systemd --user`, venv с Silero и voice-venv для Омы, ссылка на плагин. Версии Python-пакетов закреплены: `python/requirements-voice.txt` (в нём и `claude-agent-sdk` со своим claude CLI), `python/requirements-tts.txt`, torch — CPU-сборка из `python/requirements-torch.txt`; повторный запуск приводит venv к ним. Модель Silero `v5_ru.pt` и Smart Turn проверяются по sha256. Плагин включается `omarchy plugin enable predmaxim.agent-speak`. Хуки Claude (`~/.claude/settings.json`: `Stop`, `UserPromptSubmit`, `Notification`, `MessageDisplay` → `agent-speak hook <вид>`, `PostToolUse` → `agent-speak hook post-tool-use` — подсказка про лимит, `SessionEnd` → `agent-speak hook session-end` — агент вышел сам, а не упал) и `notify` Codex (`~/.codex/config.toml`) подключаются вручную.
 - **Строка статуса** — обёртка в managed-настройках Claude Code, они старше пользовательских. Ставится один раз, нужен root:
   ```sh
   printf '{"statusLine": {"type": "command", "command": "%s statusline"}}\n' ~/.local/bin/agent-speak \

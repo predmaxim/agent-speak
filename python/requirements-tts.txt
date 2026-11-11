@@ -1,0 +1,15 @@
+# venv синтеза Silero (python/silero_tts.py): версии закреплены, install.sh ставит ровно их; torch — requirements-torch.txt.
+# Снято pip freeze с рабочей установки 2026-11-12; обновлять так же, после проверки голоса.
+filelock==3.32.3
+fsspec==2026.7.0
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+mpmath==1.3.0
+networkx==3.6.1
+numpy==2.5.2
+scipy==1.18.1
+setuptools==78.1.0
+sympy==1.14.0
+# CPU-сборку ставит requirements-torch.txt раньше; строка держит резолвер на той же версии (2.14.1+cpu ей подходит)
+torch==2.14.1
+typing_extensions==4.16.0
