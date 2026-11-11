@@ -94,26 +94,34 @@ pub fn pending_background(content: &str) -> usize {
             // запуск — только из настоящего результата инструмента: цитата в тексте агента или выводе Read не считается
             let Ok(e) = serde_json::from_str::<Value>(line) else { continue };
             let r = &e["toolUseResult"];
-            let id = if r["status"] == "async_launched" { &r["agentId"] } else { &r["resumedAgentId"] };
+            // помощник — agentId; Workflow — taskId (agentId у него нет), его отчёт приходит с тем же <task-id>
+            let id = if r["status"] != "async_launched" { &r["resumedAgentId"] } else if r["agentId"].is_null() { &r["taskId"] } else { &r["agentId"] };
             pending.extend(id.as_str().filter(|id| !id.is_empty()).map(str::to_string));
         }
     }
     pending.len()
 }
 
-/// Фоновые помощники, которые ещё работают, — по их `.meta.json` в папке `subagents` сессии (нет `finished`).
-/// Хвост транскрипта их не видит, если запуск был давно, а помощник-сервер работает часами.
-/// since — старт процесса агента: метафайл старше — помощник прошлого запуска, он не отчитается никогда.
+/// Фоновые помощники, которые ещё работают, — по их `.meta.json` в папке `subagents` сессии (нет `finished`),
+/// и идущие Workflow — папки `subagents/workflows/<run>` без итога `<сессия>/workflows/<run>.json` (его Claude Code
+/// пишет по концу workflow). Хвост транскрипта их не видит, если запуск был давно, а помощник-сервер работает часами.
+/// since — старт процесса агента: файл старше — помощник прошлого запуска, он не отчитается никогда.
 pub fn running_helpers(subagents: &std::path::Path, since: u64) -> usize {
-    let mtime = |f: &std::fs::DirEntry| f.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
-    std::fs::read_dir(subagents)
+    let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    let list = |dir: &std::path::Path| std::fs::read_dir(dir).into_iter().flatten().flatten().map(|f| f.path()).collect::<Vec<_>>();
+    let helpers = list(subagents)
         .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|f| f.file_name().to_string_lossy().ends_with(".meta.json") && mtime(f) >= since)
-        .filter_map(|f| serde_json::from_str::<Value>(&std::fs::read_to_string(f.path()).ok()?).ok())
+        .filter(|p| p.to_string_lossy().ends_with(".meta.json") && mtime(p) >= since)
+        .filter_map(|p| serde_json::from_str::<Value>(&std::fs::read_to_string(p).ok()?).ok())
         .filter(|m| m["requestShape"] == "background" && m["finished"] != true)
-        .count()
+        .count();
+    let ended = subagents.with_file_name("workflows");
+    let workflows = list(&subagents.join("workflows"))
+        .into_iter()
+        .filter(|run| mtime(&run.join("journal.jsonl")) >= since)
+        .filter(|run| run.file_name().is_some_and(|n| !ended.join(format!("{}.json", n.to_string_lossy())).exists()))
+        .count();
+    helpers + workflows
 }
 
 /// Самый поздний вызов инструмента целиком.
@@ -177,6 +185,12 @@ fn records(content: &str, sidechain: bool) -> impl DoubleEndedIterator<Item = Va
 /// Записи главной ветки, без сабагентов (isSidechain).
 fn main_records(content: &str) -> impl DoubleEndedIterator<Item = Value> + '_ {
     records(content, false)
+}
+
+/// В хвосте есть целая запись хода (главной ветки; sidechain — и сабагента): без неё turn_over и in_flight слепы,
+/// хвост читается дальше назад (`tail_of`).
+pub fn has_record(content: &str, sidechain: bool) -> bool {
+    records(content, sidechain).next().is_some()
 }
 
 /// Ход кончился: конец хода (stop_hook_summary, turn_duration), Esc пользователя или ошибка API — после них агент ждёт.
@@ -442,6 +456,29 @@ mod tests {
         let later = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 60;
         assert_eq!(running_helpers(&dir, later), 0, "метафайл до старта процесса — помощник прошлого запуска, не отчитается никогда");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn workflow_is_a_helper_until_it_ends() {
+        // Workflow: запуск — taskId без agentId (Claude Code 2.1.322), отчёт — <task-id> того же taskId
+        let mut e: serde_json::Value = serde_json::from_str(&tool_result("Workflow launched")).unwrap();
+        e["toolUseResult"] = serde_json::json!({"status": "async_launched", "taskId": "wqcokzd4p", "taskType": "local_workflow", "runId": "wf_1"});
+        let launch = e.to_string();
+        assert_eq!(pending_background(&launch), 1);
+        assert_eq!(pending_background(&[launch, report("wqcokzd4p", "completed")].join("\n")), 0);
+        // запуск ушёл из хвоста: идущий workflow — его папка в subagents/workflows без итога в <сессия>/workflows/<run>.json
+        let session = std::env::temp_dir().join(format!("oma-wf-{}", std::process::id()));
+        let subagents = session.join("subagents");
+        for run in ["wf_1", "wf_2"] {
+            std::fs::create_dir_all(subagents.join("workflows").join(run)).unwrap();
+            std::fs::write(subagents.join("workflows").join(run).join("journal.jsonl"), "{\"type\":\"launched\"}\n").unwrap();
+        }
+        std::fs::create_dir_all(session.join("workflows")).unwrap();
+        std::fs::write(session.join("workflows/wf_2.json"), r#"{"status":"completed"}"#).unwrap();
+        assert_eq!(running_helpers(&subagents, 0), 1, "wf_1 идёт, wf_2 кончился");
+        let later = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 60;
+        assert_eq!(running_helpers(&subagents, later), 0, "workflow прошлого запуска агента не отчитается никогда");
+        let _ = std::fs::remove_dir_all(session);
     }
 
     fn system(sub: &str) -> String {

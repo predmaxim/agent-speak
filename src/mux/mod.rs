@@ -48,9 +48,10 @@ pub trait Mux: Sync {
     fn no_project(&self) -> String {
         format!("этого проекта нет в {}", self.name())
     }
-    /// Виден ли сейчас на экране терминал процесса с этим окружением (вкладка Orca, панель herdr); None — не знает.
-    fn shown(&self, _env: &HashMap<String, String>) -> Option<bool> {
-        None
+    /// Видны ли сейчас на экране терминалы процессов с этими окружениями (вкладка Orca, панель herdr), по ответу на
+    /// каждое; None — не знает. Один вызов на всех агентов этого мультиплексора.
+    fn shown(&self, envs: &[&HashMap<String, String>]) -> Vec<Option<bool>> {
+        vec![None; envs.len()]
     }
     /// Новый агент Claude в папке cwd с первым сообщением prompt.
     fn launch(&self, _cwd: &str, _prompt: &str) -> Result<(), String> {
@@ -119,11 +120,26 @@ fn adapter(pane: &Pane) -> Result<&'static dyn Mux, String> {
 }
 
 /// Агент (pid) в видимом терминале, среди агентов под одним окном (Orca держит всех в одном окне).
+/// Вопрос — один на мультиплексор, а не на агента; мультиплексоры (herdr внутри Orca) спрашиваются параллельно.
 pub fn active_among(pids: &[u32]) -> Option<u32> {
-    among(pids, |pid| {
-        let (env, host) = (environ(pid), host_cmdline(pid));
-        adapters().into_iter().find(|m| m.locate(&env).is_some() && m.hosts(&host))?.shown(&env)
-    })
+    let agents: Vec<(u32, HashMap<String, String>, Option<&'static str>)> = pids.iter().map(|&pid| {
+        let env = environ(pid);
+        let mux = pick(&env, &host_cmdline(pid)).map(|p| p.mux);
+        (pid, env, mux)
+    }).collect();
+    let seen: Vec<(u32, Option<bool>)> = std::thread::scope(|s| {
+        let asks: Vec<_> = adapters()
+            .into_iter()
+            .map(|m| (m, agents.iter().filter(|a| a.2 == Some(m.name())).collect::<Vec<_>>()))
+            .filter(|(_, mine)| !mine.is_empty())
+            .map(|(m, mine)| s.spawn(move || {
+                let envs: Vec<&HashMap<String, String>> = mine.iter().map(|a| &a.1).collect();
+                mine.iter().map(|a| a.0).zip(m.shown(&envs)).collect::<Vec<_>>()
+            }))
+            .collect();
+        asks.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    });
+    among(pids, |pid| seen.iter().find(|(p, _)| *p == pid).and_then(|(_, s)| *s))
 }
 
 fn among(pids: &[u32], shown: impl Fn(u32) -> Option<bool>) -> Option<u32> {
@@ -159,6 +175,13 @@ pub struct Done {
     pub err: Option<String>,
 }
 
+/// Дело потока действий: действие сторожа или чужое дело (ответ агенту от Омы, `agent-speak tell`). Очередь одна,
+/// дела — по одному: две записи в один терминал не перемешаются.
+pub enum Work {
+    Job(Job),
+    Other(Box<dyn FnOnce() + Send>),
+}
+
 /// Шаги в терминале через адаптер панели; первая ошибка обрывает.
 pub fn perform(pane: &Pane, steps: &[Step]) -> Result<(), String> {
     perform_on(adapter(pane)?, pane, steps)
@@ -181,11 +204,18 @@ fn perform_on(m: &dyn Mux, pane: &Pane, steps: &[Step]) -> Result<(), String> {
     Ok(())
 }
 
-/// Поток действий: задания по одному, шаги по порядку; первая ошибка обрывает задание.
-pub fn spawn(out: Sender<Done>) -> Sender<Job> {
-    let (tx, rx) = std::sync::mpsc::channel::<Job>();
+/// Поток действий: дела по одному, шаги по порядку; первая ошибка обрывает задание.
+pub fn spawn(out: Sender<Done>) -> Sender<Work> {
+    let (tx, rx) = std::sync::mpsc::channel::<Work>();
     std::thread::spawn(move || {
-        for job in rx {
+        for work in rx {
+            let job = match work {
+                Work::Job(job) => job,
+                Work::Other(f) => {
+                    f();
+                    continue;
+                }
+            };
             let err = perform(&job.pane, &job.steps).err();
             if let Some(e) = &err {
                 eprintln!("agent-speak: действие {:?} для {} не вышло: {e}", job.what, job.session);
@@ -209,16 +239,10 @@ pub fn run(cmd: &mut Command, timeout: Duration) -> Result<String, String> {
     std::thread::spawn(move || { let mut s = String::new(); let _ = so.read_to_string(&mut s); let _ = tx.send((true, s)); });
     std::thread::spawn(move || { let mut s = String::new(); let _ = se.read_to_string(&mut s); let _ = tx2.send((false, s)); });
     let start = std::time::Instant::now();
-    let status = loop {
-        if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
-            break st;
-        }
-        if start.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("таймаут {} с", timeout.as_secs_f32()));
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    let Some(status) = exit_within(&mut child, timeout)? else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("таймаут {} с", timeout.as_secs_f32()));
     };
     // процесс вышел, а вывод держит его потомок — ждём не дольше общего срока
     let (mut out, mut err) = (String::new(), String::new());
@@ -234,6 +258,30 @@ pub fn run(cmd: &mut Command, timeout: Duration) -> Result<String, String> {
     } else {
         let msg = if err.trim().is_empty() { out } else { err };
         Err(format!("{status}: {}", msg.trim().chars().take(300).collect::<String>()))
+    }
+}
+
+/// Выход потомка не позже timeout, None — не вышел: ждём pidfd через poll (Linux 5.3+), без опроса и без гонки
+/// с переиспользованием pid — несобранный потомок свой pid не отдаёт.
+fn exit_within(child: &mut std::process::Child, timeout: Duration) -> Result<Option<std::process::ExitStatus>, String> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    // SAFETY: pidfd_open без побочных эффектов; дескриптор сразу переходит во владение OwnedFd
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0) };
+    if fd < 0 {
+        return Err(format!("pidfd_open: {}", std::io::Error::last_os_error()));
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) };
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now()).as_millis().min(i32::MAX as u128) as libc::c_int;
+        let mut p = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        // SAFETY: один pollfd на стеке
+        match unsafe { libc::poll(&mut p, 1, left) } {
+            0 => return Ok(None),
+            n if n > 0 => return child.wait().map(Some).map_err(|e| e.to_string()),
+            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => continue,
+            _ => return Err(format!("poll: {}", std::io::Error::last_os_error())),
+        }
     }
 }
 
@@ -254,6 +302,16 @@ mod tests {
         let t = std::time::Instant::now();
         let held = run(Command::new("sh").args(["-c", "sleep 5 & echo hi"]), Duration::from_secs(1));
         assert!(t.elapsed() < Duration::from_secs(3) && held.unwrap_err().contains("вывод"), "вывод держит внук — не ждём его");
+    }
+
+    #[test]
+    fn run_returns_as_soon_as_the_child_exits() {
+        // выход ждётся, а не опрашивается: прежний опрос по 50 мс держал цикл на каждом вызове CLI
+        let t = std::time::Instant::now();
+        for _ in 0..5 {
+            run(&mut Command::new("true"), Duration::from_secs(2)).unwrap();
+        }
+        assert!(t.elapsed() < Duration::from_millis(200), "{:?} на 5 вызовов", t.elapsed());
     }
 
     /// Мультиплексор, который только записывает, что ему прислали.
@@ -337,9 +395,24 @@ mod tests {
         let (dtx, drx) = std::sync::mpsc::channel();
         let jobs = spawn(dtx);
         let pane = Pane { mux: "nowhere", id: "x".into(), via: String::new() };
-        jobs.send(Job { session: "s".into(), pane, steps: vec![Step::Pause(1), Step::Text("hi".into())], what: crate::watch::What::Wake }).unwrap();
+        jobs.send(Work::Job(Job { session: "s".into(), pane, steps: vec![Step::Pause(1), Step::Text("hi".into())], what: crate::watch::What::Wake })).unwrap();
         let d = drx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!((d.session.as_str(), d.what), ("s", crate::watch::What::Wake));
         assert!(d.err.unwrap().contains("nowhere"));
+    }
+
+    #[test]
+    fn other_work_waits_its_turn_in_the_same_queue() {
+        // ответ Омы агенту и действие сторожа — один поток, по очереди: в одну панель не вперемешку
+        let (dtx, drx) = std::sync::mpsc::channel();
+        let jobs = spawn(dtx);
+        let (ttx, trx) = std::sync::mpsc::channel();
+        let pane = Pane { mux: "herdr", id: "x".into(), via: String::new() }; // только пауза: herdr не зовётся
+        jobs.send(Work::Job(Job { session: "s".into(), pane, steps: vec![Step::Pause(300)], what: crate::watch::What::Wake })).unwrap();
+        jobs.send(Work::Other(Box::new(move || ttx.send(std::time::Instant::now()).unwrap()))).unwrap();
+        let start = std::time::Instant::now();
+        let ran = trx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(ran.duration_since(start) >= Duration::from_millis(250), "чужое дело ждёт, пока доиграет действие сторожа");
+        assert!(drx.recv_timeout(Duration::from_secs(1)).is_ok());
     }
 }

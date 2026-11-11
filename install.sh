@@ -19,23 +19,21 @@ ln -sfn "$PWD/plugin" ~/.config/omarchy/plugins/predmaxim.agent-speak
 mkdir -p ~/.local/share/applications
 sed -e "s|@BIN@|$HOME/.local/bin/agent-speak|" -e "s|@ICON@|$PWD/data/oma.svg|" data/oma.desktop >~/.local/share/applications/oma.desktop
 
-# Silero: venv и модель, если ещё нет
-if ! "$DATA/venv/bin/python" -c 'import torch, numpy, scipy' 2>/dev/null; then
-  python3 -m venv "$DATA/venv"
-  "$DATA/venv/bin/pip" install -q torch numpy scipy --index-url https://download.pytorch.org/whl/cpu
-fi
+# Silero: venv и модель; версии — закреплённые (python/requirements-*.txt): уже стоящие ставятся заново, только если отличаются
+[[ -x $DATA/venv/bin/python ]] || python3 -m venv "$DATA/venv"
+"$DATA/venv/bin/pip" install -q -r python/requirements-torch.txt
+"$DATA/venv/bin/pip" install -q -r python/requirements-tts.txt
 [[ -f $DATA/v5_ru.pt ]] || {
-  curl -fsSL -o "$DATA/v5_ru.pt.tmp" https://models.silero.ai/models/tts/ru/v5_ru.pt && mv "$DATA/v5_ru.pt.tmp" "$DATA/v5_ru.pt"
-}
+  curl -fsSL -o "$DATA/v5_ru.pt.tmp" https://models.silero.ai/models/tts/ru/v5_ru.pt &&
+    echo "7ba04d42340fe0398042eed2e0d12d62e23096d626b1b9feff4dcb1309197ab4  $DATA/v5_ru.pt.tmp" | sha256sum -c --quiet && mv "$DATA/v5_ru.pt.tmp" "$DATA/v5_ru.pt"
+} || { rm -f "$DATA/v5_ru.pt.tmp"; echo "модель Silero не скачалась или не та (sha256) — голоса не будет" >&2; exit 1; }
 
 # Голосовой разговор: отдельный venv на Python 3.12 (колёса faster-whisper/ctranslate2), whisper на GPU
 ln -sfn "$PWD/python/agent_voice" "$DATA/agent_voice"
-if ! "$DATA/voice-venv/bin/python" -c 'import faster_whisper, silero_vad, claude_agent_sdk' 2>/dev/null; then
-  uv venv -q --python 3.12 "$DATA/voice-venv"
-  uv pip install -q --python "$DATA/voice-venv/bin/python" torch --index-url https://download.pytorch.org/whl/cpu
-  uv pip install -q --python "$DATA/voice-venv/bin/python" faster-whisper silero-vad claude-agent-sdk \
-    nvidia-cublas-cu12 'nvidia-cudnn-cu12==9.*' pytest
-fi
+[[ -x $DATA/voice-venv/bin/python ]] || uv venv -q --python 3.12 "$DATA/voice-venv"
+# torch — сначала и из индекса CPU: в requirements-voice.txt та же версия, резолвер её не меняет
+uv pip install -q --python "$DATA/voice-venv/bin/python" -r python/requirements-torch.txt
+uv pip install -q --python "$DATA/voice-venv/bin/python" -r python/requirements-voice.txt
 
 # Конец реплики по звуку: Smart Turn v3.2 (pipecat-ai/smart-turn, BSD-2), 8 МБ; нет файла — Ома ждёт паузу, как раньше
 ST=$DATA/smart-turn-v3.2-cpu.onnx

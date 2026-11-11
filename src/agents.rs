@@ -153,14 +153,27 @@ fn tail_lines(transcript: &Path, limit: u64, mut each: impl FnMut(&[u8]) -> bool
     }
 }
 
-/// Последний заголовок сессии (`custom-title` или `ai-title`) из хвоста транскрипта, не дальше 1 МиБ от конца.
-// ponytail: кэш по размеру файла, если скан раз в 2 с станет заметен.
+/// Транскрипт → (размер при прошлом чтении, заголовок): скан раз в 2 с читает только дописанное.
+// shortcut: записи ушедших сессий не чистятся — сотня байт на сессию; чистить по составу скана, если разрастётся
+static TITLES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, Option<String>)>>> = std::sync::LazyLock::new(Default::default);
+
+/// Последний заголовок сессии (`custom-title` или `ai-title`): при первой встрече — из хвоста не дальше 1 МиБ от конца,
+/// затем — только из дописанного (новее прежнего он может быть лишь там); файл не рос — без чтения.
 fn session_title(transcript: &Path) -> Option<String> {
+    let len = std::fs::metadata(transcript).map_or(0, |m| m.len());
+    let mut titles = TITLES.lock().unwrap();
+    // файл стал короче — пересоздан: читаем заново
+    let (seen, old) = titles.get(transcript).cloned().filter(|(seen, _)| *seen <= len).unwrap_or_default();
+    if seen == len {
+        return old;
+    }
     let mut title = None;
-    tail_lines(transcript, 1 << 20, |l| {
+    tail_lines(transcript, (len - seen).min(1 << 20), |l| {
         title = line_title(l);
         title.is_some()
     });
+    let title = title.or(old);
+    titles.insert(transcript.to_path_buf(), (len, title.clone()));
     title
 }
 
@@ -682,6 +695,23 @@ mod tests {
         std::fs::write(&p, &junk).unwrap();
         assert_eq!(session_title(&p), None);
         assert_eq!(session_title(&root.join("нет.jsonl")), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn title_scan_reads_only_what_was_appended() {
+        use std::io::Write;
+        // скан раз в 2 с: файл не рос — не читается; рос — читается дописанное, найденный заголовок не теряется
+        let root = std::env::temp_dir().join(format!("oma-title-grow-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let p = root.join("t.jsonl");
+        std::fs::write(&p, "{\"type\":\"ai-title\",\"aiTitle\":\"Ранний\"}\n").unwrap();
+        assert_eq!(session_title(&p).as_deref(), Some("Ранний"));
+        let junk = "{\"type\":\"assistant\",\"x\":\"юникод\"}\n".repeat(40_000); // больше 1 МиБ
+        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(junk.as_bytes()).unwrap();
+        assert_eq!(session_title(&p).as_deref(), Some("Ранний"), "заголовок дальше 1 МиБ от конца уже найден");
+        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all("{\"type\":\"custom-title\",\"customTitle\":\"Новый\"}\n".as_bytes()).unwrap();
+        assert_eq!(session_title(&p).as_deref(), Some("Новый"));
         let _ = std::fs::remove_dir_all(root);
     }
 

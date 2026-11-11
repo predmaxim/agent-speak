@@ -12,7 +12,7 @@ use crate::news::{Board, Class, News, SUMMARY};
 use crate::notice::notify as notice;
 use crate::presence::{self, Mode, Presence};
 use crate::queue::{Item, Kind, Queue};
-use crate::source::{claude, codex, tail::{tail_of, Tailer}};
+use crate::source::{claude, codex, tail::{has_line, tail_of, Tailer}};
 use crate::speaker::{self, Shared};
 use crate::text::{prepare, terms::Terms};
 use crate::tts::Tts;
@@ -39,6 +39,7 @@ enum Event {
     Digest(Digest), // пересказ хода агента от воркеров digest
     Presence(String), // новый снимок сервиса присутствия
     Acted(mux::Done), // поток действий: исход действия сторожа в терминале агента
+    Tell(Box<dyn FnOnce() + Send>), // ответ агенту от Омы — в поток действий; ответ CLI шлёт само дело
     Bt(&'static str, bool), // режим наушников переключён (headset | music) и переключала ли его Ома
 }
 
@@ -195,7 +196,7 @@ struct State {
     limits: Limits,            // проценты лимитов и прогноз
     limits_bad: bool,          // лимит кончится раньше сброса: промежуточное не пересказываем
     limits_good: Option<u64>,  // с этого момента прогноз хороший, а эпизод ещё держится
-    act: Sender<mux::Job>,     // действия в терминалах агентов; в тестах — канал без потока
+    act: Sender<mux::Work>,    // действия в терминалах агентов; в тестах — канал без потока
     next_watch: Instant,
     activity: HashMap<String, u64>, // сессия → последний хук, с
     hints: PathBuf,                  // подсказки агентам про лимит для хука PostToolUse
@@ -212,7 +213,10 @@ fn home() -> PathBuf {
 
 pub fn run() {
     let data = home().join(".local/share/agent-speak");
-    let cfg = Config::load();
+    let cfg = Config::load().unwrap_or_else(|e| {
+        eprintln!("agent-speak: настройки не прочитаны, беру умолчания: {e}");
+        Config::default()
+    });
     let runtime = PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()));
     let shared = Arc::new(Shared::new(Queue::new(), cfg.speaker.clone(), cfg.rate.clone()));
     let tts = Tts::new(
@@ -262,6 +266,8 @@ pub fn run() {
             }
         });
     }
+    // сокет есть — `agent-speak on` (systemctl enable --now) возвращается теперь, и плагин подключается сразу
+    notify_ready(std::env::var_os("NOTIFY_SOCKET"));
     {
         let tx = tx.clone();
         std::thread::spawn(move || {
@@ -289,10 +295,10 @@ pub fn run() {
         }
     })
     .expect("inotify");
-    for dir in [home().join(".claude/projects"), home().join(".codex/sessions")] {
-        if let Err(e) = watcher.watch(&dir, RecursiveMode::Recursive) {
-            eprintln!("agent-speak: не слежу за {}: {e}", dir.display());
-        }
+    // только Codex: Claude вживую — хуки, а слежка за ~/.claude/projects (сотни папок) ничего не давала
+    let codex = home().join(".codex/sessions");
+    if let Err(e) = watcher.watch(&codex, RecursiveMode::Recursive) {
+        eprintln!("agent-speak: не слежу за {}: {e}", codex.display());
     }
     let cfg_dir = crate::config::path().parent().unwrap().to_path_buf();
     let _ = std::fs::create_dir_all(&cfg_dir);
@@ -409,6 +415,9 @@ pub fn run() {
             Event::Digest(d) => st.on_digest(d),
             Event::Presence(t) => st.on_presence(&t),
             Event::Acted(d) => st.on_acted(d),
+            Event::Tell(work) => {
+                let _ = st.act.send(mux::Work::Other(work)); // поток действий упал — дело выброшено, CLI получит ошибку
+            }
             Event::Bt(mode, switched) => st.on_bt(mode, switched),
         }
     }
@@ -426,7 +435,7 @@ fn final_message(p: &serde_json::Value, transcript: &Path) -> Option<String> {
 /// Факты о агенте без чтения диска: то, что знает реестр.
 fn blank_facts(e: &Entry, activity: u64) -> Facts {
     Facts {
-        id: e.id.clone(), project: e.project.clone(), state: e.state, since: e.since, status: e.status.clone(),
+        id: e.id.clone(), project: e.project.clone(), state: e.state,
         active_at: activity, helpers: 0, call: None, error: None, pane: None, shell: None, resume: String::new(),
         pid: e.pid, turn_over: false, sub_call: None,
     }
@@ -477,7 +486,7 @@ fn sub_call(transcript: &Path, call: &serde_json::Value) -> Option<serde_json::V
             && std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).is_some_and(|m| m["toolUseId"] == call["id"])
     })?;
     let jsonl = meta.to_string_lossy().strip_suffix(".meta.json")?.to_string() + ".jsonl";
-    claude::sub_in_flight(&tail_of(&jsonl))
+    claude::sub_in_flight(&tail_of(&jsonl, |t| claude::has_record(t, true)))
 }
 
 /// Факты сторожа: активность — новейшее из хуков, транскрипта и транскриптов сабагентов; у Claude — хвост транскрипта.
@@ -487,10 +496,16 @@ fn agent_facts(e: &Entry, activity: u64) -> Facts {
     f.active_at = f.active_at.max(mtime(t));
     (f.pane, f.shell) = (mux::locate(e.pid), shell_of(e.pid));
     f.resume = watch::resume_cmd(e.agent, &e.id, &cmdline(e.pid), watch::RESUME_PROMPT);
-    let tail = tail_of(&e.transcript);
-    if e.agent == "claude" {
-        for s in std::fs::read_dir(t.with_extension("").join("subagents")).into_iter().flatten().flatten() {
-            f.active_at = f.active_at.max(mtime(&s.path()));
+    let claude = e.agent == "claude";
+    let tail = tail_of(&e.transcript, |t| if claude { claude::has_record(t, false) } else { has_line(t) });
+    if claude {
+        // сабагенты и агенты его Workflow (subagents/workflows/<run>/)
+        let subagents = t.with_extension("").join("subagents");
+        let runs = std::fs::read_dir(subagents.join("workflows")).into_iter().flatten().flatten().map(|r| r.path());
+        for dir in std::iter::once(subagents.clone()).chain(runs) {
+            for s in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                f.active_at = f.active_at.max(mtime(&s.path()));
+            }
         }
         (f.helpers, f.call, f.error) = (helpers(t, &tail, proc_started(e.pid)), claude::in_flight(&tail), claude::last_api_error(&tail));
         f.turn_over = claude::turn_over(&tail);
@@ -556,6 +571,28 @@ fn bt_mode(mode: &str) -> bool {
     cli(mode, 20).inspect_err(|e| eprintln!("agent-speak: omarchy-bt-mode {mode}: {e}")).is_ok()
 }
 
+/// Готовность для systemd (`Type=notify`): датаграмма `READY=1` в `$NOTIFY_SOCKET` — документированный протокол
+/// sd_notify, «@» в начале — абстрактный сокет. Не под systemd (нет переменной) — ничего.
+fn notify_ready(socket: Option<std::ffi::OsString>) {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+    let Some(socket) = socket else { return };
+    let raw = socket.as_encoded_bytes();
+    let to = match raw.strip_prefix(b"@") {
+        Some(name) => SocketAddr::from_abstract_name(name),
+        None => SocketAddr::from_pathname(&socket),
+    };
+    if let Err(e) = to.and_then(|to| UnixDatagram::unbound()?.send_to_addr(b"READY=1", &to)) {
+        eprintln!("agent-speak: systemd не узнал о готовности ({}): {e}", socket.to_string_lossy());
+    }
+}
+
+/// Путь, которым запущен демон (argv[0]): относительный — от его папки (Ома работает в другой), имя без папки — по PATH.
+fn own_path(argv0: &std::ffi::OsStr, cwd: &Path) -> PathBuf {
+    let p = Path::new(argv0);
+    if p.is_relative() && p.components().count() > 1 { cwd.join(p) } else { p.to_path_buf() }
+}
+
 /// Команда Оме открыть окно ответа; speakers — спросила в динамики: слушать ноутбуком, через эхоподавление.
 fn listen_cmd(kind: &str, said: &str, key: Option<String>, speakers: bool, secs: u64) -> serde_json::Value {
     let mut cmd = serde_json::json!({"do": "listen", "secs": secs, "kind": kind, "said": said});
@@ -579,6 +616,21 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
         let Ok(line) = line else { break };
         let _ = conn.set_read_timeout(None); // первая строка пришла — постоянное соединение (agent_voice) живёт молча
         match serde_json::from_str::<Msg>(&line) {
+            Ok(Msg::Tell { session, option, text, expect }) => {
+                // ответ агенту — в очередь потока действий; эта строка ждёт исхода и пишет его клиенту
+                let (rtx, rrx) = mpsc::channel();
+                let work = move || {
+                    let _ = rtx.send(crate::orders::tell(&session, option, &text, &expect));
+                };
+                let reply = match tx.send(Event::Tell(Box::new(work))).ok().and_then(|()| rrx.recv().ok()) {
+                    Some(Ok(chosen)) => serde_json::json!({"ok": chosen}),
+                    Some(Err(e)) => serde_json::json!({"err": e}),
+                    None => serde_json::json!({"err": "служба не передала: поток действий не работает"}),
+                };
+                if (&conn).write_all(format!("{reply}\n").as_bytes()).is_err() {
+                    break;
+                }
+            }
             Ok(Msg::Subscribe) => match conn.try_clone() {
                 Ok(w) => {
                     let _ = conn.set_read_timeout(None); // таймаут общий для клонов сокета
@@ -595,6 +647,8 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
 }
 
 impl State {
+    /// Агент в фокусе — по требованию (перед речью, чтение, снимок мозга), не опросом: hyprctl и база Orca стоят
+    /// десятки мс. Флаг focused в строке агентов — с последнего такого вопроса.
     fn focused(&mut self) -> Option<SessionRef> {
         let now = (self.clock)();
         if !self.focus_cache.as_ref().is_some_and(|(t, _)| now.saturating_duration_since(*t) < Duration::from_millis(500)) {
@@ -602,9 +656,18 @@ impl State {
             if let Some(f) = &f {
                 self.projects.insert(f.id.clone(), f.project.clone());
             }
+            self.registry.set_focused(f.as_ref().map(|f| f.id.as_str()));
             self.focus_cache = Some((now, f));
         }
         self.focus_cache.as_ref().and_then(|(_, f)| f.clone())
+    }
+
+    /// Ома начинает ход (разговор, набранный вопрос, реплика голосом): её снимку агентов — свежий фокус.
+    /// Строка агентов уходит подписчикам раньше, чем команда — Оме.
+    fn refocus(&mut self) {
+        self.focus_cache = None;
+        self.focused();
+        self.push_agents();
     }
 
     fn quiet(&self) -> bool {
@@ -639,8 +702,14 @@ impl State {
 
     /// config.toml изменён (интерфейсом или руками) — применить без перезапуска.
     fn reload(&mut self) {
-        self.cfg = Config::load();
-        self.apply();
+        match Config::load() {
+            Ok(c) => {
+                self.cfg = c;
+                self.apply();
+            }
+            // недописанная правка руками или опечатка: прежние настройки, а не умолчания
+            Err(e) => eprintln!("agent-speak: настройки не прочитаны, остаются прежние: {e}"),
+        }
     }
 
     /// Настройки → поток воспроизведения и очередь, затем — подписчикам.
@@ -804,6 +873,7 @@ impl State {
             if !self.quiet() {
                 self.board.push(News { session: d.session, class: Class::Final, say: d.say, born: (self.now_secs)() });
             }
+            self.speak_news();
             return;
         }
         let Some(e) = self.registry.get(&d.session) else { return };
@@ -845,6 +915,7 @@ impl State {
             self.board.push(News { session: d.session, class, say, born: (self.now_secs)() });
         }
         self.push_agents();
+        self.speak_news(); // пересказ готов — звучит сразу, а не со следующим тиком
     }
 
     /// Новости — когда Ома молчит, ничего не звучит и пользователь слушает; слух греется заранее, чтобы ответ услышать сразу.
@@ -1014,13 +1085,22 @@ impl State {
             .args(&self.voice_cmd[1..])
             .current_dir(&data)
             .env("AGENT_SPEAK", "1") // хуки сессий Омы до демона не доходят
-            .env("AGENT_SPEAK_BIN", std::env::current_exe().unwrap_or_default()) // Ома передаёт агентам через `agent-speak tell`
+            // потоки OpenBLAS после каждого расчёта признаков whisper крутятся вхолостую: 0,9–1,5 с процессора на вызов
+            .env("OPENBLAS_NUM_THREADS", "1")
+            // Ома передаёт агентам через `agent-speak tell`; путь — каким запущена служба (ExecStart, ссылка в ~/.local/bin):
+            // current_exe() после пересборки — «… (deleted)»
+            .env("AGENT_SPEAK_BIN", own_path(&std::env::args_os().next().unwrap_or_default(), &std::env::current_dir().unwrap_or_default()))
             .stdin(std::process::Stdio::piped())
             .spawn();
         match child {
             Ok(mut c) => {
                 eprintln!("agent-speak: Ома запущена (pid {})", c.id());
                 self.oma.stdin = c.stdin.take();
+                // запись не ждёт: труба полна — Ома не читает команды (висит), и это её падение, а не стоп цикла демона
+                if let Some(fd) = self.oma.stdin.as_ref().map(std::os::fd::AsRawFd::as_raw_fd) {
+                    // SAFETY: флаги своего дескриптора; читающий конец трубы у Омы — другое открытие, его режим не меняется
+                    unsafe { libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK) };
+                }
                 self.oma.child = Some(c);
                 self.oma.failing = false;
                 self.oma.started = Some((self.clock)());
@@ -1070,7 +1150,7 @@ impl State {
     }
 
     /// Раз в секунду: Ома упала — выключить, срок вышел — поднять; граница тихого расписания.
-    /// Раз в SCAN_EVERY: состав агентов, «готово» → «простаивает», агент в фокусе.
+    /// Раз в SCAN_EVERY: состав агентов, «готово» → «простаивает».
     fn tick(&mut self) {
         let dead = self.oma.child.as_mut().is_some_and(|c| !matches!(c.try_wait(), Ok(None)));
         if dead {
@@ -1118,8 +1198,6 @@ impl State {
             self.next_scan = now + SCAN_EVERY;
             self.rescan();
             self.registry.tick((self.now_secs)());
-            let focused = self.focused().map(|f| f.id);
-            self.registry.set_focused(focused.as_deref());
             self.push_agents();
         }
         if self.cfg.agents_voice && now >= self.next_watch {
@@ -1191,6 +1269,7 @@ impl State {
                 if audible(&Kind::Voice, self.quiet()) {
                     crate::audio::chime(&self.shared.sink.lock().unwrap()); // туда же, куда её голос
                 }
+                self.refocus(); // реплика ушла мозгу — снимок агентов с фокусом этой минуты
             }
             Msg::VoiceState { state, talking } => {
                 if state == "idle" {
@@ -1201,8 +1280,20 @@ impl State {
                 self.oma.talking = talking;
                 self.purge();
             }
-            Msg::Oma { action } => self.oma_send(&action),
-            Msg::Emit { line } => self.broadcast_line(&format!("{line}\n")),
+            Msg::Oma { action } => {
+                // Esc и прочее фокус не ждут
+                if matches!(action["do"].as_str(), Some("talk" | "ask")) {
+                    self.refocus();
+                }
+                self.oma_send(&action)
+            }
+            Msg::Emit { mut line } => {
+                // пузырь орба — простой текст, как у пузырей агентов; чат окна разметку рисует и получает её как есть
+                if let Some(t) = line["bubble"]["text"].as_str() {
+                    line["bubble"]["text"] = crate::text::clean::plain(t).into();
+                }
+                self.broadcast_line(&format!("{line}\n"))
+            }
             Msg::Pause => {
                 self.oma_paused = false; // кнопка пользователя главнее: дальше пауза — его
                 let paused = self.shared.queue.lock().unwrap().paused();
@@ -1255,7 +1346,7 @@ impl State {
                 self.on_back(back);
             }
             Msg::View { agent } => self.viewing = agent,
-            Msg::Subscribe => {} // приходит как Event::Subscribe
+            Msg::Subscribe | Msg::Tell { .. } => {} // приходят как Event::Subscribe и Event::Tell
         }
         if changes {
             self.broadcast();
@@ -1267,14 +1358,16 @@ impl State {
         let Some(f) = presence::parse_facts(text) else { return };
         let now = (self.now_secs)();
         // журнал: смена фактов и перерыв в снимках — по ним видно, почему Ома решила «он тут»
-        let idle = if f.idle_since == 0 { "ввод сейчас".to_string() } else { format!("ввода нет с {}", f.idle_since) };
-        let facts = format!("{idle}, блок {}, микрофон {}, камера {}, видео {}, наушники {:?}", f.locked, f.mic, f.camera, f.video, f.buds);
+        // момент простоя сдвигает каждый ввод — смена фактов без него, в журнале он есть
+        let rest = format!("блок {}, микрофон {}, камера {}, видео {}, наушники {:?}", f.locked, f.mic, f.camera, f.video, f.buds);
+        let facts = format!("{}, {rest}", if f.idle_since == 0 { "ввод сейчас" } else { "ввода нет" });
         let gap = f.at.saturating_sub(self.presence_at);
         if self.presence_at != 0 && gap > 45 {
             eprintln!("agent-speak: снимок присутствия: перерыв {gap} с");
         }
         if facts != self.presence_seen {
-            eprintln!("agent-speak: снимок присутствия: {facts}");
+            let idle = if f.idle_since == 0 { "ввод сейчас".to_string() } else { format!("ввода нет с {}", f.idle_since) };
+            eprintln!("agent-speak: снимок присутствия: {idle}, {rest}");
         }
         (self.presence_at, self.presence_seen) = (f.at, facts);
         let back = self.presence.apply(f, now);
@@ -1391,7 +1484,7 @@ impl State {
                 // «ждёт ввода» — простой, а не вопрос: молчим, реестр не трогаем
                 let raw = p["message"].as_str().unwrap_or_default();
                 if !matches!(raw, "" | "Claude is waiting for your input") {
-                    let tail = tail_of(p["transcript_path"].as_str().unwrap_or_default());
+                    let tail = tail_of(p["transcript_path"].as_str().unwrap_or_default(), |t| claude::has_record(t, false));
                     let msg = notification_text(raw, || claude::last_tool(&tail));
                     let question = claude::last_question(&tail);
                     let text = question.as_ref().map_or(msg.clone(), |q| format!("вопрос: {q}"));
@@ -1420,7 +1513,7 @@ impl State {
                 let last = final_message(p, &transcript).unwrap_or_default();
                 // помощники в фоне — «Жду ревью» не итог, а агент работает
                 let since = self.registry.get(&session).map_or(0, |e| proc_started(e.pid));
-                let waiting = helpers(&transcript, &tail_of(&transcript.to_string_lossy()), since) > 0;
+                let waiting = helpers(&transcript, &tail_of(&transcript.to_string_lossy(), |t| claude::has_record(t, false)), since) > 0;
                 if waiting {
                     self.registry.status(&session, &last, now);
                 } else {
@@ -1463,13 +1556,10 @@ impl State {
     }
 
     fn on_file(&mut self, path: &Path) {
+        // Claude вживую — только хук MessageDisplay: id там UUID, в транскрипте msg_…, тексты не совпадают
+        let Some((Agent::Codex, id)) = focus::session_of(path) else { return };
         let lines = self.tail.read_new(path);
         if lines.is_empty() {
-            return;
-        }
-        let Some((agent, id)) = focus::session_of(path) else { return };
-        // Claude вживую — только хук MessageDisplay: id там UUID, в транскрипте msg_…, тексты не совпадают
-        if agent == Agent::Claude {
             return;
         }
         // сообщения — в ленту и на пересказ: дословно агенты не звучат
@@ -1480,11 +1570,7 @@ impl State {
                     self.limits.sample(w, now);
                 }
             }
-            let blocks = match agent {
-                Agent::Claude => claude::parse_line(&line),
-                Agent::Codex => codex::parse_line(&line),
-            };
-            for b in blocks {
+            for b in codex::parse_line(&line) {
                 if self.registry.status(&id, &b.text, now) {
                     self.note(&id, &b.text);
                 }
@@ -1498,7 +1584,7 @@ impl State {
         let now = (self.now_secs)();
         let facts: Vec<Facts> = self.registry.entries().iter().map(|e| (self.facts_of)(e, self.activity.get(&e.id).copied().unwrap_or(0))).collect();
         let panes: HashMap<String, Pane> = facts.iter().filter_map(|f| f.pane.clone().map(|p| (f.id.clone(), p))).collect();
-        let ctx = Ctx { now, idle: now.saturating_sub(self.presence.last_input(now)), hung_after: self.cfg.hung_after * 60, remind_after: self.cfg.remind_after * 60 };
+        let ctx = Ctx { now, idle: now.saturating_sub(self.presence.last_input(now)), hung_after: self.cfg.hung_after * 60 };
         let (shell_idle, alive) = (&self.shell_idle, self.alive);
         let acts = self.watch.check(&ctx, facts, |pid| shell_idle(pid), alive);
         for a in acts {
@@ -1511,7 +1597,6 @@ impl State {
     fn on_act(&mut self, a: Act, panes: &HashMap<String, Pane>) {
         match a {
             Act::Say { session, text, urgent } => self.watch_say(&session, &text, if urgent { Class::Urgent } else { Class::Restore }),
-            Act::Remind { session, text } => self.watch_say(&session, &text, Class::Question),
             Act::Judge { session, text } => {
                 // экран — CLI мультиплексора, до 10 с: в своём потоке, затем задание модели
                 let (digest, pane, screen) = (self.digest.clone(), panes.get(&session).cloned(), self.screen);
@@ -1528,7 +1613,7 @@ impl State {
                 });
             }
             Act::Run(job) => {
-                let _ = self.act.send(job);
+                let _ = self.act.send(mux::Work::Job(job));
             }
         }
     }
@@ -1657,7 +1742,15 @@ mod tests {
 
     static HINTS_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-    fn acts(st: &mut State) -> mpsc::Receiver<mux::Job> {
+    /// Действие сторожа из очереди потока действий.
+    fn watch_job(w: mux::Work) -> mux::Job {
+        match w {
+            mux::Work::Job(j) => j,
+            mux::Work::Other(_) => panic!("ждали действие сторожа"),
+        }
+    }
+
+    fn acts(st: &mut State) -> mpsc::Receiver<mux::Work> {
         let (tx, rx) = mpsc::channel();
         st.act = tx;
         rx
@@ -1678,7 +1771,7 @@ mod tests {
         let rx = acts(&mut st);
         st.facts_of = Box::new(|e, a| Facts { active_at: 1, call: Some(serde_json::json!({"name": "Agent", "input": {}})), pane: herdr_pane(), ..blank_facts(e, a) });
         st.watch_tick();
-        assert_eq!(rx.try_recv().unwrap().what, What::Interrupt);
+        assert_eq!(watch_job(rx.try_recv().unwrap()).what, What::Interrupt);
         assert_eq!(st.registry.get("a").unwrap().health, "завис");
         let mut r = sub(&mut st);
         st.on_acted(mux::Done { session: "a".into(), what: What::Interrupt, err: None });
@@ -1773,7 +1866,7 @@ mod tests {
         st.on_digest(dg("a", Ask::Hung, true, "висит"));
         assert!(st.board.is_empty());
         st.watch_tick();
-        assert_eq!(arx.try_recv().unwrap().what, What::Interrupt);
+        assert_eq!(watch_job(arx.try_recv().unwrap()).what, What::Interrupt);
     }
 
     #[test]
@@ -1862,6 +1955,20 @@ mod tests {
         client.write_all(b"{\"cmd\":\"subscribe\"}\n\xd0\xbc\xd1\x83\xd1\x81\xd0\xbe\xd1\x80\n{\"cmd\":\"nope\"}\n{\"cmd\":\"pause\"}\n").unwrap();
         assert!(matches!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Event::Subscribe(_)));
         assert!(matches!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Event::Msg(Msg::Pause)));
+    }
+
+    #[test]
+    fn tell_goes_through_the_action_queue_and_answers() {
+        // `agent-speak tell` — запрос с ответом: дело уходит в поток действий, исход — строкой обратно
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (server, client) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || serve(server, tx));
+        let mut w = client.try_clone().unwrap();
+        w.write_all(b"{\"cmd\":\"tell\",\"session\":\"no-such-session\",\"option\":0,\"text\":\"hi\"}\n").unwrap();
+        let Ok(Event::Tell(work)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("tell не дошёл до цикла") };
+        work(); // так его исполнит поток действий
+        let reply = next(&mut reader(client));
+        assert_eq!(reply["err"], "агента нет среди живых");
     }
 
     #[test]
@@ -2031,6 +2138,12 @@ mod tests {
         next(&mut r);
         st.on_msg(Msg::Emit { line: serde_json::json!({"chat": {"key": "new", "messages": []}}) });
         assert_eq!(next(&mut r)["chat"]["key"], "new");
+        // пузырь орба рисуется простым текстом: звёздочки markdown из ответа мозга ему не нужны; чат окна — с разметкой
+        st.on_msg(Msg::Emit { line: serde_json::json!({"bubble": {"id": "oma-1", "who": "Ома", "text": "* **Тесты** прошли", "kind": "oma", "append": true}}) });
+        let b = next(&mut r);
+        assert_eq!((b["bubble"]["text"].as_str(), b["bubble"]["append"].as_bool()), (Some("Тесты прошли"), Some(true)));
+        st.on_msg(Msg::Emit { line: serde_json::json!({"chat_delta": {"text": "**жирный**"}}) });
+        assert_eq!(next(&mut r)["chat_delta"]["text"], "**жирный**");
     }
 
     #[test]
@@ -2200,6 +2313,22 @@ mod tests {
     }
 
     #[test]
+    fn broken_config_keeps_settings_and_file() {
+        let home = TempHome::new("cfg-broken");
+        let file = home.dir.join(".config/agent-speak/config.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let mut st = test_state();
+        std::fs::write(&file, "speaker = \"baya\"\nhung_after = 0\n").unwrap();
+        st.reload();
+        assert_eq!((st.cfg.speaker.as_str(), st.cfg.hung_after), ("baya", 12), "опасное значение — умолчание ключа");
+        std::fs::write(&file, "speaker = \"baya\"\nrate = ").unwrap(); // правка руками, недописанная
+        st.reload();
+        assert_eq!(st.cfg.speaker, "baya", "битый файл — прежние настройки, не умолчания");
+        st.on_msg(Msg::Set { key: "rate".into(), value: serde_json::json!("fast") });
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "speaker = \"baya\"\nrate = ", "битый файл не затирается");
+    }
+
+    #[test]
     fn agents_voice_off_cuts_what_is_playing() {
         let _home = TempHome::new("mute"); // set сохраняет config.toml
         let mut st = test_state();
@@ -2306,6 +2435,23 @@ mod tests {
         assert!(st.oma.child.is_some());
     }
 
+    #[test]
+    fn stuck_oma_does_not_block_the_loop() {
+        // Ома жива, но stdin не читает (зависший цикл): запись не держит цикл демона — Ома считается упавшей
+        let _h = TempHome::new("oma-stuck");
+        let mut st = test_state(); // voice_cmd — sleep 30: stdin не читается
+        st.oma_spawn();
+        use std::os::fd::AsRawFd;
+        let fd = st.oma.stdin.as_ref().unwrap().as_raw_fd();
+        // SAFETY: F_GETFL на своём дескрипторе
+        assert!(unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_NONBLOCK != 0, "блокирующий stdin — цикл встал бы");
+        let big = serde_json::json!({"do": "ask", "text": "я".repeat(40_000)});
+        for _ in 0..10 {
+            st.oma_send(&big); // ~800 КБ в трубу на 64 КиБ
+        }
+        assert!(st.oma.stdin.is_none() && st.oma.state == "off" && st.oma.retry_at.is_some());
+    }
+
     /// В фокусе окно агента id, его последний ответ — text.
     fn focus_with_answer(env: &Env, id: &str, text: &str) {
         let dir = std::env::temp_dir().join(format!("agent-speak-read-{}-{id}-{}", std::process::id(), text.len()));
@@ -2314,6 +2460,36 @@ mod tests {
         let line = serde_json::json!({"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text": text}]}});
         std::fs::write(&path, line.to_string()).unwrap();
         *env.0.lock().unwrap() = Some(SessionRef { transcript: path, ..sref(id) });
+    }
+
+    #[test]
+    fn focus_is_asked_on_demand_not_polled() {
+        let (mut st, (focus, _now)) = env_state();
+        let calls = Arc::new(Mutex::new(0));
+        let c = calls.clone();
+        st.focus_src = Box::new(move || {
+            *c.lock().unwrap() += 1;
+            focus.lock().unwrap().clone().or(Some(sref("b")))
+        });
+        with_agents(&mut st, &["a", "b"]);
+        for _ in 0..3 {
+            st.next_scan = (st.clock)();
+            st.tick();
+        }
+        assert_eq!(*calls.lock().unwrap(), 0, "скан состава hyprctl не зовёт");
+        // разговор начат — снимку мозга нужен фокус: строка агентов уходит до команды Оме
+        let mut r = sub(&mut st);
+        drain(&mut r);
+        st.on_msg(Msg::Oma { action: serde_json::json!({"do": "talk"}) });
+        assert_eq!(*calls.lock().unwrap(), 1);
+        let agents = drain(&mut r).into_iter().find(|l| l.get("agents").is_some()).expect("строка агентов");
+        let focused: Vec<&str> = agents["agents"].as_array().unwrap().iter().filter(|e| e["focused"] == true).map(|e| e["id"].as_str().unwrap()).collect();
+        assert_eq!(focused, ["b"]);
+        st.on_msg(Msg::Oma { action: serde_json::json!({"do": "cancel"}) });
+        assert_eq!(*calls.lock().unwrap(), 1, "Esc фокус не ждёт");
+        st.cfg.quiet_override = "on".into(); // щелчок в тесте не звучит
+        st.on_msg(Msg::Chime);
+        assert_eq!(*calls.lock().unwrap(), 2, "каждая реплика голосом — свежий фокус");
     }
 
     #[test]
@@ -2384,6 +2560,58 @@ mod tests {
     fn live(id: &str) -> Live {
         Live { id: id.to_string(), agent: "claude", pid: 1, title: format!("T-{id}"),
             cwd: format!("/p/{id}"), transcript: PathBuf::new(), state: crate::agents::State::Working, status_at: 0 }
+    }
+
+    #[test]
+    fn ready_reaches_systemd_notify_socket() {
+        use std::os::linux::net::SocketAddrExt;
+        let path = std::env::temp_dir().join(format!("agent-speak-notify-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let sock = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+        notify_ready(Some(path.clone().into()));
+        let mut buf = [0u8; 64];
+        let n = sock.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"READY=1");
+        let _ = std::fs::remove_file(&path);
+        // «@…» — абстрактный сокет
+        let name = format!("agent-speak-notify-test-{}", std::process::id());
+        let abs = std::os::unix::net::UnixDatagram::bind_addr(&std::os::unix::net::SocketAddr::from_abstract_name(&name).unwrap()).unwrap();
+        notify_ready(Some(format!("@{name}").into()));
+        let n = abs.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"READY=1");
+        notify_ready(None); // не под systemd — тихо
+    }
+
+    #[test]
+    fn oma_gets_the_path_the_service_was_started_by() {
+        // current_exe() после cargo build у живого демона — «… (deleted)»: tell у перезапущенной Омы не запустился бы
+        let cwd = Path::new("/home/u/src");
+        assert_eq!(own_path("/home/u/.local/bin/agent-speak".as_ref(), cwd), PathBuf::from("/home/u/.local/bin/agent-speak"), "ExecStart — ссылка");
+        assert_eq!(own_path("target/release/agent-speak".as_ref(), cwd), PathBuf::from("/home/u/src/target/release/agent-speak"), "Ома запускается в другой папке");
+        assert_eq!(own_path("agent-speak".as_ref(), cwd), PathBuf::from("agent-speak"), "по PATH — так и оставить");
+    }
+
+    #[test]
+    fn workflow_agents_count_as_activity_and_helpers() {
+        // агент ждёт свой Workflow: молчит родитель, пишут агенты workflow — это не тишина, а помощник в работе
+        let root = std::env::temp_dir().join(format!("agent-speak-wf-facts-{}", std::process::id()));
+        let run = root.join("s/subagents/workflows/wf_1");
+        std::fs::create_dir_all(&run).unwrap();
+        let transcript = root.join("s.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        let old = std::time::UNIX_EPOCH + Duration::from_secs(1000);
+        std::fs::File::options().write(true).open(&transcript).unwrap().set_modified(old).unwrap();
+        std::fs::write(run.join("journal.jsonl"), "{\"type\":\"launched\"}\n").unwrap();
+        std::fs::write(run.join("agent-a.jsonl"), "{}\n").unwrap();
+        for d in [root.join("s/subagents/workflows"), root.join("s/subagents")] {
+            std::fs::File::open(&d).unwrap().set_modified(old).unwrap(); // папки — от запуска workflow, не от его работы
+        }
+        let mut reg = Registry::new();
+        reg.sync(vec![Live { transcript: transcript.clone(), pid: 0, ..live("s") }], 1000);
+        let f = agent_facts(reg.get("s").unwrap(), 0);
+        assert!(f.active_at > 1_000_000, "активность — по файлам агентов workflow: {}", f.active_at);
+        assert_eq!(f.helpers, 1, "идущий workflow — помощник");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn with_agents(st: &mut State, ids: &[&str]) {
@@ -2507,7 +2735,7 @@ mod tests {
         st.on_digest(dg("s", Ask::Step, false, "Ревьювер принял ответ."));
         assert!(st.board.is_empty(), "переписка оркестратора с помощниками — не новость");
         st.on_digest(dg("s", Ask::Step, true, "Вся работа готова и влита."));
-        assert!(!st.board.is_empty(), "работа целиком готова — звучит");
+        assert_eq!(texts(&st), ["плуг: Вся работа готова и влита."], "работа целиком готова — звучит");
         st.on_hook("user-prompt-submit", &report);
         st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s", "prompt": "а что с тестами?"}));
         stop(&mut st, "s", "Тесты зелёные.");
@@ -2536,8 +2764,7 @@ mod tests {
         let b = bubbles(&mut r);
         assert_eq!(b.len(), 1);
         assert_eq!((b[0]["kind"].as_str(), b[0]["text"].as_str(), b[0]["who"].as_str()), (Some("final"), Some("Фича готова."), Some("T-s")));
-        st.tick();
-        assert_eq!(pop1(&st), "плуг: Фича готова.");
+        assert_eq!(pop1(&st), "плуг: Фича готова.", "звучит сразу, а не со следующим тиком");
     }
 
     #[test]
@@ -2600,10 +2827,12 @@ mod tests {
         let mut st = test_state();
         st.cfg.agents_voice = true;
         with_agents(&mut st, &["s", "t"]);
+        st.hold(true); // Ома говорит — новости ждут на доске
         st.on_digest(dg("s", Ask::Final, true, "Фича готова."));
         question(&mut st, "t", true, "Удалить старый код?");
         st.cfg.agents_voice = false;
         st.apply();
+        st.hold(false);
         st.tick();
         assert!(texts(&st).is_empty()); // слежка выключена — и вопросы с доски ушли
         st.cfg.agents_voice = true;
@@ -3036,6 +3265,18 @@ mod tests {
 
     fn final_s(st: &mut State) {
         st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
+    }
+
+    #[test]
+    fn presence_journal_ignores_new_idle_moment() {
+        // каждый ввод сдвигает idle_since: в журнал — только смена самих фактов, а не каждый снимок
+        let (mut st, _now) = presence_state(1000);
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 900}));
+        let seen = st.presence_seen.clone();
+        snap(&mut st, serde_json::json!({"at": 1030, "idle_since": 1010}));
+        assert_eq!(st.presence_seen, seen);
+        snap(&mut st, serde_json::json!({"at": 1060, "idle_since": 0}));
+        assert_ne!(st.presence_seen, seen, "ввод сейчас — другой факт");
     }
 
     #[test]
@@ -3512,8 +3753,10 @@ mod tests {
     fn short_absence_no_greeting() {
         let (mut st, _now) = presence_state(1120);
         snap(&mut st, serde_json::json!({"at": 1120, "idle_since": 1000}));
-        final_s(&mut st); // без tick: «не уверена» с новостью спросила бы «Ты тут?»
+        st.hold(true); // Ома говорит: «не уверена» с новостью спросила бы «Ты тут?»
+        final_s(&mut st);
         snap(&mut st, serde_json::json!({"at": 1120, "idle_since": 0}));
+        st.hold(false);
         st.tick();
         assert_eq!(texts(&st), ["плуг: Фича готова."]);
     }
