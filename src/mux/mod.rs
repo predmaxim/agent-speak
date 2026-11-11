@@ -263,7 +263,7 @@ pub fn run(cmd: &mut Command, timeout: Duration) -> Result<String, String> {
 
 /// Выход потомка не позже timeout, None — не вышел: ждём pidfd через poll (Linux 5.3+), без опроса и без гонки
 /// с переиспользованием pid — несобранный потомок свой pid не отдаёт.
-fn exit_within(child: &mut std::process::Child, timeout: Duration) -> Result<Option<std::process::ExitStatus>, String> {
+pub(crate) fn exit_within(child: &mut std::process::Child, timeout: Duration) -> Result<Option<std::process::ExitStatus>, String> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     // SAFETY: pidfd_open без побочных эффектов; дескриптор сразу переходит во владение OwnedFd
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0) };

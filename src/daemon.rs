@@ -95,6 +95,9 @@ const OMA_BACKOFF: [u64; 4] = [10, 30, 60, 300];
 /// Прожила столько — падение случайное, отсрочка снова с начала.
 const OMA_STABLE: Duration = Duration::from_secs(60);
 
+/// Упавшая Ома выходит не дольше этого (дамп по SIGABRT пишется секунды), затем — SIGKILL.
+const OMA_REAP: Duration = Duration::from_secs(30);
+
 /// Хороший прогноз у окна, ещё стоящего у порога, кончает эпизод лимита не раньше, чем через столько секунд.
 const LIMIT_HOLD: u64 = 600;
 /// Строк экрана терминала в вопросе модели о зависании.
@@ -138,6 +141,7 @@ struct Oma {
     failing: bool,             // запуск не удаётся: в журнал — только первая ошибка подряд
     started: Option<Instant>,  // когда запущена нынешняя
     crashes: usize,            // падений подряд — шаг OMA_BACKOFF
+    reap: Option<std::thread::JoinHandle<()>>, // прежнюю пожинают: пока не вышла, новую не поднимаем
 }
 
 /// Что звучит: тихий режим глушит всё, кроме чтения по хоткею и образца голоса.
@@ -587,6 +591,19 @@ fn notify_ready(socket: Option<std::ffi::OsString>) {
     };
     if let Err(e) = to.and_then(|to| UnixDatagram::unbound()?.send_to_addr(b"READY=1", &to)) {
         eprintln!("agent-speak: systemd не узнал о готовности ({}): {e}", socket.to_string_lossy());
+    }
+}
+
+/// Пожать прежнюю Ому: не вышла за after (SIGABRT поймали, дамп завис) — SIGKILL. Две Омы разом держали бы микрофон и GPU.
+fn reap(mut c: Child, after: Duration) {
+    // уже пожата (tick нашёл её мёртвой): её pid мог достаться другому процессу — pidfd открывать нельзя
+    if matches!(c.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    if !matches!(mux::exit_within(&mut c, after), Ok(Some(_))) {
+        eprintln!("agent-speak: Ома не вышла за {} с — SIGKILL", after.as_secs());
+        let _ = c.kill();
+        let _ = c.wait();
     }
 }
 
@@ -1171,12 +1188,14 @@ impl State {
         };
         if let Err(e) = w.write_all(format!("{action}\n").as_bytes()) {
             eprintln!("agent-speak: Ома не принимает команды: {e}");
-            if e.kind() == std::io::ErrorKind::WouldBlock {
-                // труба полна — Ома жива, но не читает (висит): SIGABRT, а не SIGKILL — дамп в systemd-coredump и
-                // трасса потоков Python в журнал (PYTHONFAULTHANDLER), чтобы было что разбирать
-                if let Some(c) = &self.oma.child {
-                    // SAFETY: сигнал своему дочернему процессу; он не пожат (wait ниже), pid не переиспользован
+            if let Some(c) = &mut self.oma.child {
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    // труба полна — Ома жива, но не читает (висит): SIGABRT, а не SIGKILL — дамп в systemd-coredump и
+                    // трасса потоков Python в журнал (PYTHONFAULTHANDLER), чтобы было что разбирать
+                    // SAFETY: сигнал своему дочернему процессу; он не пожат (wait — в reap), pid не переиспользован
                     unsafe { libc::kill(c.id() as libc::pid_t, libc::SIGABRT) };
+                } else {
+                    let _ = c.kill(); // труба закрыта или сломана — разбирать нечего
                 }
             }
             self.oma_down();
@@ -1193,11 +1212,9 @@ impl State {
         self.oma.crashes += 1;
         eprintln!("agent-speak: Ома поднимется через {wait} с");
         self.oma.stdin = None; // EOF — если ещё жива, выйдет сама
-        if let Some(mut c) = self.oma.child.take() {
+        if let Some(c) = self.oma.child.take() {
             // пожать в стороне: дамп упавшей по SIGABRT пишется секунды, цикл службы его не ждёт
-            std::thread::spawn(move || {
-                let _ = c.wait();
-            });
+            self.oma.reap = Some(std::thread::spawn(move || reap(c, OMA_REAP)));
         }
         self.oma.state = "off".into();
         self.oma.talking = false;
@@ -1217,7 +1234,8 @@ impl State {
             self.oma_down();
         }
         let now = (self.clock)();
-        if self.oma.retry_at.is_some_and(|t| now >= t) {
+        // прежняя ещё не вышла — вторая Ома с тем же микрофоном и GPU не поднимается
+        if self.oma.retry_at.is_some_and(|t| now >= t) && self.oma.reap.as_ref().is_none_or(|h| h.is_finished()) {
             self.oma_spawn();
         }
         let (min, secs) = ((self.minutes)(), (self.now_secs)());
@@ -2363,6 +2381,7 @@ mod tests {
             st.tick();
             assert!(st.oma.child.is_none(), "раньше срока ({wait} с)");
             *env.1.lock().unwrap() += Duration::from_secs(1);
+            reaped(st);
             st.tick();
             assert!(st.oma.child.is_some(), "в срок ({wait} с)");
             wait
@@ -2522,8 +2541,77 @@ mod tests {
         st.tick();
         assert!(st.oma.child.is_none());
         *env.1.lock().unwrap() += Duration::from_secs(2);
+        reaped(&mut st);
         st.tick();
         assert!(st.oma.child.is_some());
+    }
+
+    /// Прежняя Ома пожата: новую поднимают только после этого.
+    fn reaped(st: &mut State) {
+        if let Some(h) = st.oma.reap.take() {
+            h.join().unwrap();
+        }
+    }
+
+    fn gone(pid: u32) -> bool {
+        let end = Instant::now() + Duration::from_secs(3);
+        while Path::new(&format!("/proc/{pid}")).exists() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        !Path::new(&format!("/proc/{pid}")).exists()
+    }
+
+    #[test]
+    fn oma_that_survives_abort_is_killed_after_the_deadline() {
+        // SIGABRT пойман (или дамп завис): ждём выхода до срока, затем SIGKILL — не держать её вечно рядом с новой
+        let ready = std::env::temp_dir().join(format!("agent-speak-reap-{}", std::process::id()));
+        let _ = std::fs::remove_file(&ready);
+        let c = std::process::Command::new("sh").args(["-c", &format!("trap '' ABRT; : > {}; exec sleep 30", ready.display())]).spawn().unwrap();
+        let pid = c.id();
+        let end = Instant::now() + Duration::from_secs(3);
+        while !ready.exists() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_file(&ready);
+        // SAFETY: сигнал своему непожатому потомку
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGABRT) };
+        let start = Instant::now();
+        reap(c, Duration::from_millis(300));
+        assert!(start.elapsed() >= Duration::from_millis(250) && start.elapsed() < Duration::from_secs(3), "ждала срок, а не вечно");
+        assert!(gone(pid), "убита и пожата");
+    }
+
+    #[test]
+    fn no_new_oma_while_the_old_one_is_reaped() {
+        let _h = TempHome::new("oma-reap");
+        let (mut st, env) = env_state();
+        st.voice_cmd = vec!["true".into()];
+        let (go, wait) = mpsc::channel::<()>();
+        st.oma.reap = Some(std::thread::spawn(move || { let _ = wait.recv(); }));
+        st.oma.retry_at = Some(*env.1.lock().unwrap());
+        st.tick();
+        assert!(st.oma.child.is_none(), "прежняя ещё не вышла — вторую не поднимать");
+        go.send(()).unwrap();
+        let end = Instant::now() + Duration::from_secs(2);
+        while st.oma.child.is_none() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+            st.tick();
+        }
+        assert!(st.oma.child.is_some(), "пожата — поднять");
+    }
+
+    #[test]
+    fn oma_with_closed_stdin_is_killed() {
+        // запись не прошла не из-за полной трубы (EPIPE) — убить, как раньше, а не ждать
+        let _h = TempHome::new("oma-epipe");
+        let mut st = test_state();
+        st.voice_cmd = vec!["sh".into(), "-c".into(), "exec 0<&-; exec sleep 30".into()];
+        st.oma_spawn();
+        let pid = st.oma.child.as_ref().unwrap().id();
+        std::thread::sleep(Duration::from_millis(200)); // stdin закрыт
+        st.oma_send(&serde_json::json!({"do": "talk"}));
+        assert!(st.oma.stdin.is_none() && st.oma.state == "off");
+        assert!(gone(pid), "SIGKILL сразу, без срока");
     }
 
     #[test]
