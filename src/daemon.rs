@@ -35,6 +35,7 @@ enum Event {
     Config,
     Subscribe(UnixStream),
     Busy, // поток воспроизведения: начал или закончил говорить
+    Sound(String), // поток воспроизведения: пошёл звук фразы этой сессии
     Tick, // раз в секунду: Ома, граница тихого расписания, состав агентов
     Digest(Digest), // пересказ хода агента от воркеров digest
     Presence(String), // новый снимок сервиса присутствия
@@ -261,13 +262,13 @@ pub fn run() {
         });
     }
     {
-        // «говорит/молчит» из потока воспроизведения — в основной цикл
-        let (btx, brx) = mpsc::channel::<()>();
+        // «говорит/молчит» и «пошёл звук» из потока воспроизведения — в основной цикл
+        let (btx, brx) = mpsc::channel::<Option<String>>();
         *shared.changed.lock().unwrap() = Some(btx);
         let tx = tx.clone();
         std::thread::spawn(move || {
-            for () in brx {
-                let _ = tx.send(Event::Busy);
+            for s in brx {
+                let _ = tx.send(s.map_or(Event::Busy, Event::Sound));
             }
         });
     }
@@ -432,7 +433,11 @@ pub fn run() {
             Event::File(p) => st.on_file(&p),
             Event::Config => st.reload(),
             Event::Subscribe(s) => st.subscribe(s),
-            Event::Busy => st.on_busy(),
+            Event::Busy => {
+                st.broadcast();
+                st.after_speech();
+            }
+            Event::Sound(session) => st.on_sound(&session),
             Event::Digest(d) => st.on_digest(d),
             Event::Presence(t) => st.on_presence(&t),
             Event::Acted(d) => st.on_acted(d),
@@ -1068,7 +1073,7 @@ impl State {
             (if self.board.asked().is_some() { "question" } else { "news" }, parts.join(" "))
         };
         eprintln!("agent-speak: говорю ({kind}, {mode:?}): {}", text.chars().take(200).collect::<String>());
-        // «Ты тут?» — своей сессией: окно ответа открывается, когда пойдёт его звук (here_sounding)
+        // «Ты тут?» — своей сессией: окно ответа открывается, когда пойдёт его звук (on_sound)
         if self.enqueue(Agent::Claude, if kind == "here" { "here" } else { "news" }, &text, Kind::News) > 0 {
             self.oma_send(&serde_json::json!({"do": "warm"}));
             if kind != "here" {
@@ -1084,16 +1089,9 @@ impl State {
         self.oma_send(&listen_cmd("here", ARE_YOU_THERE, None, self.here_speakers, HERE_WAIT));
     }
 
-    /// Поток воспроизведения: начала или смолкла, пошёл звук другой сессии.
-    fn on_busy(&mut self) {
-        self.broadcast();
-        self.after_speech();
-        self.here_sounding();
-    }
-
-    /// Пошёл звук «Ты тут?»: окно ответа — HERE_WAIT с этого мига, и у службы, и у Омы.
-    fn here_sounding(&mut self) {
-        if self.here_ask == Some(HereAsk::Queued) && *self.shared.sounding.lock().unwrap() == "here" {
+    /// Пошёл звук фразы сессии session; у «Ты тут?» — окно ответа HERE_WAIT с этого мига, и у службы, и у Омы.
+    fn on_sound(&mut self, session: &str) {
+        if session == "here" && self.here_ask == Some(HereAsk::Queued) {
             self.here_ask = Some(HereAsk::Since((self.now_secs)()));
             self.listen_here();
         }
@@ -3706,18 +3704,15 @@ mod tests {
     }
 
     /// Сказанное отзвучало: хвост pw-cat доиграл, окно ответа открыто.
-    /// Очередь отзвучала: каждая фраза пошла в звук (sounding — её сессия, как у потока воспроизведения), затем тишина.
+    /// Очередь отзвучала: звук каждой фразы пошёл (Event::Sound её сессии, как от потока воспроизведения).
     fn sound(st: &mut State) -> Vec<String> {
         let items: Vec<Item> = {
             let mut q = st.shared.queue.lock().unwrap();
             std::iter::from_fn(|| q.pop()).collect()
         };
         for i in &items {
-            *st.shared.sounding.lock().unwrap() = i.session.clone();
-            st.on_busy();
+            st.on_sound(&i.session);
         }
-        st.shared.sounding.lock().unwrap().clear();
-        st.on_busy();
         items.into_iter().map(|i| i.text).collect()
     }
 

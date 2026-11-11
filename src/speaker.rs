@@ -16,7 +16,9 @@ pub struct Shared {
     pub voice: Mutex<(String, String)>, // (speaker, rate)
     pub busy: AtomicBool,
     pub current: Mutex<String>, // сессия звучащей фразы — для «Читаю: <проект>»
-    pub changed: Mutex<Option<std::sync::mpsc::Sender<()>>>, // смена «говорит/молчит» → основной цикл
+    /// Основному циклу: None — смена «говорит/молчит», Some(сессия) — пошёл звук её фразы (записан первый кусок;
+    /// busy загорается раньше — до синтеза, а он бывает долгим).
+    pub changed: Mutex<Option<std::sync::mpsc::Sender<Option<String>>>>,
     pub sink: Arc<Mutex<String>>, // узел PipeWire для pw-cat --target; пусто — вывод по умолчанию
     /// Когда кончается (кончился) звук последней речи — CLOCK_MONOTONIC, с (как time.monotonic() в Python); 0 — речи не было.
     /// «Смолкла» (busy гаснет) приходит раньше: pw-cat ещё доигрывает свой канал.
@@ -24,9 +26,6 @@ pub struct Shared {
     /// Номер реплики Омы, чья фраза у потока воспроизведения (синтез, запись); 0 — ничья. Ставится под замком очереди
     /// вместе с pop, снимается до «смолкла».
     pub voice_now: AtomicU64,
-    /// Чей звук уже идёт: сессия фразы, первый кусок которой записан в pw-cat (busy загорается раньше — до синтеза,
-    /// а он бывает долгим); пусто — смолкла. Смена — тем же сигналом changed.
-    pub sounding: Mutex<String>,
 }
 
 /// Синтезатор и приёмник звука — трейты только ради тестов с подделками.
@@ -81,19 +80,13 @@ impl Shared {
             sink: Arc::new(Mutex::new(String::new())),
             played: Mutex::new(0.0),
             voice_now: AtomicU64::new(0),
-            sounding: Mutex::new(String::new()),
         }
     }
 
-    /// Пошёл звук фразы сессии session; сообщает основному циклу, только если до этого звучала другая или никакая.
+    /// Пошёл звук фразы сессии session — основному циклу; сессия в самом сигнале: цикл, занятый дольше фразы, её не потеряет.
     fn sound(&self, session: &str) {
-        let mut s = self.sounding.lock().unwrap();
-        if *s != session {
-            *s = session.to_string();
-            drop(s);
-            if let Some(tx) = &*self.changed.lock().unwrap() {
-                let _ = tx.send(());
-            }
+        if let Some(tx) = &*self.changed.lock().unwrap() {
+            let _ = tx.send(Some(session.to_string()));
         }
     }
 
@@ -140,9 +133,6 @@ impl Shared {
     /// Some(сессия) — говорит, None — молчит. Сообщает основному циклу только об изменении.
     pub fn set_busy(&self, session: Option<&str>) {
         let was = self.busy.swap(session.is_some(), Ordering::SeqCst);
-        if session.is_none() {
-            self.sounding.lock().unwrap().clear();
-        }
         let mut cur = self.current.lock().unwrap();
         let changed = was != session.is_some() || session.is_some_and(|s| *cur != s);
         if let Some(s) = session {
@@ -151,7 +141,7 @@ impl Shared {
         drop(cur);
         if changed {
             if let Some(tx) = &*self.changed.lock().unwrap() {
-                let _ = tx.send(());
+                let _ = tx.send(None);
             }
         }
     }
@@ -379,25 +369,25 @@ mod tests {
         *shared.changed.lock().unwrap() = Some(tx);
         say(&shared);
         wait(|| count(&ev, "write") == 2);
-        rx.recv_timeout(Duration::from_secs(2)).unwrap(); // начал говорить
-        rx.recv_timeout(Duration::from_secs(3)).unwrap(); // замолчал
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), None); // начал говорить
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Some("s".into())); // пошёл звук
+        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), None); // замолчал
         assert!(!shared.busy.load(Ordering::SeqCst));
         assert_eq!(*shared.current.lock().unwrap(), "s");
     }
 
     #[test]
-    fn sound_start_is_reported_once_per_session() {
+    fn sound_start_is_reported_per_phrase() {
         // busy загорается до синтеза; звук идёт с первым записанным куском — по нему «Ты тут?» отсчитывает окно ответа
         let (shared, ev) = start(0, 0);
         let (tx, rx) = std::sync::mpsc::channel();
         *shared.changed.lock().unwrap() = Some(tx);
         shared.pause();
         say(&shared);
-        say(&shared); // вторая фраза той же сессии — звук уже идёт, второго сигнала нет
+        say(&shared);
         shared.resume();
         wait(|| count(&ev, "write") == 4 && !shared.busy.load(Ordering::SeqCst));
-        assert_eq!(rx.try_iter().count(), 3, "начала, звук пошёл, смолкла");
-        assert!(shared.sounding.lock().unwrap().is_empty(), "смолкла — ничей звук не идёт");
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [None, Some("s".into()), Some("s".into()), None], "начала, звук двух фраз, смолкла");
     }
 
     #[test]
