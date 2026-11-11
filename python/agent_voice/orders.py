@@ -25,6 +25,7 @@ ORDINARY = ("поручение", "передай", (), ())
 GO = ("переда", "отправ", "запуск", "запуст")
 NO = {"нет", "не"}
 NEGATIVE = ("отмен", "стоп", "отлож", "пропуст", "позже", "потом")  # начала отказа и в вариантах меню («Отложить»)
+PLAN = "Ждёт ответа на ExitPlanMode"  # вопрос агента — одобрение плана: пунктов в вызове нет, они только на экране
 
 
 def _has(ws, stems):
@@ -84,6 +85,11 @@ def chosen(ask, option):
         return ""
     items = parts[1].strip().split("; ")
     return items[option - 1] if option <= len(items) else ""
+
+
+def menu_item(out, option):
+    """Метка пункта option из вывода `agent-speak menu` («n. метка» построчно); нет такого — пусто."""
+    return next((l.split(". ", 1)[1] for l in out.splitlines() if l.startswith(f"{option}. ")), "")
 
 
 async def cli(*args, timeout=90):
@@ -147,16 +153,27 @@ class Orders:
             why = "голосом поручение уходит" if d is ORDINARY else f"это {d[0]}, такое уходит"
             return f"Не передано: {why} только после подтверждения. Ома уже спросила вслух: «{question}» Ответь ровно «[молчу]»."
         ok, out = await self.run(*args)
-        return ok_reply if ok else f"Не передано: {out}. Скажи пользователю коротко, что не вышло."
+        if not ok:
+            return f"Не передано: {out}. Скажи пользователю коротко, что не вышло."
+        return ok_reply + (f" Нажат пункт «{out}» — назови его пользователю." if out else "")  # tell: метка с экрана
 
     async def tell(self, entry, text, gist, option=0):
-        p, ask = entry["project"], asked(entry)
-        shown = f"Передам проекту {p}: " + (f"вариант {option} — {chosen(ask, option)}" if option else f"«{text}»")
-        return await self._order(("tell", entry["id"], str(option), text), self.gate(text, ask, option), self.n,
-                                 f"Передала проекту {p}: {gist}.",
+        n, p, ask = self.n, entry["project"], asked(entry)
+        d = self.gate(text, ask, option)  # до чтения экрана: по реплике хода, в котором мозг вызвал tell
+        item, question = chosen(ask, option), f"Передать проекту {p}: {gist}?"
+        expect = item.split(" — ")[0]  # метка варианта, как её видел мозг: tell жмёт, только если в вызове агента та же
+        if option and ask.startswith(PLAN):  # у плана метка пункта — только на экране: читаем до вопроса и называем её
+            ok, out = await self.run("menu", entry["id"])
+            item = expect = menu_item(out, option) if ok else ""
+            if not item:
+                return f"Не передано: {out if not ok else f'на экране нет пункта {option}'}. Скажи пользователю коротко, что не вышло."
+            question = f"Одобрить план проекта {p} — пункт «{item}»?"
+        shown = f"Передам проекту {p}: " + (f"вариант {option} — {item}" if option else f"«{text}»")
+        args = ("tell", entry["id"], str(option), text) + ((expect,) if option and expect else ())
+        return await self._order(args, d, n, f"Передала проекту {p}: {gist}.",
                                  f"Передано проекту {p}. Скажи пользователю одной фразой, кому и что: "
                                  f"«Передала проекту {p}: …» — смысл, не текст задания.",
-                                 f"Передать проекту {p}: {gist}?", "передай", shown)
+                                 question, "передай", shown)
 
     async def launch(self, path, task, gist, where="orca"):
         name = _name(path)
@@ -194,6 +211,6 @@ class Orders:
             return None
         self.pending = None
         ok, out = await self.run(*p["args"])
-        said = p["said"] if ok else f"Не вышло: {out}."
+        said = (p["said"] + (f" Нажала «{out}»." if out else "")) if ok else f"Не вышло: {out}."  # tell: метка с экрана
         self.note = f"(Пользователь подтвердил голосом, Ома сама: {said}) "
         return said

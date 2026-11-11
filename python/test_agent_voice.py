@@ -1609,6 +1609,7 @@ def test_confirm_rejects_negation():
         assert run(o.confirm(heard)) == "Хорошо, не передаю." and calls == [] and o.pending is None, heard
 
 
+PLAN_MENU = "1. Yes, and use auto mode\n2. Yes, manually approve edits\n3. Tell Claude what to change"
 PUSH_MENU = "Ждёт ответа на AskUserQuestion: Запушить сейчас? Варианты: Запушить — сразу на GitHub; Нет — потом"
 
 
@@ -1621,6 +1622,7 @@ def test_option_gated_by_chosen_variant():
     r = run(o.tell(agent, "", "не пушить", option=2))
     assert "да, передай" in r and "подтверждаю" not in r
     plan = dict(E[0], ask="Ждёт ответа на ExitPlanMode: 1. тесты 2. git push")
+    o, calls = _orders(out=PLAN_MENU)
     o.turn(True, "нет")
     assert "подтверждаю пуш" in run(o.tell(plan, "Нет", "одобрить", option=1)), "одобрение плана — без поблажки отказу"
 
@@ -2792,3 +2794,55 @@ def test_are_you_there_window_is_not_cut_by_echo_or_room_talk():
     assert cv2.tick() == [] and cv2.active
     clk2.t = 20.1
     assert ("ear", False) in cv2.tick() and not cv2.active, "молчит — окно кончается, когда сказала служба"
+
+
+
+# --- метка варианта: сверка в tell, пункт плана с экрана в вопросе, нажатый пункт — вслух ---
+PLAN = dict(E[0], ask="Ждёт ответа на ExitPlanMode: 1. тесты 2. отчёт")
+
+
+def _plan_orders(menu=(True, PLAN_MENU)):
+    calls, asked_ = [], []
+
+    async def fake(*args):
+        calls.append(args)
+        return menu if args[0] == "menu" else (True, "Yes, and use auto mode")
+    o = Orders(run=fake, clock=Clock())
+    o.ask = lambda question, order: (asked_.append(question), setattr(o, "pending", order))
+    return o, calls, asked_
+
+
+def test_option_label_goes_to_tell_for_check():
+    # tell жмёт цифру, только если метка варианта в вызове агента та же, что видел мозг: вопрос сменился — «не жму»
+    o, calls = _orders()
+    o.turn(False, "второй вариант")
+    run(o.tell(dict(E[0], ask=PUSH_MENU), "", "не пушить", option=2))
+    assert calls == [("tell", "s1", "2", "", "Нет")]
+
+
+def test_plan_approval_names_the_screen_option_before_asking():
+    # одобрение плана на экране сейчас — «Yes, and use auto mode», то есть включает и auto mode: Ома называет пункт
+    # до «да, передай», сверяет его в tell и говорит, что нажала
+    o, calls, asked_ = _plan_orders()
+    o.turn(True, "одобряю план")
+    run(o.tell(PLAN, "", "одобрить план", option=1))
+    assert asked_ == ["Одобрить план проекта omarchy-mail — пункт «Yes, and use auto mode»? Скажи: да, передай."]
+    assert calls == [("menu", "s1")], "до подтверждения — только чтение экрана"
+    assert run(o.confirm("Да, передай.")) == "Передала проекту omarchy-mail: одобрить план. Нажала «Yes, and use auto mode»."
+    assert calls[-1] == ("tell", "s1", "1", "", "Yes, and use auto mode")
+
+
+def test_plan_approval_without_menu_is_not_asked():
+    o, calls, asked_ = _plan_orders(menu=(False, "на экране агента нет меню"))
+    o.turn(True, "одобряю план")
+    r = run(o.tell(PLAN, "", "одобрить план", option=1))
+    assert r.startswith("Не передано: на экране агента нет меню") and asked_ == [] and o.pending is None
+    assert calls == [("menu", "s1")]
+
+
+def test_typed_plan_approval_reads_back_pressed_option():
+    o, calls, asked_ = _plan_orders()
+    o.turn(False, "одобряю план")
+    r = run(o.tell(PLAN, "", "одобрить план", option=1))
+    assert calls == [("menu", "s1"), ("tell", "s1", "1", "", "Yes, and use auto mode")] and asked_ == []
+    assert "Нажат пункт «Yes, and use auto mode»" in r
