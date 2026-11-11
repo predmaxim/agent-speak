@@ -1277,14 +1277,16 @@ impl State {
         let Some(f) = presence::parse_facts(text) else { return };
         let now = (self.now_secs)();
         // журнал: смена фактов и перерыв в снимках — по ним видно, почему Ома решила «он тут»
-        let idle = if f.idle_since == 0 { "ввод сейчас".to_string() } else { format!("ввода нет с {}", f.idle_since) };
-        let facts = format!("{idle}, блок {}, микрофон {}, камера {}, видео {}, наушники {:?}", f.locked, f.mic, f.camera, f.video, f.buds);
+        // момент простоя сдвигает каждый ввод — смена фактов без него, в журнале он есть
+        let rest = format!("блок {}, микрофон {}, камера {}, видео {}, наушники {:?}", f.locked, f.mic, f.camera, f.video, f.buds);
+        let facts = format!("{}, {rest}", if f.idle_since == 0 { "ввод сейчас" } else { "ввода нет" });
         let gap = f.at.saturating_sub(self.presence_at);
         if self.presence_at != 0 && gap > 45 {
             eprintln!("agent-speak: снимок присутствия: перерыв {gap} с");
         }
         if facts != self.presence_seen {
-            eprintln!("agent-speak: снимок присутствия: {facts}");
+            let idle = if f.idle_since == 0 { "ввод сейчас".to_string() } else { format!("ввода нет с {}", f.idle_since) };
+            eprintln!("agent-speak: снимок присутствия: {idle}, {rest}");
         }
         (self.presence_at, self.presence_seen) = (f.at, facts);
         let back = self.presence.apply(f, now);
@@ -3052,6 +3054,18 @@ mod tests {
 
     fn final_s(st: &mut State) {
         st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
+    }
+
+    #[test]
+    fn presence_journal_ignores_new_idle_moment() {
+        // каждый ввод сдвигает idle_since: в журнал — только смена самих фактов, а не каждый снимок
+        let (mut st, _now) = presence_state(1000);
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 900}));
+        let seen = st.presence_seen.clone();
+        snap(&mut st, serde_json::json!({"at": 1030, "idle_since": 1010}));
+        assert_eq!(st.presence_seen, seen);
+        snap(&mut st, serde_json::json!({"at": 1060, "idle_since": 0}));
+        assert_ne!(st.presence_seen, seen, "ввод сейчас — другой факт");
     }
 
     #[test]
