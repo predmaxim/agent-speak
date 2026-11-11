@@ -1875,6 +1875,13 @@ def test_tool_call_says_what_she_does():
     assert cv.tool("mcp__oma__presence") == []
 
 
+def test_order_filler_does_not_claim_delivery():
+    # слово звучит при вызове инструмента, до проверки «да, передай»: «Передаю агенту» обещало бы то, чего ещё нет
+    for name in ("mcp__oma__tell", "mcp__oma__launch"):
+        said = [a[1] for a in _thinking("передай агенту почты").tool(name) if a[0] == "say"]
+        assert said and not any(w in said[0] for w in ("Передаю", "Запускаю")), said
+
+
 def test_thinking_first_says_a_word():
     cv = _thinking("сложный вопрос")
     assert any(a[0] == "say" for a in cv.tool("thinking"))
