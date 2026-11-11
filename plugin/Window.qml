@@ -267,24 +267,12 @@ Item {
     })
   }
 
-  // The open chat's new lines. A new array resets the view to its top: a
-  // following chat goes back to its end; one the user scrolled up goes back
-  // to the line at its top, as far into it, and stays scrolled up.
+  // The open chat's new lines. The view's model (ScriptModel) only adds and
+  // changes lines, the view is not reset: one the user scrolled up stays
+  // there, a selection in it too; a following chat goes on to its end.
   function setMessages(list) {
-    var v = chatView
-    if (v.follow) {
-      root.messages = list
-      return root.scrollDown()
-    }
-    var i = v.indexAt(0, v.contentY)
-    if (i < 0) i = v.indexAt(0, v.contentY + v.spacing)   // the gap between two lines
-    var line = i >= 0 ? v.itemAtIndex(i) : null
-    var off = v.contentY - (line ? line.y : v.originY)    // no line: in the agent's feed above them
     root.messages = list
-    if (line) v.positionViewAtIndex(i, ListView.Beginning)
-    else v.positionViewAtBeginning()
-    v.contentY += off
-    v.returnToBounds()
+    if (chatView.follow) root.scrollDown()
   }
 
   // Hidden: no dropdown stays open into the next time.
@@ -701,7 +689,11 @@ Item {
               clip: true
               spacing: Style.space(14)
               boundsBehavior: Flickable.StopAtBounds
-              model: root.messages
+              // Lines have no id: compared by content, a new line is added, the rest stay.
+              model: ScriptModel {
+                values: root.messages
+                comparisonMode: ObjectComparison.Structure
+              }
               header: root.agent ? feedHeader : null
               footer: root.draft ? draftFooter : null
 
@@ -757,7 +749,11 @@ Item {
                 bottomPadding: Style.space(14)
 
                 Repeater {
-                  model: root.agent ? root.agent.feed : []
+                  // Every `agents` line brings the feed anew: by content, only its new lines are made.
+                  model: ScriptModel {
+                    values: root.agent ? root.agent.feed : []
+                    comparisonMode: ObjectComparison.Structure
+                  }
 
                   ChatLine {
                     required property var modelData
