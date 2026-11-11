@@ -1077,6 +1077,11 @@ impl State {
             Ok(mut c) => {
                 eprintln!("agent-speak: Ома запущена (pid {})", c.id());
                 self.oma.stdin = c.stdin.take();
+                // запись не ждёт: труба полна — Ома не читает команды (висит), и это её падение, а не стоп цикла демона
+                if let Some(fd) = self.oma.stdin.as_ref().map(std::os::fd::AsRawFd::as_raw_fd) {
+                    // SAFETY: флаги своего дескриптора; читающий конец трубы у Омы — другое открытие, его режим не меняется
+                    unsafe { libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK) };
+                }
                 self.oma.child = Some(c);
                 self.oma.failing = false;
                 self.oma.started = Some((self.clock)());
@@ -2387,6 +2392,23 @@ mod tests {
         *env.1.lock().unwrap() += Duration::from_secs(2);
         st.tick();
         assert!(st.oma.child.is_some());
+    }
+
+    #[test]
+    fn stuck_oma_does_not_block_the_loop() {
+        // Ома жива, но stdin не читает (зависший цикл): запись не держит цикл демона — Ома считается упавшей
+        let _h = TempHome::new("oma-stuck");
+        let mut st = test_state(); // voice_cmd — sleep 30: stdin не читается
+        st.oma_spawn();
+        use std::os::fd::AsRawFd;
+        let fd = st.oma.stdin.as_ref().unwrap().as_raw_fd();
+        // SAFETY: F_GETFL на своём дескрипторе
+        assert!(unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_NONBLOCK != 0, "блокирующий stdin — цикл встал бы");
+        let big = serde_json::json!({"do": "ask", "text": "я".repeat(40_000)});
+        for _ in 0..10 {
+            st.oma_send(&big); // ~800 КБ в трубу на 64 КиБ
+        }
+        assert!(st.oma.stdin.is_none() && st.oma.state == "off" && st.oma.retry_at.is_some());
     }
 
     /// В фокусе окно агента id, его последний ответ — text.
