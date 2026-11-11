@@ -29,7 +29,15 @@ pub fn numbers_to_words(s: &str) -> String {
         let mut int: String = chars[i..i + n].iter().collect();
         i += n;
         if n <= 3 && !int.starts_with('0') {
-            while matches!(chars.get(i), Some(' ' | ',')) && digits_at(i + 1) == 3 {
+            // запятая бывает и русской десятичной («1,155»): разряды — только «,000» или несколько групп («1,234,567»)
+            let group = |j: usize| matches!(chars.get(j), Some(' ' | ',')) && digits_at(j + 1) == 3;
+            let mut commas = false;
+            while group(i) {
+                let thousands = chars[i] == ' ' || commas || chars[i + 1..i + 4] == ['0'; 3] || chars.get(i + 4) == Some(&',') && group(i + 4);
+                if !thousands {
+                    break;
+                }
+                commas |= chars[i] == ',';
                 int.extend(&chars[i + 1..i + 4]);
                 i += 4;
             }
@@ -156,6 +164,10 @@ mod tests {
         );
         assert_eq!(numbers_to_words("1, 2, 3 и 1,8 с"), "один, два, три и один точка восемь с");
         assert_eq!(numbers_to_words("1 000,5 и 2024 100"), "одна тысяча точка пять и две тысячи двадцать четыре сто");
+        // запятая — и русская десятичная: разряды, только если группа «000» или групп несколько
+        assert_eq!(numbers_to_words("пик 1,155 и 384,000 ₽"), "пик один точка сто пятьдесят пять и триста восемьдесят четыре тысячи ₽");
+        assert_eq!(numbers_to_words("1,234,567"), "один миллион двести тридцать четыре тысячи пятьсот шестьдесят семь");
+        assert_eq!(numbers_to_words("1,155"), "один точка сто пятьдесят пять");
     }
 
     #[test]
