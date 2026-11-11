@@ -68,7 +68,6 @@ class Oma:
         self.events = asyncio.Queue() if events is None else events  # очередь диспетчера: итоги фоновых задач — через неё
         self.outbox = None  # последняя задача очереди к мозгу (to_brain)
         self.orders = orders or Orders()
-        self.orders.show = self._show  # ждущее подтверждения поручение — полным текстом в окне
         self.orders.ask = self._ask    # вопрос подтверждения — голосом через Conversation
         self.utter, self.sending = [], []  # звук фраз черновика; при выбросе черновика — к отправке
         self.pre = self.pre_sending = None  # (число фраз, задача) — реплика целиком, распознаваемая заранее
@@ -253,6 +252,7 @@ class Oma:
             acts = c.question(ev[1]) if ev[2]["n"] == c.turn_no else []
             if acts:
                 self.orders.pending = ev[2]
+                self._show(ev[2]["shown"])  # полный текст, который уйдёт, — в окно рядом с вопросом
             await self.act(acts)
         elif kind == "done":
             await self.act(c.done())

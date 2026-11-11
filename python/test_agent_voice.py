@@ -2273,11 +2273,9 @@ def test_long_first_sentence_starts_at_comma():
 
 def _ordinary(clk=None):
     o, calls = _orders(clk)
-    shown = []
-    o.show = shown.append
     o.turn(True, "скажи агенту, пусть делает обе оптимизации")
     r = run(o.tell(E[0], "Делай обе оптимизации", "делать обе оптимизации"))
-    return o, calls, shown, r
+    return o, calls, [o.pending["shown"]], r  # полный текст — в окно вместе с вопросом (Ома)
 
 
 def test_voice_order_waits_for_yes_and_reads_back():
@@ -2361,11 +2359,9 @@ def test_danger_ignores_plain_yes():
 def test_option_read_back_names_the_variant():
     agent = dict(E[0], ask=PUSH_MENU)
     o, calls = _orders()
-    shown = []
-    o.show = shown.append
     o.turn(True, "нет, потом")
     run(o.tell(agent, "", "не пушить", option=2))
-    assert shown == ["Передам проекту omarchy-mail: вариант 2 — Нет — потом"]
+    assert o.pending["shown"] == "Передам проекту omarchy-mail: вариант 2 — Нет — потом"
 
 
 def test_prompt_forbids_composing_from_fragments():
@@ -2373,11 +2369,30 @@ def test_prompt_forbids_composing_from_fragments():
     assert "из обрывков" in brain.OMA_PROMPT and "«Продолжай»" in brain.OMA_PROMPT
 
 
-def test_oma_shows_pending_order_in_window():
-    sent, emitted = [], []
-    clk, oma = _oma(sent, emitted)
-    oma.orders.show("Передам проекту x: «текст»")
-    assert any(e["line"].get("bubble", {}).get("text") == "Передам проекту x: «текст»" for e in emitted)
+def test_oma_shows_pending_order_in_window_with_its_question():
+    # полный текст поручения — в окно и чат, только когда вопрос подтверждения прозвучал: у прерванного хода его нет
+    for interrupted in (False, True):
+        sent, emitted = [], []
+        clk, oma = _oma(sent, emitted)
+        oma.orders, calls = _orders(clk)
+        oma.orders.ask = oma._ask
+
+        async def go():
+            await oma.command({"do": "talk"})
+            oma.conv.ask("пусть почта проверит тесты")
+            oma.orders.turn(True, "пусть почта проверит тесты", oma.conv.turn_no)
+            await oma.orders.tell(E[0], "Проверь тесты", "проверить тесты")
+            if interrupted:
+                oma.conv.ask("а что у спика")
+            await settle(oma)
+        run(go())
+        texts = [e["line"]["bubble"]["text"] for e in emitted if "bubble" in e["line"]]
+        shown = "Передам проекту omarchy-mail: «Проверь тесты»"
+        if interrupted:
+            assert shown not in texts and not any(shown in m["text"] for m in oma.history)
+        else:
+            assert texts.index(shown) < texts.index("Передать проекту omarchy-mail: проверить тесты? Скажи: да, передай.")
+            assert shown in oma.history[-1]["text"]
 
 
 def test_typed_reply_drops_pending_voice_order():

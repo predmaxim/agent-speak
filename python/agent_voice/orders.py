@@ -116,11 +116,11 @@ def _name(path):
 class Orders:
     """Передача агентам. turn() — перед каждой репликой мозгу: сказана ли она голосом и что именно."""
 
-    def __init__(self, run=cli, clock=time.monotonic, show=None, ask=None):
-        self.run, self.clock, self.show = run, clock, show  # show — полный текст ждущего поручения в окно
+    def __init__(self, run=cli, clock=time.monotonic, ask=None):
+        self.run, self.clock = run, clock
         self.ask = ask  # ask — вопрос подтверждения голосом: его говорит код, второй проход мозга лишь повторял его (1–5 с)
         self.voiced, self.heard = False, ""
-        self.pending = None  # поручение ждёт фразы: {args, what, verb, said, until, n}; ставит его Ома, когда вопрос прозвучал
+        self.pending = None  # поручение ждёт фразы: {args, what, verb, said, until, n, shown}; ставит его Ома, когда вопрос прозвучал
         self.tripped = False  # в этом ходе мозга уже было опасное: до следующей реплики не уходит ничего
         self.n = 0           # номер хода реплики (Conversation.turn_no): вопрос прерванного хода не звучит и не ждёт
         self.note = ""       # мозгу — в начало следующей реплики: подтверждённое Ома передала сама
@@ -147,11 +147,10 @@ class Orders:
             return "Не передано: поручение уже ждёт подтверждения, Ома о нём спросила. Ответь ровно «[молчу]» и больше ничего не передавай."
         if d:
             self.tripped = True
-            if self.show:
-                self.show(shown)
             question = f"{ask} Скажи: да, {verb}." if d is ORDINARY else f"{ask} Это {d[0]}. Скажи: подтверждаю {d[1]}."
-            if self.ask:  # ждать фразы поручение начнёт, когда вопрос прозвучит в своём ходе: ставит его Ома
-                self.ask(question, {"args": args, "what": d, "verb": verb, "said": said, "until": self.clock() + CONFIRM_WAIT, "n": n})
+            if self.ask:  # ждать фразы поручение начнёт, когда вопрос прозвучит в своём ходе: ставит его Ома; shown — его полный текст в окно
+                self.ask(question, {"args": args, "what": d, "verb": verb, "said": said, "until": self.clock() + CONFIRM_WAIT, "n": n,
+                                    "shown": shown})
             why = "голосом поручение уходит" if d is ORDINARY else f"это {d[0]}, такое уходит"
             return f"Не передано: {why} только после подтверждения. Ома уже спросила вслух: «{question}» Ответь ровно «[молчу]»."
         ok, out = await self.run(*args)
