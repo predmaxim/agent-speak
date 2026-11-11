@@ -4,6 +4,8 @@ After=graphical-session.target pipewire.service
 PartOf=graphical-session.target
 
 [Service]
+# готовность — после сокета (READY=1 в NOTIFY_SOCKET): `agent-speak on` ждёт её, плагин подключается сразу
+Type=notify
 ExecStart=%h/.local/bin/agent-speak daemon
 Restart=on-failure
 RestartSec=2

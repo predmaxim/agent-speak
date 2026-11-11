@@ -265,6 +265,8 @@ pub fn run() {
             }
         });
     }
+    // сокет есть — `agent-speak on` (systemctl enable --now) возвращается теперь, и плагин подключается сразу
+    notify_ready(std::env::var_os("NOTIFY_SOCKET"));
     {
         let tx = tx.clone();
         std::thread::spawn(move || {
@@ -563,6 +565,22 @@ fn bt_mode(mode: &str) -> bool {
         return false; // уже гарнитура (её включил пользователь — и вернёт он) или наушников нет
     }
     cli(mode, 20).inspect_err(|e| eprintln!("agent-speak: omarchy-bt-mode {mode}: {e}")).is_ok()
+}
+
+/// Готовность для systemd (`Type=notify`): датаграмма `READY=1` в `$NOTIFY_SOCKET` — документированный протокол
+/// sd_notify, «@» в начале — абстрактный сокет. Не под systemd (нет переменной) — ничего.
+fn notify_ready(socket: Option<std::ffi::OsString>) {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+    let Some(socket) = socket else { return };
+    let raw = socket.as_encoded_bytes();
+    let to = match raw.strip_prefix(b"@") {
+        Some(name) => SocketAddr::from_abstract_name(name),
+        None => SocketAddr::from_pathname(&socket),
+    };
+    if let Err(e) = to.and_then(|to| UnixDatagram::unbound()?.send_to_addr(b"READY=1", &to)) {
+        eprintln!("agent-speak: systemd не узнал о готовности ({}): {e}", socket.to_string_lossy());
+    }
 }
 
 /// Путь, которым запущен демон (argv[0]): относительный — от его папки (Ома работает в другой), имя без папки — по PATH.
@@ -2479,6 +2497,26 @@ mod tests {
     fn live(id: &str) -> Live {
         Live { id: id.to_string(), agent: "claude", pid: 1, title: format!("T-{id}"),
             cwd: format!("/p/{id}"), transcript: PathBuf::new(), state: crate::agents::State::Working, status_at: 0 }
+    }
+
+    #[test]
+    fn ready_reaches_systemd_notify_socket() {
+        use std::os::linux::net::SocketAddrExt;
+        let path = std::env::temp_dir().join(format!("agent-speak-notify-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let sock = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+        notify_ready(Some(path.clone().into()));
+        let mut buf = [0u8; 64];
+        let n = sock.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"READY=1");
+        let _ = std::fs::remove_file(&path);
+        // «@…» — абстрактный сокет
+        let name = format!("agent-speak-notify-test-{}", std::process::id());
+        let abs = std::os::unix::net::UnixDatagram::bind_addr(&std::os::unix::net::SocketAddr::from_abstract_name(&name).unwrap()).unwrap();
+        notify_ready(Some(format!("@{name}").into()));
+        let n = abs.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"READY=1");
+        notify_ready(None); // не под systemd — тихо
     }
 
     #[test]
