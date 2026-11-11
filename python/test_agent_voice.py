@@ -1033,8 +1033,35 @@ def test_ear_numbers_speech(monkeypatch):
         return got
 
     got = asyncio.run(run())
-    assert sorted(got, key=lambda x: (x[-1], x[0] != "start")) == [("start", 1), ("phrase", "слово", 1), ("start", 2), ("phrase", "слово", 2)]
+    starts = [g for g in got if g[0] == "start"]
+    assert [g[:2] for g in starts] == [("start", 1), ("start", 2)] and sorted(g for g in got if g[0] == "phrase") == [("phrase", "слово", 1), ("phrase", "слово", 2)]
     assert e.seq == 2
+
+
+def test_ear_dates_speech_onset_by_sound_not_by_reading(monkeypatch):
+    # начало речи — время по звуку: цикл событий встал (чтение отстало), а время начала речи то же; по нему судится эхо
+    import torch  # noqa: F401 — как в службе: torch уже загружен прогревом VAD, чтение с первого кадра идёт вовремя
+    from agent_voice.ear import Ear
+    probs = iter([0.9] * 10 + [0.1] * 22 + [0.9] * 10 + [0.1] * 10000)
+    vad = lambda x, rate: SimpleNamespace(item=lambda: next(probs))
+    src = ("import sys, time\nt = time.monotonic()\nfor i in range(80):\n    sys.stdout.buffer.write(bytes(1024)); sys.stdout.flush()\n"
+           "    time.sleep(max(0, t + (i + 1) * 0.032 - time.monotonic()))\ntime.sleep(60)")
+    out = asyncio.Queue()
+    e = Ear(out, Whisper(load=lambda: "m"), cmd=[sys.executable, "-c", src], vad_load=lambda: vad, mic=lambda: "")
+
+    async def go():
+        await e.start()
+        starts = []
+        while len(starts) < 2:
+            ev = await asyncio.wait_for(out.get(), 5)
+            if ev[0] == "start":
+                starts.append(ev)
+                if len(starts) == 1:
+                    time.sleep(1.4)  # чтение стоит, звук идёт: вторая речь начнётся, пока её не читают
+        await e.stop()
+        return starts
+    first, second = run(go())
+    assert abs(second[2] - first[2] - 32 * 512 / 16000) < 0.05  # 10 кадров речи и 22 тишины
 
 
 def test_ear_failed_recognition_still_emits_empty_phrase(monkeypatch):
@@ -1517,7 +1544,9 @@ def test_own_voice_through_speakers_is_not_barge_in():
     assert cv.speech_start(1) == [], "её же голос в микрофоне — не повод обрывать её"
     assert cv.phrase("Могу смотреть.", 1) == [] and cv.draft == ""
     acts = cv.audio(False)
-    clk.t += 1
+    clk.t += 0.5
+    cv.speech_start(2)  # хвост pw-cat ещё играет
+    clk.t += 0.5
     assert cv.phrase("и запускать новых", 2) in ([], [("drop_draft",)]), "хвост её голоса после конца речи — тоже эхо"
     clk.t += SEND_PAUSE
     assert not any(a[0] == "send" for a in cv.tick())
@@ -1568,6 +1597,53 @@ def test_echo_judged_by_phrase_onset_not_by_transcript_time():
     clk.t += 4
     cv.phrase("...со временной суда без пароля. Агент уберет его в конце. А что там с директусом?", 1)
     assert cv.draft == "А что там с директусом?"
+
+
+ASK = "Передать проекту почта: запустить тесты? Скажи: да, передай."
+
+
+def test_confirmation_after_her_question_is_not_echo():
+    # 2026-11-11: через динамики «Да, передай» в первые 3 с после её «…Скажи: да, передай» выбрасывалось как эхо —
+    # окно эха считалось от распознавания; теперь — от начала фразы против конца её звука (хвост pw-cat, TAIL)
+    from agent_voice.conversation import TAIL
+    for answer in ("Да, передай.", "Подтверждаю пуш."):
+        clk, cv = _speaking_through_speakers(ASK + " Это пуш. Скажи: подтверждаю пуш.")
+        cv.audio(False)
+        clk.t += TAIL + 0.2  # она смолкла, хвост доигран, пользователь заговорил
+        cv.speech_start(5)
+        clk.t += 1.5  # распознано позже
+        cv.phrase(answer, 5)
+        assert cv.draft == answer
+        clk.t += SEND_PAUSE
+        assert ("send", answer, "") in cv.tick()
+
+
+def test_echo_of_her_question_still_dropped():
+    # её же голос, начатый, пока она звучит (и в хвосте pw-cat), — эхо, как прежде: подтверждением быть не может
+    clk, cv = _speaking_through_speakers(ASK)
+    cv.speech_start(5)
+    cv.audio(False)
+    clk.t += 2
+    assert cv.phrase("Скажи: да, передай.", 5) == [] and cv.draft == ""
+    cv.speech_start(6, at=clk.t - 1.5)  # началась в хвосте, а распознана позже
+    assert cv.phrase("Да, передай.", 6) == [] and cv.draft == ""
+    clk.t += SEND_PAUSE
+    assert not any(a[0] == "send" for a in cv.tick())
+
+
+def test_words_while_thinking_through_speakers_interrupt():
+    # 2026-11-11: через динамики фраза, начатая в хвосте её слова на инструменте, пока мозг думает, пропадала
+    clk = Clock()
+    cv = Conversation(clock=clk)
+    cv.echo = True
+    cv.talk(); cv.speech_start(1); cv.phrase("как дела у агентов", 1)
+    clk.t += SEND_PAUSE; cv.tick()
+    cv.tool("mcp__oma__agent_feed"); cv.audio(True); cv.audio(False)
+    assert cv.state == "thinking"
+    clk.t += 0.5
+    cv.speech_start(2)
+    acts = cv.phrase("Стоп, лучше скажи про тесты", 2)
+    assert ("interrupt",) in acts and cv.draft == "Стоп, лучше скажи про тесты" and cv.state == "listening"
 
 
 def test_strip_echo_table():

@@ -28,7 +28,8 @@ ANSWER_WORDS = {"да", "ага", "угу", "ок", "окей", "тут", "я", 
 ANSWER_MAX = 8  # слов: ответ Оме короткий; длинное — разговор в комнате, в нём «да» и «нет» есть всегда
 ANSWER_STEMS = ("здес", "слуша", "говор", "рассказ", "давай", "нов", "потом", "позж", "минут", "секунд", "сейчас",
                 "подожд", "занят", "отбо", "отмен", "стоп", "ома", "хорош", "ладн")
-ECHO_WINDOW = 3     # с после её речи: хвост её голоса из динамиков ещё в микрофоне
+# Хвост её звука после «смолкла» демона (speaker::TAIL): pw-cat доигрывает буфер ~0,7 с — её голос ещё в динамиках
+TAIL = 1.0
 ECHO_SHARE = 0.6    # доля слов фразы из её же речи, с которой фраза — эхо
 ECHO_RUN = 3        # слов её речи по порядку в начале фразы, с которых это начало — эхо
 # Что она делает, пока мозг занят инструментом или раздумьем: тишина хуже повтора; presence — мгновенный, без слова
@@ -116,7 +117,7 @@ class Conversation:
         self.mic = False       # микрофон занят другим (voxtype и т. п.)
         self.chunker = Chunker()
         self.started = self.heard = self.cut = 0  # номера речи: начата / пришла / отменена до
-        self.echo_n = 0        # номер речи, начатой под её голос: эхо судится по началу фразы, а не по её распознаванию
+        self.echo_n = 0        # номер речи, начатой, пока звучал её голос: эхо судится по началу фразы, а не по распознаванию
         self.held = 0          # номер речи, начатой, пока она думала или говорила: обрывать ли — решает распознанный текст
         self.suspended = False # её речь на паузе по перебиву: перебил не ей («[молчу]», кашель) — продолжит, иначе выбросить
         self.head = ""         # начало хода до первого знака; ход с «[» — метка «[молчу]»/«[конец]», решится в done; None — решено
@@ -268,17 +269,21 @@ class Conversation:
             return []
         return self._stop_turn() + self._drop() + self._send(t, voiced=False)
 
-    def _echoing(self):
-        """Её голос сейчас (или только что) звучит из динамиков, и слух его слышит."""
-        recent = self.spoke_at is not None and self.clock() - self.spoke_at < ECHO_WINDOW
-        return self.echo and bool(self.said) and (self.audio_busy or self.state == "speaking" or recent)
+    def _echoing(self, at):
+        """В момент at её голос звучал из динамиков, и слух его слышал: она говорит или хвост pw-cat (TAIL) после
+        «смолкла» ещё не доигран. Речь, начатая после конца её звука, — не эхо, даже если это её же слова
+        («Скажи: да, передай» → «Да, передай»)."""
+        playing = self.audio_busy or self.state == "speaking" or (self.spoke_at is not None and at < self.spoke_at + TAIL)
+        return self.echo and bool(self.said) and playing
 
-    def speech_start(self, n):
+    def speech_start(self, n, at=None):
+        """Начало речи n; at — когда она началась (слух меряет по звуку), без него — сейчас."""
         if not self.active or self.state in ("idle", "paused"):
             return []
-        if self._echoing():
+        at = self.clock() if at is None else at
+        if self._echoing(at):
             self.echo_n = n
-        if self._echoing() and (self.audio_busy or self.state == "speaking"):
+        if self._echoing(at) and (self.audio_busy or self.state == "speaking"):
             self.started = n  # её голос или перебив — решит распознанный текст: обрывать её по эху нельзя
             return []
         if self.window and not self.window["first"]:
@@ -302,13 +307,13 @@ class Conversation:
         if self.window and not self.window["first"]:
             return []  # на окно уже ответили: речь в комнате — не Оме
         pre = []
-        if self._echoing() or n == self.echo_n:  # пользователь договаривал дольше ECHO_WINDOW — начало всё равно её
+        if n == self.echo_n:  # началась под её голос — начало может быть её, когда бы фразу ни распознали
             if is_echo(text, self.said):
                 return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else []
-            text = strip_echo(text, self.said, tail=n == self.echo_n)
+            text = strip_echo(text, self.said, tail=True)
             if self.state == "speaking" and is_barge(text):
                 pre = self._barge()  # не её слова — перебивает пользователь
-        elif n == self.held and self.state in ("thinking", "speaking"):
+        if n == self.held and self.state in ("thinking", "speaking"):  # и под эхом: пока она думает, слова её обрывают
             if not is_barge(text):  # кашель, «угу» — она продолжает
                 acts = self._resume() if self.suspended else []
                 return acts + ([("draft", self.draft, self.hearing)] if self.draft or self.hearing else [("drop_draft",)])

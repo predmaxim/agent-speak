@@ -13,13 +13,10 @@ import traceback
 
 from . import link
 from .context import foreign_capture, locked, mic_outputs, on_ac
-from .conversation import Conversation
+from .conversation import TAIL, Conversation
 from .orders import Orders
 from .turn import SmartTurn
 
-
-# Хвост звука после конца речи демона — speaker::TAIL: pw-cat ещё доигрывает свой буфер.
-TAIL = 1.0
 
 def cuda_env():
     """CUDA-библиотеки из pip (nvidia-*) видны ctranslate2 только через LD_LIBRARY_PATH при старте."""
@@ -170,7 +167,7 @@ class Oma:
     async def event(self, ev):
         kind, c = ev[0], self.conv
         if kind == "start":
-            await self.act(c.speech_start(ev[1]))
+            await self.act(c.speech_start(*ev[1:]))
         elif kind == "phrase":
             pcm, before = getattr(self.ear, "audio", {}).pop(ev[2], b""), c.draft
             done = await self._turn_done(pcm) if pcm and ev[1].strip() else None
@@ -179,7 +176,7 @@ class Oma:
                 self.utter.append(pcm if c.draft.endswith(ev[1].strip()) else None)
                 self._prehear()
             if ev[1].strip():  # без текста: в нём бывает чужой разговор в комнате
-                verdict = "принята" if c.draft != before else ("эхо" if c._echoing() or ev[2] == c.echo_n else "не принята")
+                verdict = "принята" if c.draft != before else ("эхо" if ev[2] == c.echo_n else "не принята")
                 print(f"agent_voice: слух: фраза {len(ev[1].split())} сл., {verdict}", file=sys.stderr, flush=True)
             await self.act(acts)
         elif kind == "tick":
