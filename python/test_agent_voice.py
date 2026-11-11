@@ -703,6 +703,30 @@ def test_brain_reconnects_after_failed_connect_and_dead_stream(monkeypatch, tmp_
     asyncio.run(run())
 
 
+def test_brain_open_closes_old_claude_in_background(monkeypatch, tmp_path):
+    # переход в другой чат не ждёт выхода прежнего claude (SDK ждёт до 5 с); новый подключится после его выхода
+    brain, made, _ = _fake_sdk(monkeypatch, tmp_path)
+
+    async def run():
+        b = brain.Brain(asyncio.Queue(), lambda: E)
+        await b.send("раз")
+        gate = asyncio.Event()
+
+        async def slow_exit():
+            await gate.wait()
+        made[0].disconnect = slow_exit
+        await asyncio.wait_for(b.open("agent:s1"), 0.5)
+        warm = asyncio.create_task(b.warm())
+        await asyncio.sleep(0.05)
+        assert len(made) == 1, "новый claude — после выхода старого: в сессию пишет один"
+        gate.set()
+        await warm
+        assert len(made) == 2
+        await b.close()
+
+    asyncio.run(run())
+
+
 def test_brain_interrupt_only_while_turn_in_flight(monkeypatch, tmp_path):
     brain, made, _ = _fake_sdk(monkeypatch, tmp_path)
 
@@ -750,6 +774,17 @@ def _oma(sent, emitted):
     return clk, oma
 
 
+async def settle(oma):
+    """Очередь к мозгу и её итоги в очереди событий — до конца, как диспетчер."""
+    while True:
+        if oma.outbox and not oma.outbox.done():
+            await asyncio.wait([oma.outbox])
+        elif not oma.events.empty():
+            await oma.event(oma.events.get_nowait())
+        else:
+            return
+
+
 def test_oma_routes_talk_draft_tick_and_quiet_answer():
     sent, emitted = [], []
     clk, oma = _oma(sent, emitted)
@@ -763,6 +798,7 @@ def test_oma_routes_talk_draft_tick_and_quiet_answer():
         await oma.event(("phrase", "как дела у почты", 1))
         clk.t += SEND_PAUSE
         await oma.event(("tick",))
+        await settle(oma)
         assert oma.brain.texts == ["как дела у почты"] and oma.ear.open
         b = [e["line"]["bubble"] for e in emitted if "bubble" in e["line"]]
         assert b[-2]["drop"] and b[-1]["kind"] == "me" and b[-1]["text"] == "как дела у почты"
@@ -816,10 +852,80 @@ def test_oma_listen_with_key_switches_to_asking_agents_chat(monkeypatch):
 
     async def run():
         await oma.command({"do": "listen", "secs": 5, "key": "agent:s"})
-        assert oma.brain.key == "agent:s" and oma.ear.open  # ответ на вопрос уйдёт в чат спросившего
+        assert oma.ear.open
+        await settle(oma)
+        assert oma.brain.key == "agent:s"  # ответ на вопрос уйдёт в чат спросившего
         assert {"chat": {"key": "agent:s", "messages": []}} in [e["line"] for e in emitted]
 
     asyncio.run(run())
+
+
+def test_esc_works_while_brain_send_hangs():
+    # 2026-11-11: act("send") ждал brain.send (подъём claude, повисший процесс) и доставку поручения — Esc, клик и
+    # «стоп» стояли в очереди; теперь мозг — в своей очереди, перебив уходит после отправки и обрывает ход
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    gate, calls = asyncio.Event(), []
+
+    async def send(t):
+        calls.append(("send", t))
+        await gate.wait()
+
+    async def interrupt():
+        calls.append(("interrupt",))
+    oma.brain.send, oma.brain.interrupt = send, interrupt
+
+    async def go():
+        await oma.command({"do": "talk"})
+        await oma.command({"do": "ask", "text": "как дела у почты"})
+        await oma.command({"do": "ask", "text": "и у агента спика"})
+        await asyncio.sleep(0.01)
+        await asyncio.wait_for(oma.command({"do": "cancel"}), 0.5)  # Esc не ждёт мозг
+        assert oma.conv.state == "listening" and not oma.conv.turn
+        assert calls == [("send", "как дела у почты")], "реплики — по одной, по порядку"
+        gate.set()
+        await settle(oma)
+    run(go())
+    assert calls == [("send", "как дела у почты"), ("interrupt",), ("send", "и у агента спика"), ("interrupt",)]
+
+
+def test_leaving_agent_chat_opens_ear_first():
+    # клик по орбу из чата агента: слух — сразу, переход в общий чат (и выход прежнего claude) — потом
+    sent, emitted, order = [], [], []
+    clk, oma = _oma(sent, emitted)
+    oma.brain.key = "agent:s1"
+
+    async def start():
+        order.append("слух")
+        oma.ear.open = True
+
+    async def open_(k):
+        order.append(f"чат {k}")
+        oma.brain.key = k
+        return []
+    oma.ear.start, oma.brain.open = start, open_
+
+    async def go():
+        await oma.command({"do": "talk"})
+        await settle(oma)
+    run(go())
+    assert order == ["слух", "чат new"] and oma.brain.warmed
+
+
+def test_answer_window_for_agent_warms_brain(monkeypatch):
+    # окно ответа на вопрос агента: claude поднимается, пока окно слушает; окно новостей его не будит
+    import agent_voice.__main__ as m
+    monkeypatch.setattr(m, "locked", lambda: False)
+    monkeypatch.setattr(m, "mic_outputs", lambda: [])
+    for key, warmed in (("agent:s", True), (None, False)):
+        sent, emitted = [], []
+        clk, oma = _oma(sent, emitted)
+
+        async def go():
+            await oma.command({"do": "listen", "secs": 5, **({"key": key} if key else {})})
+            await settle(oma)
+        run(go())
+        assert oma.brain.warmed is warmed, key
 
 
 def test_oma_listen_command_skips_when_foreign_mic_capture(monkeypatch):
@@ -900,6 +1006,7 @@ def test_oma_stale_chat_line_lands_in_new_chat_and_done_syncs():
         await oma.command({"do": "open", "key": "chat:old"})
         assert lines[-1] == {"chat": {"key": "chat:old", "messages": [{"role": "me", "text": "давно"}]}}
         await oma.command({"do": "ask", "text": "снова привет", "key": "chat:old"})
+        await settle(oma)
         await oma.event(oma.brain.pending)
         assert lines[-1] == {"chat": {"key": "new", "was": "chat:old", "messages": [me]}}
         await oma.event(("delta", "Привет, чем помочь сегодня? "))
@@ -907,6 +1014,7 @@ def test_oma_stale_chat_line_lands_in_new_chat_and_done_syncs():
         assert lines[-2:] == [{"chat": {"key": "new", "messages": [me, {"role": "oma", "text": "Привет, чем помочь сегодня?"}]}},
                               {"chats": [{"key": "chat:old"}]}]
         await oma.command({"do": "ask", "text": "и ещё", "key": "new"})
+        await settle(oma)
         assert oma.brain.key == "chat:sid" and len(oma.history) == 3 and oma.history[-1] == {"role": "me", "text": "и ещё"}
 
     asyncio.run(run())
@@ -964,6 +1072,7 @@ def test_general_chat_for_talk_and_window():
 
     async def go():
         await oma.command({"do": "talk"})
+        await settle(oma)
         assert opened == ["chat:g"] and lines[0]["chat"]["was"] == "*", "окно идёт за разговором"
         await oma.command({"do": "talk"})  # слушала — клик закрывает разговор, чат тот же
         assert opened == ["chat:g"]
@@ -972,6 +1081,7 @@ def test_general_chat_for_talk_and_window():
         assert opened == ["chat:g"] and lines[-1]["chat"] == {"key": "new", "was": "general", "messages": []}
         before = len(lines)
         await oma.command({"do": "ask", "key": "general", "text": "привет"})  # написали в нём — мозг туда
+        await settle(oma)
         assert opened[-1] == "new" and (lines[before]["chat"]["key"], lines[before]["chat"]["was"]) == ("new", "general")
     asyncio.run(go())
 
@@ -1372,13 +1482,18 @@ def _voice(oma, clk, text, n):
         await oma.event(("phrase", text, n))
         clk.t += SEND_PAUSE
         await oma.event(("tick",))
+        await settle(oma)
     run(go())
 
 
 def test_typed_order_needs_no_confirmation():
     sent, emitted = [], []
     clk, oma = _oma(sent, emitted)
-    run(oma.command({"do": "ask", "text": "удали старую ветку"}))
+
+    async def ask():
+        await oma.command({"do": "ask", "text": "удали старую ветку"})
+        await settle(oma)
+    run(ask())
     assert oma.orders.voiced is False and oma.orders.heard == "удали старую ветку"
     run(oma.command({"do": "talk"}))
     _voice(oma, clk, "удали старую ветку", 1)
@@ -1523,6 +1638,7 @@ def test_whole_utterance_retranscribed_at_send():
             await oma.event(("phrase", text, n))
         clk.t += SEND_PAUSE
         await oma.event(("tick",))
+        await settle(oma)
     run(go())
     assert heard == [b"ab"] and oma.brain.texts == ["Какая погода в Москве?"]
     me = [e["line"]["bubble"]["text"] for e in emitted if e["line"].get("bubble", {}).get("kind") == "me"]
@@ -1544,6 +1660,7 @@ def test_single_phrase_not_retranscribed_and_dropped_audio_forgotten():
         await oma.event(("phrase", "который час", 2))
         clk.t += SEND_PAUSE
         await oma.event(("tick",))
+        await settle(oma)
     run(go())
     assert heard == [] and oma.brain.texts == ["который час"] and oma.ear.audio == {}
 
@@ -1700,6 +1817,7 @@ def test_echo_cut_phrase_skips_whole_retranscription():
         await oma.event(("phrase", "и почту проверь", 2))
         clk.t += SEND_PAUSE
         await oma.event(("tick",))
+        await settle(oma)
     run(go())
     assert heard == [] and oma.brain.texts[-1] == "А что там с директусом? и почту проверь"
 
@@ -1938,6 +2056,7 @@ def test_voiced_send_chimes_first():
         await oma.event(("phrase", "как дела у агентов", 1))
         clk.t += SEND_PAUSE
         await oma.event(("tick",))
+        await settle(oma)
     run(go())
     assert {"cmd": "chime"} in sent and oma.brain.texts
 
@@ -1956,6 +2075,7 @@ def test_typed_or_quiet_send_does_not_chime():
         await oma.event(("phrase", "как дела у агентов", 1))
         clk.t += SEND_PAUSE
         await oma.event(("tick",))
+        await settle(oma)
     run(go())
     assert {"cmd": "chime"} not in sent
 
@@ -2166,6 +2286,7 @@ def test_oma_asks_turn_end_about_whole_utterance():
         for n, (text, pcm) in enumerate((("какая погода", b"aa"), ("в москве", b"bb")), 1):
             oma.ear.audio[n] = pcm
             await oma.event(("phrase", text, n))
+        await settle(oma)
     run(go())
     assert seen == [b"aa", b"aabb"] and oma.brain.texts == ["Какая погода в Москве?"], "договорил — сразу, без тика"
 
@@ -2207,9 +2328,11 @@ def test_turn_end_failure_falls_back_to_pause():
         await oma.event(("start", 1))
         await oma.event(("phrase", "как дела", 1))
         await oma.event(("tick",))
+        await settle(oma)
         assert oma.brain.texts == []
         clk.t += SEND_PAUSE
         await oma.event(("tick",))
+        await settle(oma)
     run(go())
     assert oma.brain.texts == ["как дела"]
 
@@ -2259,6 +2382,7 @@ def test_whole_utterance_heard_ahead_while_pausing():
         assert heard == [b"ab", b"abc"], "распознаётся по мере роста реплики"
         clk.t += SEND_PAUSE
         await oma.event(("tick",))
+        await settle(oma)
     run(go())
     assert heard == [b"ab", b"abc"] and oma.brain.texts == ["Какая погода в Москве?"]
 

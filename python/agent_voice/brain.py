@@ -247,6 +247,7 @@ class Brain:
         self.key, self.sid, self.client, self.reader = "new", None, None, None
         self.st, self.used, self.turns = {"skip": False}, time.time(), 0  # turns: запросов без ResultMessage
         self.lock = asyncio.Lock()  # warm и send не поднимают claude дважды
+        self.closing = set()  # прежние claude, закрываемые в фоне
 
     def chats(self) -> list:
         return general_chats(list_sessions(OMA_DIR))
@@ -265,7 +266,7 @@ class Brain:
 
     async def open(self, key: str) -> list:
         """Перейти к чату key и вернуть его историю. claude не запускается: подключится первый send."""
-        await self.close()
+        self._detach()
         self.key, self.sid, self.used = key, self._sid(key), time.time()
         return messages_of(get_session_messages(self.sid, directory=OMA_DIR)) if self.sid else []
 
@@ -332,10 +333,23 @@ class Brain:
             self.st["skip"] = True
             await self.client.interrupt()
 
-    async def close(self):
-        if self.reader:
-            self.reader.cancel()
-        if self.client:
-            with contextlib.suppress(Exception):  # клиент уже мёртв — выбрасываем его в любом случае
-                await self.client.disconnect()
+    def _detach(self):
+        """Отцепить клиента и закрыть в фоне: переход в другой чат не ждёт выхода claude (SDK ждёт его до 5 с)."""
+        if self.client or self.reader:
+            t = asyncio.create_task(self._shut(self.client, self.reader))
+            self.closing.add(t)
+            t.add_done_callback(self.closing.discard)
         self.client = self.reader = None
+
+    @staticmethod
+    async def _shut(client, reader):
+        if reader:
+            reader.cancel()
+        if client:
+            with contextlib.suppress(Exception):  # клиент уже мёртв — выбрасываем его в любом случае
+                await client.disconnect()
+
+    async def close(self):
+        """Закрыть клиента и дождаться выхода всех прежних claude: новый не пишет в сессию, пока старый её дописывает."""
+        self._detach()
+        await asyncio.gather(*self.closing, return_exceptions=True)

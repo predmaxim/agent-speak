@@ -48,8 +48,11 @@ def kill_children():
 class Oma:
     """Связывает разговор, слух, мозг и демона: команды и события → действия Conversation → исполнение."""
 
-    def __init__(self, conv, ear, brain, whisper, send=link.send, notify=notify, clock=time.monotonic, orders=None, turn_end=None):
+    def __init__(self, conv, ear, brain, whisper, send=link.send, notify=notify, clock=time.monotonic, orders=None, turn_end=None,
+                 events=None):
         self.conv, self.ear, self.brain, self.whisper, self.send = conv, ear, brain, whisper, send
+        self.events = asyncio.Queue() if events is None else events  # очередь диспетчера: итоги фоновых задач — через неё
+        self.outbox = None  # последняя задача очереди к мозгу (to_brain)
         self.orders = orders or Orders()
         self.orders.show = self._show  # ждущее подтверждения поручение — полным текстом в окне
         self.utter, self.sending = [], []  # звук фраз черновика; при выбросе черновика — к отправке
@@ -74,6 +77,18 @@ class Oma:
         t = asyncio.create_task(coro)
         self.tasks.add(t)
         t.add_done_callback(self._bg_done)
+        return t
+
+    def to_brain(self, fn, *args):
+        """В очередь к мозгу: переход в чат, прогрев, реплика с доставкой поручения и перебив идут по порядку в своей
+        задаче — диспетчер их не ждёт: Esc, клик и «стоп» работают, пока claude поднимается или поручение уходит."""
+        prev = self.outbox
+
+        async def run():
+            if prev and not prev.done():
+                await asyncio.wait([prev])  # упавшая предыдущая очередь не держит
+            await fn(*args)
+        self.outbox = self.bg(run())
 
     def _bg_done(self, t):
         self.tasks.discard(t)
@@ -111,11 +126,12 @@ class Oma:
         do, c = cmd.get("do"), self.conv
         if do == "talk":
             self.ear.speakers = None  # разговор по клику — вход по тому, куда она говорит
-            if c.state == "idle" and self.brain.key.startswith("agent:"):  # с Омой-помощником — в общем чате
+            leave = c.state == "idle" and self.brain.key.startswith("agent:")  # с Омой-помощником — в общем чате
+            await self.act(c.talk())  # слух — сразу: смена чата и выход прежнего claude начало фразы не задерживают
+            if leave:
                 await self.switch(await self.general(), was="*")
-            await self.act(c.talk())
             if c.active:
-                self.bg(self.brain.warm())  # claude поднимается, пока пользователь говорит
+                self.to_brain(self.brain.warm)  # claude поднимается, пока пользователь говорит
         elif do == "cancel":
             await self.act(c.cancel())
         elif do == "warm":  # демон прогревает слух до окна ответа: whisper не грузится при открытом микрофоне
@@ -125,9 +141,12 @@ class Oma:
             if not await asyncio.to_thread(locked) and not foreign_capture(await asyncio.to_thread(mic_outputs), set()):
                 self.ear.speakers = True if cmd.get("speakers") else None  # «Ты тут?» в динамики — и слушать ноутбуком
                 key = cmd.get("key")  # окно после вопроса — ответ в чат спросившего агента
-                if key and key != self.brain.key and c.state == "idle":
-                    await self.switch(key)
+                move = key and key != self.brain.key and c.state == "idle"
                 await self.act(c.listen(float(cmd.get("secs", 5)), cmd.get("kind", "news"), cmd.get("said", "")))
+                if move:
+                    await self.switch(key)
+                if key and c.active:
+                    self.to_brain(self.brain.warm)  # ответ агенту: claude поднимается, пока окно слушает
         elif do == "chats":
             self.emit({"chats": await asyncio.to_thread(self.brain.chats)})
         elif do == "open" and not cmd.get("key"):  # окно спрашивает текущий чат: без переключения, was "*" — принять его ключ
@@ -153,6 +172,9 @@ class Oma:
         """Перейти в чат key; was — ключ, на который окно ждёт ответа ("*" — любой)."""
         if self.conv.turn:  # ход прошлого чата обрываем, пока его клиент жив
             await self.act(self.conv.cancel())
+        self.to_brain(self._open, key, was)
+
+    async def _open(self, key, was):
         self.history = []  # open упал — чужая история не останется под новым ключом
         self.history = await self.brain.open(key)
         self.emit({"chat": {"key": key, **({"was": was} if was else {}), "messages": self.history}})
@@ -246,10 +268,8 @@ class Oma:
         from .ear import transcribe
         return await asyncio.to_thread(transcribe, await self.whisper.get(), pcm)
 
-    async def _whole(self, text):
+    async def _whole(self, text, parts, pre):
         """Текст реплики, сказанной голосом: несколько фраз — распознать звук целиком; не вышло — как в черновике."""
-        parts, self.sending = self.sending, []
-        pre, self.pre_sending = self.pre_sending, None
         if len(parts) < 2 or None in parts:  # None — фраза с её голосом в начале: целиком эхо вернулось бы
             return text
         try:
@@ -261,8 +281,30 @@ class Oma:
             print(f"agent_voice: реплика целиком распознана иначе, чем по кускам ({len(whole)} и {len(text)} знаков)", file=sys.stderr, flush=True)
         return whole or text
 
+    async def _deliver(self, text, ctx, voiced, parts, pre):
+        """Реплика мозгу или подтверждение поручения, которое передаёт код, — в очереди к мозгу."""
+        key, failed = self.brain.key, None
+        text = await self._whole(text, parts, pre) if voiced else text
+        self.orders.turn(voiced, text)
+        said = await self.orders.confirm(text)  # подтверждение сверяет код, мозг не зовём; другая реплика снимает ожидание
+        if said is None:
+            note, self.orders.note = self.orders.note, ""
+            try:
+                await self.brain.send(note + ctx + text)
+            except Exception as e:
+                failed = e
+        if key.startswith("chat:") and self.brain.key == "new":  # устаревший чат сменился новым: реплика — первая в нём
+            self.history = []
+        self.n += 1
+        self._chat("me", text)
+        self.emit({"bubble": {"id": f"me-{os.getpid()}-{self.n}", "who": "Ты", "text": text, "kind": "me", "append": False}})
+        if failed:  # ход уже в «thinking», done() вернёт в покой
+            self.events.put_nowait(("error", f"Claude: {failed}"))
+        if said is not None:  # фраза кода вместо ответа мозга — как его ход
+            self.events.put_nowait(("delta", said))
+            self.events.put_nowait(("done", None))
+
     async def act(self, acts):
-        failed = said = None
         for a in acts:
             k = a[0]
             if k == "ear":
@@ -276,25 +318,13 @@ class Oma:
             elif k == "send":
                 if self.conv.voiced and not self.conv.quiet:
                     self.send({"cmd": "chime"})  # «услышала» сразу: до ответа мозга секунды
-                key = self.brain.key
-                a = (k, await self._whole(a[1]) if self.conv.voiced else a[1], a[2])
-                self.orders.turn(self.conv.voiced, a[1])
-                said = await self.orders.confirm(a[1])  # подтверждение сверяет код, мозг не зовём; другая реплика снимает ожидание
-                if said is None:
-                    note, self.orders.note = self.orders.note, ""
-                    try:
-                        await self.brain.send(note + a[2] + a[1])
-                    except Exception as e:
-                        failed = e
-                if key.startswith("chat:") and self.brain.key == "new":  # устаревший чат сменился новым: реплика — первая в нём
-                    self.history = []
-                self.n += 1
-                self._chat("me", a[1])
-                self.emit({"bubble": {"id": f"me-{os.getpid()}-{self.n}", "who": "Ты", "text": a[1], "kind": "me", "append": False}})
+                parts, self.sending = self.sending, []  # звук этой реплики — её: следующий черновик его не тронет
+                pre, self.pre_sending = self.pre_sending, None
+                self.to_brain(self._deliver, a[1], a[2], self.conv.voiced, parts, pre)
             elif k == "presence":
                 self.send({"cmd": "presence", "state": a[1]})
-            elif k == "interrupt":
-                await self.brain.interrupt()
+            elif k == "interrupt":  # после отправки, что ещё в очереди: перебить ход, а не реплику до него
+                self.to_brain(self.brain.interrupt)
             elif k == "stop":  # перебивание: финалы агентов, удержанные за Омой, демон не выбрасывает
                 self.send({"cmd": "hush"})
             elif k == "pause_voice":  # перебив: её речь на паузе / дальше — решает распознанный текст
@@ -314,11 +344,6 @@ class Oma:
             elif k == "state":
                 s = "loading" if a[1] == "listening" and not self.whisper.ready else a[1]
                 self.send({"cmd": "voice_state", "state": s, "talking": self.conv.active})
-        if failed:  # после всех действий: ход уже в «thinking», done() вернёт в покой
-            await self.event(("error", f"Claude: {failed}"))
-        if said is not None:  # фраза кода вместо ответа мозга — как его ход: после «thinking» из этого же списка
-            await self.event(("delta", said))
-            await self.event(("done", None))
 
 
 async def serve(oma, events, reader):
@@ -370,7 +395,7 @@ async def main():
         whisper = Whisper()
         orders = Orders()  # один на мозг и Ому: ждущее подтверждения опасное видят оба
         oma = Oma(Conversation(), Ear(events, whisper), Brain(events, lambda: agents, send=link.send, orders=orders), whisper,
-                  orders=orders)
+                  orders=orders, events=events)
 
         def on_agents(lst):
             agents[:] = lst  # снимок для инструментов мозга
