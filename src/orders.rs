@@ -1,5 +1,6 @@
 //! Ответы и задания агентам от Омы: как передать (текстом или клавишами меню), куда, запуск нового агента.
-//! Зовёт Ома через CLI `agent-speak tell | launch | projects`: исход нужен её мозгу сразу.
+//! Зовёт Ома через CLI `agent-speak tell | launch | projects`: исход нужен её мозгу сразу. tell исполняет служба в своём
+//! потоке действий, в одной очереди с действиями сторожа: две записи в одну панель не перемешаются.
 
 use crate::mux::{self, Key, Step};
 use crate::source::{claude, tail::tail_of};
@@ -116,7 +117,7 @@ const TYPE_SOMETHING: &str = "Type something.";
 const CHAT_ABOUT: &str = "Chat about this";
 
 /// Передать агенту session текст или пункт меню (expect — его метка, пусто — не сверять); Ok — метка нажатого пункта.
-// shortcut: CLI и поток действий сторожа могут писать в один терминал одновременно; начнёт мешать — вести через демон
+/// Зовётся из потока действий службы (`mux::Work::Other`): чтение экрана, сверка и нажатие — без чужих записей между ними.
 pub fn tell(session: &str, option: usize, text: &str, expect: &str) -> Result<String, String> {
     let live = crate::agents::scan_all().into_iter().find(|l| l.id == session).ok_or("агента нет среди живых")?;
     let pane = mux::locate(live.pid).ok_or("агент не в Orca и не в herdr — передать не могу")?;

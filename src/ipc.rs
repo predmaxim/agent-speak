@@ -1,7 +1,7 @@
 //! Команды клиента → сервис: одна JSON-строка в unix-сокет.
 
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
@@ -36,6 +36,9 @@ pub enum Msg {
     Presence { state: String },
     /// Окно Омы показывает чат агента (id) или нет (пусто): лента его перед глазами — новости его не вслух.
     View { agent: String },
+    /// Ответ агенту от Омы (`agent-speak tell`): запрос с ответом `{"ok": метка нажатого пункта}` или `{"err": …}`;
+    /// идёт в очередь потока действий, той же, что у сторожа. expect — метка варианта, пусто — не сверять.
+    Tell { session: String, option: usize, text: String, #[serde(default)] expect: String },
 }
 
 pub fn socket_path() -> PathBuf {
@@ -45,6 +48,19 @@ pub fn socket_path() -> PathBuf {
 pub fn send(msg: &Msg) -> bool {
     let Ok(mut s) = UnixStream::connect(socket_path()) else { return false };
     s.write_all(format!("{}\n", serde_json::to_string(msg).unwrap()).as_bytes()).is_ok()
+}
+
+/// Команда с ответом (tell): строка туда, строка обратно — `{"ok": …}` или `{"err": …}`.
+pub fn request(msg: &Msg) -> Result<String, String> {
+    let mut s = UnixStream::connect(socket_path()).map_err(|_| "служба Омы не запущена".to_string())?;
+    s.write_all(format!("{}\n", serde_json::to_string(msg).unwrap()).as_bytes()).map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    BufReader::new(s).read_line(&mut line).map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+    match v["ok"].as_str() {
+        Some(ok) => Ok(ok.to_string()),
+        None => Err(v["err"].as_str().unwrap_or("служба не ответила — перезапусти её после обновления").to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -76,11 +92,14 @@ mod tests {
         assert!(matches!(view, Msg::View { ref agent } if agent == "s"));
         let presence = serde_json::from_str::<Msg>("{\"cmd\":\"presence\",\"state\":\"busy\"}").unwrap();
         assert!(matches!(presence, Msg::Presence { ref state } if state == "busy"));
+        let tell = serde_json::from_str::<Msg>("{\"cmd\":\"tell\",\"session\":\"s\",\"option\":1,\"text\":\"\"}").unwrap();
+        assert!(matches!(tell, Msg::Tell { ref session, option: 1, ref expect, .. } if session == "s" && expect.is_empty()), "метка — по желанию");
     }
 
     #[test]
     fn send_without_daemon_is_false() {
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", "/nonexistent-agent-speak") };
         assert!(!send(&Msg::Stop));
+        assert!(request(&Msg::Stop).unwrap_err().contains("не запущена"));
     }
 }

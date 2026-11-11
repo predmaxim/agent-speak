@@ -39,6 +39,7 @@ enum Event {
     Digest(Digest), // пересказ хода агента от воркеров digest
     Presence(String), // новый снимок сервиса присутствия
     Acted(mux::Done), // поток действий: исход действия сторожа в терминале агента
+    Tell(Box<dyn FnOnce() + Send>), // ответ агенту от Омы — в поток действий; ответ CLI шлёт само дело
     Bt(&'static str, bool), // режим наушников переключён (headset | music) и переключала ли его Ома
 }
 
@@ -195,7 +196,7 @@ struct State {
     limits: Limits,            // проценты лимитов и прогноз
     limits_bad: bool,          // лимит кончится раньше сброса: промежуточное не пересказываем
     limits_good: Option<u64>,  // с этого момента прогноз хороший, а эпизод ещё держится
-    act: Sender<mux::Job>,     // действия в терминалах агентов; в тестах — канал без потока
+    act: Sender<mux::Work>,    // действия в терминалах агентов; в тестах — канал без потока
     next_watch: Instant,
     activity: HashMap<String, u64>, // сессия → последний хук, с
     hints: PathBuf,                  // подсказки агентам про лимит для хука PostToolUse
@@ -414,6 +415,9 @@ pub fn run() {
             Event::Digest(d) => st.on_digest(d),
             Event::Presence(t) => st.on_presence(&t),
             Event::Acted(d) => st.on_acted(d),
+            Event::Tell(work) => {
+                let _ = st.act.send(mux::Work::Other(work)); // поток действий упал — дело выброшено, CLI получит ошибку
+            }
             Event::Bt(mode, switched) => st.on_bt(mode, switched),
         }
     }
@@ -612,6 +616,21 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
         let Ok(line) = line else { break };
         let _ = conn.set_read_timeout(None); // первая строка пришла — постоянное соединение (agent_voice) живёт молча
         match serde_json::from_str::<Msg>(&line) {
+            Ok(Msg::Tell { session, option, text, expect }) => {
+                // ответ агенту — в очередь потока действий; эта строка ждёт исхода и пишет его клиенту
+                let (rtx, rrx) = mpsc::channel();
+                let work = move || {
+                    let _ = rtx.send(crate::orders::tell(&session, option, &text, &expect));
+                };
+                let reply = match tx.send(Event::Tell(Box::new(work))).ok().and_then(|()| rrx.recv().ok()) {
+                    Some(Ok(chosen)) => serde_json::json!({"ok": chosen}),
+                    Some(Err(e)) => serde_json::json!({"err": e}),
+                    None => serde_json::json!({"err": "служба не передала: поток действий не работает"}),
+                };
+                if (&conn).write_all(format!("{reply}\n").as_bytes()).is_err() {
+                    break;
+                }
+            }
             Ok(Msg::Subscribe) => match conn.try_clone() {
                 Ok(w) => {
                     let _ = conn.set_read_timeout(None); // таймаут общий для клонов сокета
@@ -1327,7 +1346,7 @@ impl State {
                 self.on_back(back);
             }
             Msg::View { agent } => self.viewing = agent,
-            Msg::Subscribe => {} // приходит как Event::Subscribe
+            Msg::Subscribe | Msg::Tell { .. } => {} // приходят как Event::Subscribe и Event::Tell
         }
         if changes {
             self.broadcast();
@@ -1594,7 +1613,7 @@ impl State {
                 });
             }
             Act::Run(job) => {
-                let _ = self.act.send(job);
+                let _ = self.act.send(mux::Work::Job(job));
             }
         }
     }
@@ -1723,7 +1742,15 @@ mod tests {
 
     static HINTS_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-    fn acts(st: &mut State) -> mpsc::Receiver<mux::Job> {
+    /// Действие сторожа из очереди потока действий.
+    fn watch_job(w: mux::Work) -> mux::Job {
+        match w {
+            mux::Work::Job(j) => j,
+            mux::Work::Other(_) => panic!("ждали действие сторожа"),
+        }
+    }
+
+    fn acts(st: &mut State) -> mpsc::Receiver<mux::Work> {
         let (tx, rx) = mpsc::channel();
         st.act = tx;
         rx
@@ -1744,7 +1771,7 @@ mod tests {
         let rx = acts(&mut st);
         st.facts_of = Box::new(|e, a| Facts { active_at: 1, call: Some(serde_json::json!({"name": "Agent", "input": {}})), pane: herdr_pane(), ..blank_facts(e, a) });
         st.watch_tick();
-        assert_eq!(rx.try_recv().unwrap().what, What::Interrupt);
+        assert_eq!(watch_job(rx.try_recv().unwrap()).what, What::Interrupt);
         assert_eq!(st.registry.get("a").unwrap().health, "завис");
         let mut r = sub(&mut st);
         st.on_acted(mux::Done { session: "a".into(), what: What::Interrupt, err: None });
@@ -1839,7 +1866,7 @@ mod tests {
         st.on_digest(dg("a", Ask::Hung, true, "висит"));
         assert!(st.board.is_empty());
         st.watch_tick();
-        assert_eq!(arx.try_recv().unwrap().what, What::Interrupt);
+        assert_eq!(watch_job(arx.try_recv().unwrap()).what, What::Interrupt);
     }
 
     #[test]
@@ -1928,6 +1955,20 @@ mod tests {
         client.write_all(b"{\"cmd\":\"subscribe\"}\n\xd0\xbc\xd1\x83\xd1\x81\xd0\xbe\xd1\x80\n{\"cmd\":\"nope\"}\n{\"cmd\":\"pause\"}\n").unwrap();
         assert!(matches!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Event::Subscribe(_)));
         assert!(matches!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Event::Msg(Msg::Pause)));
+    }
+
+    #[test]
+    fn tell_goes_through_the_action_queue_and_answers() {
+        // `agent-speak tell` — запрос с ответом: дело уходит в поток действий, исход — строкой обратно
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (server, client) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || serve(server, tx));
+        let mut w = client.try_clone().unwrap();
+        w.write_all(b"{\"cmd\":\"tell\",\"session\":\"no-such-session\",\"option\":0,\"text\":\"hi\"}\n").unwrap();
+        let Ok(Event::Tell(work)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("tell не дошёл до цикла") };
+        work(); // так его исполнит поток действий
+        let reply = next(&mut reader(client));
+        assert_eq!(reply["err"], "агента нет среди живых");
     }
 
     #[test]

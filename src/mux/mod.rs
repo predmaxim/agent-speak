@@ -175,6 +175,13 @@ pub struct Done {
     pub err: Option<String>,
 }
 
+/// Дело потока действий: действие сторожа или чужое дело (ответ агенту от Омы, `agent-speak tell`). Очередь одна,
+/// дела — по одному: две записи в один терминал не перемешаются.
+pub enum Work {
+    Job(Job),
+    Other(Box<dyn FnOnce() + Send>),
+}
+
 /// Шаги в терминале через адаптер панели; первая ошибка обрывает.
 pub fn perform(pane: &Pane, steps: &[Step]) -> Result<(), String> {
     perform_on(adapter(pane)?, pane, steps)
@@ -197,11 +204,18 @@ fn perform_on(m: &dyn Mux, pane: &Pane, steps: &[Step]) -> Result<(), String> {
     Ok(())
 }
 
-/// Поток действий: задания по одному, шаги по порядку; первая ошибка обрывает задание.
-pub fn spawn(out: Sender<Done>) -> Sender<Job> {
-    let (tx, rx) = std::sync::mpsc::channel::<Job>();
+/// Поток действий: дела по одному, шаги по порядку; первая ошибка обрывает задание.
+pub fn spawn(out: Sender<Done>) -> Sender<Work> {
+    let (tx, rx) = std::sync::mpsc::channel::<Work>();
     std::thread::spawn(move || {
-        for job in rx {
+        for work in rx {
+            let job = match work {
+                Work::Job(job) => job,
+                Work::Other(f) => {
+                    f();
+                    continue;
+                }
+            };
             let err = perform(&job.pane, &job.steps).err();
             if let Some(e) = &err {
                 eprintln!("agent-speak: действие {:?} для {} не вышло: {e}", job.what, job.session);
@@ -381,9 +395,24 @@ mod tests {
         let (dtx, drx) = std::sync::mpsc::channel();
         let jobs = spawn(dtx);
         let pane = Pane { mux: "nowhere", id: "x".into(), via: String::new() };
-        jobs.send(Job { session: "s".into(), pane, steps: vec![Step::Pause(1), Step::Text("hi".into())], what: crate::watch::What::Wake }).unwrap();
+        jobs.send(Work::Job(Job { session: "s".into(), pane, steps: vec![Step::Pause(1), Step::Text("hi".into())], what: crate::watch::What::Wake })).unwrap();
         let d = drx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!((d.session.as_str(), d.what), ("s", crate::watch::What::Wake));
         assert!(d.err.unwrap().contains("nowhere"));
+    }
+
+    #[test]
+    fn other_work_waits_its_turn_in_the_same_queue() {
+        // ответ Омы агенту и действие сторожа — один поток, по очереди: в одну панель не вперемешку
+        let (dtx, drx) = std::sync::mpsc::channel();
+        let jobs = spawn(dtx);
+        let (ttx, trx) = std::sync::mpsc::channel();
+        let pane = Pane { mux: "herdr", id: "x".into(), via: String::new() }; // только пауза: herdr не зовётся
+        jobs.send(Work::Job(Job { session: "s".into(), pane, steps: vec![Step::Pause(300)], what: crate::watch::What::Wake })).unwrap();
+        jobs.send(Work::Other(Box::new(move || ttx.send(std::time::Instant::now()).unwrap()))).unwrap();
+        let start = std::time::Instant::now();
+        let ran = trx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(ran.duration_since(start) >= Duration::from_millis(250), "чужое дело ждёт, пока доиграет действие сторожа");
+        assert!(drx.recv_timeout(Duration::from_secs(1)).is_ok());
     }
 }
