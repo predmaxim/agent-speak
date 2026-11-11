@@ -936,8 +936,12 @@ impl State {
             }
             return;
         }
-        // hyprctl — только когда есть что сказать
-        let focused = if self.board.is_empty() { None } else { self.engaged() };
+        // hyprctl — только когда и без учёта фокуса есть что сказать: итоги, ждущие ответа на вопрос, его не опрашивают каждый тик
+        if !self.board.sayable(now, None) {
+            self.welcome &= mode == Mode::Unsure; // вводить в курс нечем — приветствие следующих новостей не ждёт
+            return;
+        }
+        let focused = self.engaged();
         let (kind, text) = if mode == Mode::Unsure {
             if !self.board.sayable(now, focused.as_deref()) {
                 return; // «Есть новости» не врёт: после «да» прозвучит хоть что-то
@@ -2494,6 +2498,29 @@ mod tests {
         st.cfg.quiet_override = "on".into(); // щелчок в тесте не звучит
         st.on_msg(Msg::Chime);
         assert_eq!(*calls.lock().unwrap(), 2, "каждая реплика голосом — свежий фокус");
+    }
+
+    #[test]
+    fn news_that_cannot_be_said_asks_no_focus() {
+        // озвучен вопрос — итог ждёт ответа до ANSWER_WAIT: hyprctl каждый тик не спрашивается
+        let (mut st, env) = env_state();
+        let calls = Arc::new(Mutex::new(0));
+        let c = calls.clone();
+        st.focus_src = Box::new(move || {
+            *c.lock().unwrap() += 1;
+            None
+        });
+        with_agents(&mut st, &["s", "t"]);
+        question(&mut st, "s", true, "Удалить старый код?");
+        assert_eq!(texts(&st), ["плуг: Удалить старый код?"]);
+        st.on_digest(dg("t", Ask::Final, false, "Фича готова."));
+        let before = *calls.lock().unwrap();
+        for _ in 0..5 {
+            *env.1.lock().unwrap() += Duration::from_secs(1); // кэш фокуса — 500 мс
+            st.tick();
+        }
+        assert_eq!(*calls.lock().unwrap(), before, "сказать нечего — фокус не нужен");
+        assert!(texts(&st).is_empty());
     }
 
     #[test]
