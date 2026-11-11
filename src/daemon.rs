@@ -126,6 +126,8 @@ struct Status<'a> {
     orb_over_fullscreen: bool,
     waiting: usize,
     trouble: usize, // агентов со срочной нерешённой проблемой — сигнал орба
+    played_at: f64, // когда кончается (кончился) звук последней речи, CLOCK_MONOTONIC, с; 0 — речи не было
+    out: &'a str,   // куда идёт голос: speakers | headphones
 }
 
 /// Процесс Омы (python -m agent_voice): команды — строками в stdin, события — через сокет.
@@ -770,8 +772,16 @@ impl State {
             orb_over_fullscreen: self.cfg.orb_over_fullscreen,
             waiting: self.registry.waiting(),
             trouble: self.trouble(),
+            played_at: *self.shared.played.lock().unwrap(),
+            out: self.out(),
         };
         format!("{}\n", serde_json::to_string(&st).unwrap())
+    }
+
+    /// Куда идёт голос: выход, выбранный route (динамики ноутбука), иначе выход по умолчанию — Bluetooth значит наушники.
+    // shortcut: проводные наушники в гнезде ноутбука — «speakers» (тот же узел alsa); различать по активному порту узла, если понадобится
+    fn out(&self) -> &'static str {
+        if self.shared.sink.lock().unwrap().is_empty() && (self.bt_out)() { "headphones" } else { "speakers" }
     }
 
     /// Новому подписчику — строка состояния, затем строка агентов.
@@ -1303,7 +1313,14 @@ impl State {
             Msg::OmaPause { on } => self.oma_pause(on),
             Msg::Hush => self.shared.hush(), // новость, удержанная за Омой, не теряется
             Msg::Voice { text } => {
-                self.enqueue(Agent::Claude, "voice", &text, Kind::Voice); // звучит ли — решает audible
+                // звучит ли — решает audible; звука не будет (только код, эмодзи, тишина), а прежнее не звучит —
+                // Оме сразу «смолкла» (played_at — сейчас), иначе она ждала бы конца звука вечно
+                if self.enqueue(Agent::Claude, "voice", &text, Kind::Voice) == 0 && self.silent() {
+                    let mut played = self.shared.played.lock().unwrap();
+                    *played = played.max(speaker::mono()); // хвост прежней фразы ещё звучит — его конец не раньше
+                    drop(played);
+                    self.broadcast();
+                }
             }
             Msg::Chime => {
                 if audible(&Kind::Voice, self.quiet()) {
@@ -2021,8 +2038,41 @@ mod tests {
         let st = test_state();
         assert_eq!(
             st.status_line(),
-            "{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":true,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0,\"trouble\":0}\n"
+            "{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":true,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0,\"trouble\":0,\"played_at\":0.0,\"out\":\"speakers\"}\n"
         );
+    }
+
+    #[test]
+    fn status_line_says_where_the_voice_goes() {
+        let out = |st: &State| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["out"].clone();
+        let mut st = test_state();
+        st.bt_out = Box::new(|| true);
+        assert_eq!(out(&st), "headphones", "выход по умолчанию — Bluetooth-наушники");
+        *st.shared.sink.lock().unwrap() = "speakers".into(); // наушники вынуты или «Ты тут?» в динамики
+        assert_eq!(out(&st), "speakers");
+        st.shared.sink.lock().unwrap().clear();
+        st.bt_out = Box::new(|| false);
+        assert_eq!(out(&st), "speakers");
+    }
+
+    #[test]
+    fn voice_that_gives_no_sound_ends_at_once() {
+        // ответ Омы только из кода: звука не будет — «смолкла» сразу, иначе она ждала бы конца звука вечно
+        let mut st = test_state();
+        let mut r = sub(&mut st);
+        drain(&mut r);
+        let before = speaker::mono();
+        st.on_msg(Msg::Voice { text: "```\ncargo test --all\n```".into() });
+        let lines = drain(&mut r);
+        let status = lines.iter().find(|l| l.get("running").is_some()).expect("строка состояния");
+        assert_eq!(status["speaking"], false);
+        assert!(status["played_at"].as_f64().unwrap() >= before);
+        // звучит прежнее — его конец придёт обычным путём, а не раньше времени
+        *st.shared.played.lock().unwrap() = before + 100.0;
+        st.shared.busy.store(true, Ordering::SeqCst);
+        st.on_msg(Msg::Voice { text: "🙂".into() });
+        assert!(drain(&mut r).iter().all(|l| l.get("running").is_none()));
+        assert_eq!(*st.shared.played.lock().unwrap(), before + 100.0);
     }
 
     #[test]

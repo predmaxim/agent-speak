@@ -18,6 +18,9 @@ pub struct Shared {
     pub current: Mutex<String>, // сессия звучащей фразы — для «Читаю: <проект>»
     pub changed: Mutex<Option<std::sync::mpsc::Sender<()>>>, // смена «говорит/молчит» → основной цикл
     pub sink: Arc<Mutex<String>>, // узел PipeWire для pw-cat --target; пусто — вывод по умолчанию
+    /// Когда кончается (кончился) звук последней речи — CLOCK_MONOTONIC, с (как time.monotonic() в Python); 0 — речи не было.
+    /// «Смолкла» (busy гаснет) приходит раньше: pw-cat ещё доигрывает свой канал.
+    pub played: Mutex<f64>,
 }
 
 /// Синтезатор и приёмник звука — трейты только ради тестов с подделками.
@@ -28,6 +31,8 @@ pub trait Sink {
     fn write(&mut self, pcm: &[u8]) -> bool;
     fn reset(&mut self);
     fn close(&mut self);
+    /// Сколько ещё звучит уже записанное.
+    fn left(&self) -> Duration;
 }
 impl Synth for Tts {
     fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Result<Vec<u8>, Failed> {
@@ -44,6 +49,17 @@ impl Sink for Player {
     fn close(&mut self) {
         Player::close(self)
     }
+    fn left(&self) -> Duration {
+        Player::left(self)
+    }
+}
+
+/// CLOCK_MONOTONIC в секундах — те же часы, что time.monotonic() в Python у Омы.
+pub fn mono() -> f64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime пишет в локальную структуру
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
 }
 
 impl Shared {
@@ -57,7 +73,16 @@ impl Shared {
             current: Mutex::new(String::new()),
             changed: Mutex::new(None),
             sink: Arc::new(Mutex::new(String::new())),
+            played: Mutex::new(0.0),
         }
+    }
+
+    /// Речь смолкла, а звучать ей ещё left: busy гаснет, конец звука — в played. Вызывающий НЕ держит замок played.
+    fn idle(&self, left: Duration) {
+        if self.busy.load(Ordering::SeqCst) {
+            *self.played.lock().unwrap() = mono() + left.as_secs_f64();
+        }
+        self.set_busy(None);
     }
 
     /// generation растёт только под замком очереди — поэтому speaker, снявший снимок
@@ -158,7 +183,7 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                     tail = None;
                     break (it, shared.generation.load(Ordering::SeqCst));
                 }
-                shared.set_busy(None);
+                shared.idle(player.left());
                 let to = if tail.is_some() { Duration::from_millis(100) } else { Duration::from_millis(500) };
                 q = shared.cv.wait_timeout(q, to).unwrap().0;
             }
@@ -174,11 +199,12 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                 Vec::new()
             }
             Err(Failed::Down) => {
-                // синтез упал: очередь ждёт, а не теряет фразу
+                // синтез упал: очередь ждёт, а не теряет фразу; закрытый pw-cat доигрывает свой канал
+                let left = player.left();
                 player.close();
                 let mut q = shared.queue.lock().unwrap();
                 requeue(&shared, &mut q, item, my_gen);
-                shared.set_busy(None);
+                shared.idle(left);
                 let deadline = Instant::now() + RETRY;
                 while shared.generation.load(Ordering::SeqCst) == my_gen {
                     let left = deadline.saturating_duration_since(Instant::now());
@@ -250,6 +276,9 @@ mod tests {
         }
         fn close(&mut self) {
             self.0.lock().unwrap().push("close");
+        }
+        fn left(&self) -> Duration {
+            Duration::from_secs(2)
         }
     }
 
@@ -344,6 +373,17 @@ mod tests {
     }
 
     #[test]
+    fn end_of_sound_is_when_the_buffer_plays_out() {
+        // «смолкла» приходит, когда записан последний кусок; звук кончается позже — когда pw-cat доиграет канал (FakeSink: 2 с)
+        let (shared, ev) = start(0, 0);
+        let before = mono();
+        say(&shared);
+        wait(|| count(&ev, "write") == 2 && !shared.busy.load(Ordering::SeqCst));
+        let at = *shared.played.lock().unwrap();
+        assert!(at >= before + 2.0 && at <= mono() + 2.0, "конец звука {at}, а сейчас {}", mono());
+    }
+
+    #[test]
     fn silence_after_tail_closes_player() {
         let (shared, ev) = start(0, 0);
         say(&shared);
@@ -432,6 +472,9 @@ mod tests {
             fn reset(&mut self) {}
             fn close(&mut self) {
                 self.0 = None;
+            }
+            fn left(&self) -> Duration {
+                Duration::ZERO
             }
         }
         let (mut r, w) = std::io::pipe().unwrap();

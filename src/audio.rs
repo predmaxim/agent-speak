@@ -1,8 +1,15 @@
 //! Постоянный pw-cat: PCM пишется в stdin; reset — мгновенно оборвать звук.
 
 use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
+/// Задержка узла pw-cat (`--latency`, как по умолчанию): столько звука сверх канала он держит у себя.
+const LATENCY: Duration = Duration::from_millis(100);
+/// Байт звука в секунду: s16, 48 кГц, моно — формат pw-cat ниже.
+const BYTES_PER_SEC: f64 = 96000.0;
 
 pub struct Player {
     child: Option<Child>,
@@ -21,6 +28,7 @@ impl Player {
             self.reset();
             let mut cmd = Command::new("pw-cat");
             cmd.args(["--playback", "--raw", "--format", "s16", "--rate", "48000", "--channels", "1"]);
+            cmd.arg(format!("--latency={}ms", LATENCY.as_millis()));
             if !sink.is_empty() {
                 cmd.args(["--target", &sink]); // нет такого узла — PipeWire подключит к выходу по умолчанию
             }
@@ -44,12 +52,25 @@ impl Player {
         }
     }
 
+    /// Сколько ещё звучит уже записанное: байты в канале pw-cat и его задержка; pw-cat нет (оборван, закрыт) — ноль.
+    pub fn left(&self) -> Duration {
+        let Some(fd) = self.child.as_ref().and_then(|c| c.stdin.as_ref()).map(AsRawFd::as_raw_fd) else { return Duration::ZERO };
+        Duration::from_secs_f64(queued(fd).unwrap_or(0) as f64 / BYTES_PER_SEC) + LATENCY
+    }
+
     pub fn reset(&mut self) {
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
             let _ = c.wait();
         }
     }
+}
+
+/// Байт в канале, ещё не прочитанных другим концом (FIONREAD работает и на пишущем конце).
+fn queued(fd: std::os::fd::RawFd) -> Option<usize> {
+    let mut n: libc::c_int = 0;
+    // SAFETY: FIONREAD пишет int по указателю на локальную переменную; fd открыт у вызывающего
+    (unsafe { libc::ioctl(fd, libc::FIONREAD, &mut n) } == 0).then_some(n as usize)
 }
 
 /// Динамики ноутбука: первый выход не Bluetooth из `pactl list short sinks`; нет — пусто (вывод по умолчанию).
@@ -112,6 +133,15 @@ mod tests {
         let s = |i: usize| i16::from_le_bytes([pcm[2 * i], pcm[2 * i + 1]]).unsigned_abs();
         assert!(s(0) < 50 && s(pcm.len() / 2 - 1) < 50, "края тихие — без щелчка-треска");
         assert!((0..pcm.len() / 2).map(s).max().unwrap() > 5000);
+    }
+
+    #[test]
+    fn queued_bytes_are_read_on_the_writing_end() {
+        use std::os::fd::AsRawFd;
+        let (_r, mut w) = std::io::pipe().unwrap();
+        assert_eq!(queued(w.as_raw_fd()), Some(0));
+        w.write_all(&[0; 9600]).unwrap();
+        assert_eq!(queued(w.as_raw_fd()), Some(9600), "остаток канала pw-cat — по его пишущему концу");
     }
 
     #[test]
