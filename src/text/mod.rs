@@ -62,6 +62,12 @@ mod tests {
     }
 
     #[test]
+    fn prepare_short_forms_keep_sentence() {
+        let (s, _) = prepare("Не работает, т.к. нет прав, см. выше, напр. в файле.", &Terms::from_str(""));
+        assert_eq!(s, vec!["Не работает, так как нет прав, смотри выше, например в файле."]);
+    }
+
+    #[test]
     fn prepare_numbers() {
         let t = Terms::from_str("gb\tгигаб+айт\n");
         let (s, _) = prepare("Порог 0.05, всего 1 000 строк к 12:30, файл 5GB, код E0502.", &t);
