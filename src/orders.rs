@@ -92,8 +92,8 @@ fn typed(key: Step, text: &str) -> Vec<Step> {
 
 /// Как передать ответ агенту: вызов, который ждёт пользователя (меню), — клавишами; иначе — текстом в поле ввода.
 /// option — пункт меню (0 — свой ответ текстом); expect — его метка, как её видел спросивший (пусто — не сверять).
-/// Цифра жмётся, только если меню на экране то самое: метка пункта совпала с вариантом вызова, у плана — пункт
-/// одобрения. Второе в ответе — метка нажатого пункта с экрана (у плана «Yes, and use auto mode» — Ома её зачитывает),
+/// Цифра жмётся, только если меню на экране то самое: метка пункта совпала с вариантом вызова, у плана — с expect
+/// (без него — только пункт 1 «Yes…»). Второе в ответе — метка нажатого пункта с экрана (у плана «Yes, and use auto mode» — Ома её зачитывает),
 /// пусто — пункт не выбирали. Экран не читается только у ответа текстом без вызова в полёте.
 pub fn steps(call: Option<&Value>, text: &str, option: usize, expect: &str, screen: impl FnOnce() -> Result<String, String>) -> Result<(Vec<Step>, String), String> {
     let text = text.trim();
@@ -121,16 +121,17 @@ pub fn steps(call: Option<&Value>, text: &str, option: usize, expect: &str, scre
         Some("ExitPlanMode") => {
             let screen = screen()?;
             match option {
-                1 => {
-                    let shown = item_text(&screen, 1).filter(|t| t.starts_with("Yes")).ok_or(NO_PLAN_MENU)?;
-                    if !expect.is_empty() && expect != shown {
-                        return Err(format!("на экране пункт 1 — «{shown}», а не «{expect}»: не жму"));
-                    }
-                    Ok((vec![digit(1)?], shown.to_string()))
-                }
                 0 if !text.is_empty() => item_of(&screen, PLAN_FEEDBACK).map_or_else(|| Err(NO_PLAN_MENU.into()), |i| Ok((typed(digit(i)?, text), String::new()))),
                 0 => Err("пустой ответ".into()),
-                o => Err(format!("нет варианта {o}")),
+                o => {
+                    // без метки — только одобрение: пункт 1, если он «Yes…»; любой пункт с меткой — если на экране он же
+                    let want = match expect.trim() {
+                        "" if o == 1 => item_text(&screen, 1).filter(|t| t.starts_with("Yes")).ok_or(NO_PLAN_MENU)?,
+                        "" => return Err(format!("пункт {o} плана — только с его меткой с экрана")),
+                        e => e,
+                    };
+                    Ok((vec![press(&screen, o, want)?], want.to_string()))
+                }
             }
         }
         _ if text.is_empty() => Err("пустой текст".into()),
@@ -281,6 +282,18 @@ mod tests {
         assert!(steps(Some(&plan), "правки", 0, "", || Ok("❯ ".into())).unwrap_err().contains("меню"));
         let numbered = || Ok(format!("План:\n1. Удалить старое\n2. Написать новое\n{PLAN_SCREEN}"));
         assert_eq!(steps(Some(&plan), "", 1, "", numbered).unwrap().1, "Yes, and use auto mode", "пункт меню, а не строка плана выше");
+    }
+
+    #[test]
+    fn plan_any_option_is_pressed_by_its_label() {
+        // Ома спросила «пункт «Yes, manually approve edits»?» — жмётся он, если на экране под этим номером он же
+        let plan = json!({"name": "ExitPlanMode", "input": {"plan": "создать файл"}});
+        let screen = || Ok(PLAN_SCREEN.to_string());
+        assert_eq!(steps(Some(&plan), "", 2, "Yes, manually approve edits", screen).unwrap(),
+            (vec![Step::Key(Key::Digit(2))], "Yes, manually approve edits".to_string()));
+        assert!(steps(Some(&plan), "", 2, "Yes, and use auto mode", screen).unwrap_err().contains("не жму"), "метка — другого пункта");
+        assert!(steps(Some(&plan), "", 2, "", screen).is_err(), "не первый пункт — только с меткой, как его видел спросивший");
+        assert!(steps(Some(&plan), "", 4, "Yes", screen).unwrap_err().contains("не жму"), "пункта нет на экране");
     }
 
     #[test]
