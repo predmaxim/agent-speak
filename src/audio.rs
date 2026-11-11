@@ -94,24 +94,43 @@ fn outs() -> Option<(String, String)> {
 
 /// Поток выходов: send(выход по умолчанию, динамики) — при старте и при каждой смене (события `pactl subscribe`), а не
 /// опросом на каждую строку состояния. send вернул false — цикл службы кончился. pactl subscribe вышел (pipewire-pulse
-/// перезапущен) — подписка заново через секунду; pactl нет — поток кончается, выход остаётся «динамики».
+/// перезапущен или не пускает) — подписка заново: через секунду, если сервер ответил при прошлой, иначе всё реже, до
+/// раза в 30 с, и одна строка в журнале на серию отказов; pactl нет — поток кончается, выход остаётся «динамики».
 pub fn watch_outs(send: impl Fn(String, String) -> bool + Send + 'static) {
-    std::thread::spawn(move || loop {
-        let mut sub = match Command::new("pactl").arg("subscribe").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
-            Ok(c) => c,
-            Err(e) => return eprintln!("agent-speak: не слежу за выходами звука (pactl subscribe): {e}"),
-        };
-        let lines = std::io::BufReader::new(sub.stdout.take().unwrap()).lines();
-        // shortcut: смена в те миллисекунды, пока pactl subscribe подключается, событием не придёт; заметят — читать выходы ещё раз по первой строке подписки
-        let report = || outs().is_none_or(|(d, s)| send(d, s));
-        let alive = report() && lines.map_while(Result::ok).filter(|l| outs_changed(l)).all(|_| report());
-        let _ = sub.kill();
-        let _ = sub.wait();
-        if !alive {
-            return;
+    std::thread::spawn(move || {
+        let mut fails = 0;
+        loop {
+            let mut sub = match Command::new("pactl").arg("subscribe").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
+                Ok(c) => c,
+                Err(e) => return eprintln!("agent-speak: не слежу за выходами звука (pactl subscribe): {e}"),
+            };
+            let lines = std::io::BufReader::new(sub.stdout.take().unwrap()).lines();
+            // shortcut: смена выхода по умолчанию, пока pactl subscribe подключается, событием не придёт (при подключении он
+            // ничего не печатает); заметят — выход по умолчанию брать из `pw-metadata -m -n default`: сначала снимок, затем
+            // смены, без гонки; новые и пропавшие выходы — по-прежнему pactl subscribe
+            let report = |o: Option<(String, String)>| o.is_none_or(|(d, s)| send(d, s));
+            // принял ли сервер подписку, она не скажет: судим по ответу на чтение выходов сразу после неё
+            let first = outs();
+            let answered = first.is_some();
+            let alive = report(first) && lines.map_while(Result::ok).filter(|l| outs_changed(l)).all(|_| report(outs()));
+            let _ = sub.kill();
+            let status = sub.wait();
+            if !alive {
+                return;
+            }
+            fails = if answered { 0 } else { fails + 1 };
+            if fails == 1 {
+                let status = status.map_or_else(|e| e.to_string(), |s| s.to_string());
+                eprintln!("agent-speak: выходы звука: pipewire-pulse не отвечает (pactl subscribe: {status}) — пробую снова, всё реже, до раза в 30 с");
+            }
+            std::thread::sleep(resubscribe_after(fails));
         }
-        std::thread::sleep(Duration::from_secs(1));
     });
+}
+
+/// Пауза перед новой подпиской после fails отказов подряд: секунда, затем вдвое дольше, не дольше 30 с.
+fn resubscribe_after(fails: u32) -> Duration {
+    Duration::from_secs((1u64 << fails.saturating_sub(1).min(5)).min(30))
 }
 
 /// Щелчок «услышала»: 90 мс, 880 Гц, края сглажены — без треска. s16 48 кГц моно, как у Player.
@@ -177,6 +196,13 @@ mod tests {
         assert!(!needs_respawn(true, "", ""));
         assert!(needs_respawn(true, "", "echo-cancel-sink"));
         assert!(needs_respawn(true, "echo-cancel-sink", ""));
+    }
+
+    #[test]
+    fn resubscribe_backs_off_to_half_a_minute() {
+        let secs: Vec<u64> = (0..8).map(|f| resubscribe_after(f).as_secs()).collect();
+        assert_eq!(secs, [1, 1, 2, 4, 8, 16, 30, 30], "сервер ответил — через секунду; не отвечает — всё реже, до 30 с");
+        assert_eq!(resubscribe_after(u32::MAX).as_secs(), 30);
     }
 
     #[test]
