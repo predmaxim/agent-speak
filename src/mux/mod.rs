@@ -209,16 +209,10 @@ pub fn run(cmd: &mut Command, timeout: Duration) -> Result<String, String> {
     std::thread::spawn(move || { let mut s = String::new(); let _ = so.read_to_string(&mut s); let _ = tx.send((true, s)); });
     std::thread::spawn(move || { let mut s = String::new(); let _ = se.read_to_string(&mut s); let _ = tx2.send((false, s)); });
     let start = std::time::Instant::now();
-    let status = loop {
-        if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
-            break st;
-        }
-        if start.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("таймаут {} с", timeout.as_secs_f32()));
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    let Some(status) = exit_within(&mut child, timeout)? else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("таймаут {} с", timeout.as_secs_f32()));
     };
     // процесс вышел, а вывод держит его потомок — ждём не дольше общего срока
     let (mut out, mut err) = (String::new(), String::new());
@@ -234,6 +228,30 @@ pub fn run(cmd: &mut Command, timeout: Duration) -> Result<String, String> {
     } else {
         let msg = if err.trim().is_empty() { out } else { err };
         Err(format!("{status}: {}", msg.trim().chars().take(300).collect::<String>()))
+    }
+}
+
+/// Выход потомка не позже timeout, None — не вышел: ждём pidfd через poll (Linux 5.3+), без опроса и без гонки
+/// с переиспользованием pid — несобранный потомок свой pid не отдаёт.
+fn exit_within(child: &mut std::process::Child, timeout: Duration) -> Result<Option<std::process::ExitStatus>, String> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    // SAFETY: pidfd_open без побочных эффектов; дескриптор сразу переходит во владение OwnedFd
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0) };
+    if fd < 0 {
+        return Err(format!("pidfd_open: {}", std::io::Error::last_os_error()));
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) };
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now()).as_millis().min(i32::MAX as u128) as libc::c_int;
+        let mut p = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        // SAFETY: один pollfd на стеке
+        match unsafe { libc::poll(&mut p, 1, left) } {
+            0 => return Ok(None),
+            n if n > 0 => return child.wait().map(Some).map_err(|e| e.to_string()),
+            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => continue,
+            _ => return Err(format!("poll: {}", std::io::Error::last_os_error())),
+        }
     }
 }
 
@@ -254,6 +272,16 @@ mod tests {
         let t = std::time::Instant::now();
         let held = run(Command::new("sh").args(["-c", "sleep 5 & echo hi"]), Duration::from_secs(1));
         assert!(t.elapsed() < Duration::from_secs(3) && held.unwrap_err().contains("вывод"), "вывод держит внук — не ждём его");
+    }
+
+    #[test]
+    fn run_returns_as_soon_as_the_child_exits() {
+        // выход ждётся, а не опрашивается: прежний опрос по 50 мс держал цикл на каждом вызове CLI
+        let t = std::time::Instant::now();
+        for _ in 0..5 {
+            run(&mut Command::new("true"), Duration::from_secs(2)).unwrap();
+        }
+        assert!(t.elapsed() < Duration::from_millis(200), "{:?} на 5 вызовов", t.elapsed());
     }
 
     /// Мультиплексор, который только записывает, что ему прислали.
