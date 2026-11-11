@@ -81,6 +81,7 @@ class Oma:
         self.sound = 0     # номер события audio: хвост pw-cat отсчитывается от последнего
         self.out = None    # куда идёт её голос (out службы): speakers | headphones
         self.notified = (None, 0.0)  # последнее уведомление: текст, время
+        self.ask_id = None  # id набранной реплики из окна, пока команда ask идёт: её строка в чате вернётся с ним
 
     def _show(self, text):
         self.emit({"bubble": {"id": f"oma-{os.getpid()}-{self.n}", "who": "Ома", "text": text, "kind": "oma", "append": True}})
@@ -139,14 +140,15 @@ class Oma:
             self.notified = (text, now)
             self.notify(text[:200])
 
-    def _chat(self, role, text):
-        """Реплика — в историю текущего чата и в окно; ответ Омы — одним сообщением, как в окне."""
+    def _chat(self, role, text, id=None):
+        """Реплика — в историю текущего чата и в окно; ответ Омы — одним сообщением, как в окне. id — набранной
+        реплики: окно узнаёт, что Ома её приняла, по нему, а не по совпадению текста."""
         h = self.history
         if role == "oma" and h and h[-1]["role"] == "oma":
             h[-1]["text"] += " " + text
         else:
             h.append({"role": role, "text": text})
-        self.emit({"chat_delta": {"key": self.brain.key, "role": role, "text": text}})
+        self.emit({"chat_delta": {"key": self.brain.key, "role": role, "text": text, **({"id": id} if id else {})}})
 
     async def command(self, cmd):
         do, c = cmd.get("do"), self.conv
@@ -194,7 +196,9 @@ class Oma:
             elif do == "new":
                 self.emit({"chat": {"key": key, "messages": self.history}})
             if do == "ask":
+                self.ask_id = cmd.get("id")
                 await self.act(c.ask(cmd.get("text", "")))
+                self.ask_id = None
 
     async def switch(self, key, was=None):
         """Перейти в чат key; was — ключ, на который окно ждёт ответа ("*" — любой)."""
@@ -326,8 +330,9 @@ class Oma:
         where = {"speakers": "в динамиках", "headphones": "в наушниках"}.get(self.out)
         return f"Твой голос: включён, звучит {where}." if where else "Твой голос: включён."
 
-    async def _deliver(self, text, ctx, voiced, parts, pre, sound, n):
-        """Реплика мозгу или подтверждение поручения, которое передаёт код, — в очереди к мозгу; n — номер её хода."""
+    async def _deliver(self, text, ctx, voiced, parts, pre, sound, n, id=None):
+        """Реплика мозгу или подтверждение поручения, которое передаёт код, — в очереди к мозгу; n — номер её хода,
+        id — набранной реплики из окна."""
         key, failed = self.brain.key, None
         text = await self._whole(text, parts, pre) if voiced else text
         self.orders.turn(voiced, text, n)
@@ -341,7 +346,7 @@ class Oma:
         if key.startswith("chat:") and self.brain.key == "new":  # устаревший чат сменился новым: реплика — первая в нём
             self.history = []
         self.n += 1
-        self._chat("me", text)
+        self._chat("me", text, id)
         self.emit({"bubble": {"id": f"me-{os.getpid()}-{self.n}", "who": "Ты", "text": text, "kind": "me", "append": False}})
         if failed:  # ход уже в «thinking», done() вернёт в покой
             self.events.put_nowait(("error", f"Claude: {failed}", n))
@@ -366,7 +371,7 @@ class Oma:
                 parts, self.sending = self.sending, []  # звук этой реплики — её: следующий черновик его не тронет
                 pre, self.pre_sending = self.pre_sending, None
                 n = self.conv.turn_no
-                self.to_brain(self._deliver, a[1], a[2], self.conv.voiced, parts, pre, self._sound(), n, turn=n)
+                self.to_brain(self._deliver, a[1], a[2], self.conv.voiced, parts, pre, self._sound(), n, self.ask_id, turn=n)
             elif k == "presence":
                 self.send({"cmd": "presence", "state": a[1]})
             elif k == "interrupt":  # после отправки, что ещё в очереди: перебить ход, а не реплику до него

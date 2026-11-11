@@ -2846,3 +2846,21 @@ def test_typed_plan_approval_reads_back_pressed_option():
     r = run(o.tell(PLAN, "", "одобрить план", option=1))
     assert calls == [("menu", "s1"), ("tell", "s1", "1", "", "Yes, and use auto mode")] and asked_ == []
     assert "Нажат пункт «Yes, and use auto mode»" in r
+
+
+def test_typed_ask_id_comes_back_with_its_chat_line():
+    # окно узнаёт принятую реплику по id, а не по совпадению текста эха
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+
+    async def go():
+        await oma.command({"do": "ask", "text": "как дела у почты", "id": "q1"})
+        await settle(oma)
+        await oma.command({"do": "talk"})
+        await oma.event(("start", 1)); await oma.event(("phrase", "а у спика", 1))
+        clk.t += SEND_PAUSE; await oma.event(("tick",))
+        await settle(oma)
+    run(go())
+    mine = [e["line"]["chat_delta"] for e in emitted if e["line"].get("chat_delta", {}).get("role") == "me"]
+    assert mine == [{"key": "new", "role": "me", "text": "как дела у почты", "id": "q1"},
+                    {"key": "new", "role": "me", "text": "а у спика"}], "голосом сказанное — без id"
