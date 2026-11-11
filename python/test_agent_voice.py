@@ -2804,13 +2804,13 @@ def test_status_line_events_only_on_change_and_her_sound_by_voiced():
     last = {}
     line = lambda speaking, voiced, played=0.0, out="speakers", quiet=False: {
         "running": True, "speaking": speaking, "voiced": voiced, "played_at": played, "out": out, "quiet": quiet}
-    assert status_events(line(False, 0), last) == [("audio", False, 0.0, 0), ("quiet", False), ("out", "speakers")]
+    assert status_events(line(False, 0), last) == [("audio", False, 0.0, 0, False), ("quiet", False), ("out", "speakers")]
     assert status_events(line(False, 0), last) == [], "повтор «не говорит» — не событие"
-    assert status_events(line(True, 0), last) == [("audio", True, 0.0, 0)]
+    assert status_events(line(True, 0), last) == [("audio", True, 0.0, 0, False)]
     assert status_events(line(True, 0, 0.0, "headphones"), last) == [("out", "headphones")]
-    assert status_events(line(False, 1, 12.5, "headphones"), last) == [("audio", False, 12.5, 1)]
-    assert status_events(line(False, 2, 12.5, "headphones"), last) == [("audio", False, 12.5, 2)], "реплика без звука в хвосте"
-    assert status_events({"running": True, "speaking": False}, {})[0] == ("audio", False, None, None), \
+    assert status_events(line(False, 1, 12.5, "headphones"), last) == [("audio", False, 12.5, 1, False)]
+    assert status_events(line(False, 2, 12.5, "headphones"), last) == [("audio", False, 12.5, 2, False)], "реплика без звука в хвосте"
+    assert status_events({"running": True, "speaking": False}, {})[0] == ("audio", False, None, None, False), \
         "played_at нет — None (конец звука — сейчас), а не 0.0"
 
 
@@ -2854,7 +2854,46 @@ def test_reply_without_sound_in_tail_of_previous_phrase_ends_speaking():
     assert oma.conv.state == "listening" and oma.conv.played_at == 100.7
 
 
-HERE = "Эй, ты тут? Есть новости."
+def test_user_pause_mid_answer_ends_speaking():
+    # 2026-11-12 (ревью): пауза пользователя посреди её ответа возвращает фразу в очередь службы — voiced не растёт;
+    # «говорю» кончается по paused строки состояния: слушает с таймером тишины, разговор кончается сам
+    from agent_voice.__main__ import status_events
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    last = {}
+
+    async def status(speaking, voiced, paused):
+        line = {"running": True, "speaking": speaking, "voiced": voiced, "played_at": 10.0, "paused": paused}
+        for ev in status_events(line, last):
+            await oma.event(ev)
+
+    async def go():
+        await status(False, 0, False)
+        await oma.command({"do": "talk"})
+        oma.conv.ask("расскажи про погоду")
+        await oma.event(("delta", "Солнечно и тепло. Плюс двадцать."))
+        await oma.event(("done", None))
+        await status(True, 0, False)
+        await status(True, 0, True)  # кнопка «пауза»: строка уходит сразу, звук ещё не оборван
+        await status(False, 0, True)
+        assert oma.conv.state == "listening" and oma.conv.quiet_at is not None
+        clk.t += 31
+        await oma.event(("tick",))
+        assert not oma.conv.active, "тишина 30 с — разговор кончился"
+    run(go())
+
+
+def test_user_pause_between_her_phrases_ends_speaking():
+    # пауза, пока её следующая фраза ещё не встала в очередь службы (speaking уже false): строка меняет только paused
+    from agent_voice.__main__ import status_events
+    last = {}
+    line = lambda paused: {"running": True, "speaking": False, "voiced": 0, "played_at": 1.0, "paused": paused}
+    status_events(line(False), last)
+    assert status_events(line(True), last) == [("audio", False, 1.0, 0, True)]
+    assert status_events(line(True), last) == []
+
+
+HERE ="Эй, ты тут? Есть новости."
 
 
 def test_are_you_there_echo_judged_by_its_own_question():

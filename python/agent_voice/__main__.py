@@ -35,16 +35,17 @@ def notify(text):
 
 
 def status_events(d, last):
-    """Строка состояния службы → события Омы, только смены. Её звук — audio(speaking, played_at, voiced): смена
+    """Строка состояния службы → события Омы, только смены. Её звук — audio(speaking, played_at, voiced, paused): смена
     speaking или, пока служба молчит, рост voiced (реплика без звука — только код или эмодзи: звука не будет, played_at
-    прежний). Конец её речи решает Ома по voiced, а не по «не говорит»: повтор «не говорит» до начала звука — не конец."""
-    speaking, played, voiced = bool(d.get("speaking")), d.get("played_at"), d.get("voiced")
-    evs = [("audio", speaking, played, voiced)] if last.get("speaking") != speaking or (
-        not speaking and last.get("voiced") != voiced) else []
+    прежний) и смена паузы. Конец её речи решает Ома по voiced, а не по «не говорит»: повтор «не говорит» до начала
+    звука — не конец; на паузе пользователя (кнопка «пауза») её фраза ждёт в очереди службы — тоже конец."""
+    speaking, played, voiced, paused = bool(d.get("speaking")), d.get("played_at"), d.get("voiced"), bool(d.get("paused"))
+    evs = [("audio", speaking, played, voiced, paused)] if last.get("speaking") != speaking or (
+        not speaking and (last.get("voiced"), last.get("paused")) != (voiced, paused)) else []
     for field, v in (("quiet", bool(d.get("quiet"))), ("out", d.get("out"))):
         if last.get(field) != v:
             evs.append((field, v))
-    last.update(speaking=speaking, voiced=voiced, quiet=bool(d.get("quiet")), out=d.get("out"))
+    last.update(speaking=speaking, voiced=voiced, paused=paused, quiet=bool(d.get("quiet")), out=d.get("out"))
     return evs
 
 
@@ -268,13 +269,14 @@ class Oma:
             # последний кусок, а pw-cat доигрывает канал до played_at — сырой микрофон слышал бы его без эхоподавления
             until = ev[2] if len(ev) > 2 else None
             voiced = ev[3] if len(ev) > 3 else None  # нет счётчика — конец её речи по «не говорит», как раньше
+            paused = len(ev) > 4 and ev[4]  # пауза пользователя: фраза ждёт в очереди службы, а Ома слушает с таймером тишины
             self.sound += 1
             if ev[1]:
                 self.ear.speaking = True
             else:
                 self.bg(self._tail_over(self.sound, until or 0.0))
             # >=, а не ==: лишняя засчитанная реплика оставила бы её в «говорю» навсегда, а не на один ответ раньше
-            await self.act(c.audio(ev[1], until, voiced is None or voiced >= self.says))
+            await self.act(c.audio(ev[1], until, voiced is None or voiced >= self.says or paused))
         elif kind == "quiet":
             await self.act(c.set_quiet(ev[1]))
         elif kind == "out":
