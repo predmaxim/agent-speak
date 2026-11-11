@@ -1204,7 +1204,13 @@ impl State {
                 self.purge();
             }
             Msg::Oma { action } => self.oma_send(&action),
-            Msg::Emit { line } => self.broadcast_line(&format!("{line}\n")),
+            Msg::Emit { mut line } => {
+                // пузырь орба — простой текст, как у пузырей агентов; чат окна разметку рисует и получает её как есть
+                if let Some(t) = line["bubble"]["text"].as_str() {
+                    line["bubble"]["text"] = crate::text::clean::plain(t).into();
+                }
+                self.broadcast_line(&format!("{line}\n"))
+            }
             Msg::Pause => {
                 self.oma_paused = false; // кнопка пользователя главнее: дальше пауза — его
                 let paused = self.shared.queue.lock().unwrap().paused();
@@ -2032,6 +2038,12 @@ mod tests {
         next(&mut r);
         st.on_msg(Msg::Emit { line: serde_json::json!({"chat": {"key": "new", "messages": []}}) });
         assert_eq!(next(&mut r)["chat"]["key"], "new");
+        // пузырь орба рисуется простым текстом: звёздочки markdown из ответа мозга ему не нужны; чат окна — с разметкой
+        st.on_msg(Msg::Emit { line: serde_json::json!({"bubble": {"id": "oma-1", "who": "Ома", "text": "* **Тесты** прошли", "kind": "oma", "append": true}}) });
+        let b = next(&mut r);
+        assert_eq!((b["bubble"]["text"].as_str(), b["bubble"]["append"].as_bool()), (Some("Тесты прошли"), Some(true)));
+        st.on_msg(Msg::Emit { line: serde_json::json!({"chat_delta": {"text": "**жирный**"}}) });
+        assert_eq!(next(&mut r)["chat_delta"]["text"], "**жирный**");
     }
 
     #[test]
