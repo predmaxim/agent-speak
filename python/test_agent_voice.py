@@ -1303,6 +1303,45 @@ def test_prompt_demands_short_answers():
     assert "«Да» или «Нет»" in brain.OMA_PROMPT and "одной-тремя" not in brain.OMA_PROMPT
 
 
+def test_prompt_gives_short_examples_and_voice_text_split():
+    # 2026-11-11: ответы в 55–60 % длиннее двух фраз, markdown в пузырях — примеры коротких ответов и метка подробностей
+    from agent_voice import brain
+    from agent_voice.conversation import MORE
+    p = brain.OMA_PROMPT
+    assert "→ «Да.»" in p and "→ «Нет" in p and "markdown" in p and MORE in p
+    assert "до метки" in p, "кому и что передала, вопрос к пользователю — вслух"
+
+
+def _said(acts):
+    return [a[1] for a in acts if a[0] == "say"]
+
+
+def test_details_after_marker_go_to_window_only():
+    from agent_voice.conversation import MORE
+    cv = _thinking("почему упали тесты")
+    acts = cv.delta("Упал один тест в слухе. ‹подро") + cv.delta("бно› В test_echo ожидали «Ок.», пришло пусто. ")
+    acts += cv.delta("Это из-за хвоста её звука.") + cv.done()
+    assert _said(acts) == ["Упал один тест в слухе."]
+    shown = [a[1] for a in acts if a[0] == "show"]
+    assert shown[-1] == "В test_echo ожидали «Ок.», пришло пусто. Это из-за хвоста её звука." and MORE not in " ".join(shown)
+
+
+def test_marker_first_says_nothing_and_unfinished_marker_is_spoken():
+    cv = _thinking("перечисли проекты")
+    acts = cv.delta("‹подробно› agent-speak, omarchy-mail.") + cv.done()
+    assert _said(acts) == [] and ("show", "agent-speak, omarchy-mail.") in acts
+    cv = _thinking("сколько стоит")
+    acts = cv.delta("Примерно ‹п") + cv.delta("ять› рублей.") + cv.done()
+    assert _said(acts) == ["Примерно ‹пять› рублей."], "не метка — звучит как есть"
+
+
+def test_marker_hidden_in_chat_history():
+    from agent_voice.brain import messages_of
+    m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
+    assert messages_of([m("assistant", "Упал один тест. ‹подробно› В test_echo.")]) == \
+        [{"role": "oma", "text": "Упал один тест. В test_echo."}]
+
+
 def test_cancel_word_stops_everything_and_ends_conversation():
     # «отбой»/«отмена» — не реплика мозгу: всё, что звучит (и чтение), обрывается, разговор кончается, микрофон выключен
     clk, cv = _conv()

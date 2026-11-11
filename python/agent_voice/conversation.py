@@ -38,6 +38,8 @@ FILLERS = {"mcp__oma__agents": "Смотрю агентов.", "mcp__oma__agent_
            "mcp__oma__tell": "Готовлю поручение.", "mcp__oma__projects": "Смотрю проекты.", "mcp__oma__launch": "Готовлю запуск.",
            "Read": "Смотрю файлы.", "Glob": "Смотрю файлы.", "Grep": "Смотрю файлы.", "WebSearch": "Ищу в сети.",
            "thinking": "Секунду, подумаю.", "mcp__oma__presence": ""}
+# Голосом — коротко, текстом — сколько нужно: после этой метки ответ мозга только в окне (формат задаёт мозг, как [молчу])
+MORE = "‹подробно›"
 # Междометие, кашель, вздох — как их пишет whisper («Кхм.», «Эм...», «Э-э-э», «Кхе-кхе»): не реплика
 NOISE = re.compile(r"(?:э+м*|м+|х+м+|к+х+[еам]*|а+|о+х*|ой|ай|эх|ух|уф|ах|фу|ну+)$")
 
@@ -130,6 +132,8 @@ class Conversation:
         self.spoke_at = None   # когда смолк её звук
         self.voiced = False    # последняя реплика сказана голосом, не набрана: опасное по ней — только с подтверждением
         self.asked = False     # в этом ходе код спросил подтверждение поручения: дальше ход молчит
+        self.hold = ""         # конец текста, похожий на начало метки MORE: ждёт следующей дельты
+        self.more = None       # подробности после метки MORE (None — метки ещё не было)
 
     @property
     def silence(self):
@@ -169,6 +173,7 @@ class Conversation:
 
     def _send(self, text, ctx="", voiced=True):
         self.turn, self.voiced, self.said, self.asked = True, voiced, "", False
+        self.hold, self.more = "", None
         self.head = ""
         self.chunker.reset()
         return [("send", text, ctx)] + self._to("thinking")
@@ -378,8 +383,27 @@ class Conversation:
             if not self.head.strip() or self.head.lstrip().startswith("["):
                 return []
             text, self.head = self.head, None
-            return self._discard() + self._speak(self.chunker.feed(text))  # ответ по делу — прерванный не нужен
-        return self._speak(self.chunker.feed(text))
+            return self._discard() + self._voice(text)  # ответ по делу — прерванный не нужен
+        return self._voice(text)
+
+    def _voice(self, text):
+        """Текст хода: до метки MORE — голосом и в окне, после — только в окне (одним куском в конце хода)."""
+        if self.more is not None:
+            self.more += text
+            return []
+        buf = self.hold + text
+        i = buf.find(MORE)
+        if i >= 0:
+            self.hold, self.more = "", buf[i + len(MORE):]
+            return self._speak(self.chunker.feed(buf[:i]) + self.chunker.flush())
+        keep = next((k for k in range(min(len(MORE) - 1, len(buf)), 0, -1) if MORE.startswith(buf[-k:])), 0)
+        self.hold = buf[len(buf) - keep:]
+        return self._speak(self.chunker.feed(buf[:len(buf) - keep]))
+
+    def _finish(self):
+        """Конец хода: недосказанное — голосом, подробности после метки — в окно."""
+        rest, more, self.hold, self.more = self.hold, (self.more or "").strip(), "", None
+        return self._speak(self.chunker.feed(rest) + self.chunker.flush()) + ([("show", more)] if more else [])
 
     def done(self):
         if not self.turn:
@@ -393,7 +417,7 @@ class Conversation:
                 return self._resume()  # перебили не её — продолжает прерванный ответ
             acts = []
         else:
-            acts = self._discard() + self._speak(self.chunker.feed(self._unmark(head)) + self.chunker.flush())
+            acts = self._discard() + self._voice(self._unmark(head)) + self._finish()
         if self.state == "speaking":
             return acts  # дозвучит — audio(False) вернёт в покой
         if self._closing():
