@@ -132,13 +132,13 @@ function omaUp(st) {
 }
 
 // A typed question goes out once, while Oma takes it; the field keeps it
-// until it is `taken`: her chat echoes it back as my line.
+// until it is `taken`: her chat echoes my line back with the question's id.
 function askable(text, asked, st) {
   return text !== "" && text !== asked && omaUp(st)
 }
 
-function taken(asked, d) {
-  return asked !== "" && d.role === "me" && d.text === asked
+function taken(id, d) {
+  return id !== "" && d.role === "me" && d.id === id
 }
 
 // Time since `since` (seconds): a key for tr(key, n).

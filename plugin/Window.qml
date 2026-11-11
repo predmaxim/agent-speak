@@ -57,9 +57,10 @@ Item {
   property var chatList: []
   property real now: Date.now() / 1000
   property string asked: ""          // the question sent, until Oma's chat has it
+  property string askedId: ""        // its id: her chat line for it comes back with it
   readonly property bool omaUp: Model.omaUp(speech)
   // Oma went down: what she had not taken is lost with her, Enter sends it again.
-  onOmaUpChanged: if (!omaUp) asked = ""
+  onOmaUpChanged: if (!omaUp) { asked = ""; askedId = "" }
 
   // One cursor for keys and mouse: a row of the page (-1 none) or, with
   // onHead, the header's button headCol. On the main page it holds the row's
@@ -148,12 +149,14 @@ Item {
   }
 
   // The question stays in the field until Oma echoes it into the chat
-  // (onChatDelta): with Oma down it is not lost, the note says why.
+  // (onChatDelta, by its id): with Oma down it is not lost, the note says why.
+  // The id is the time: unique across shell restarts, one question per Enter.
   function ask() {
     var text = field.text.trim()
     if (!Model.askable(text, root.asked, root.speech)) return
     root.asked = text
-    root.send({ do: "ask", text: text, key: root.chatKey })
+    root.askedId = String(Date.now())
+    root.send({ do: "ask", text: text, key: root.chatKey, id: root.askedId })
   }
 
   function showPage(p) {
@@ -296,9 +299,10 @@ Item {
       root.setMessages(shownChat.messages)
     }
     function onChatDelta(d) {
-      if (Model.taken(root.asked, d)) {
+      if (Model.taken(root.askedId, d)) {
         if (field.text.trim() === root.asked) field.text = ""   // not what the user typed since
         root.asked = ""
+        root.askedId = ""
       }
       if (d.key === root.chatKey) root.setMessages(Model.chatApply(root.messages, d))
     }

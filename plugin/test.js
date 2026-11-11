@@ -178,9 +178,11 @@ assert.strictEqual(M.askable("", "", st), false)
 assert.strictEqual(M.askable("как дела", "как дела", st), false)              // already sent, not echoed yet
 assert.strictEqual(M.askable("как дела", "", Object.assign({}, st, { oma: "off" })), false)
 assert.strictEqual(M.askable("как дела", "", M.OFFLINE), false)
-assert.strictEqual(M.taken("как дела", { key: "chat:1", role: "me", text: "как дела" }), true)
-assert.strictEqual(M.taken("как дела", { key: "chat:1", role: "oma", text: "как дела" }), false)
-assert.strictEqual(M.taken("как дела", { key: "chat:1", role: "me", text: "другое" }), false)
+// taken: by the id the window gave the question, not by the text — a voiced line or another typed one with the same words is not it
+assert.strictEqual(M.taken("17", { key: "chat:1", role: "me", text: "как дела", id: "17" }), true)
+assert.strictEqual(M.taken("17", { key: "chat:1", role: "me", text: "как дела" }), false)              // said by voice: no id
+assert.strictEqual(M.taken("17", { key: "chat:1", role: "me", text: "как дела", id: "16" }), false)
+assert.strictEqual(M.taken("17", { key: "chat:1", role: "oma", text: "как дела", id: "17" }), false)
 assert.strictEqual(M.taken("", { key: "chat:1", role: "me", text: "" }), false)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
