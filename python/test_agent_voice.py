@@ -2124,7 +2124,7 @@ def test_turn_end_sets_send_pause():
     from agent_voice.conversation import WAIT_MORE
     for done, wait in ((0.95, 0.0), (0.7, SEND_PAUSE), (0.2, WAIT_MORE), (None, SEND_PAUSE)):
         clk, cv = _conv()
-        cv.talk(); cv.speech_start(1); cv.phrase("скажи агенту, пусть", 1, done)
+        cv.talk(); cv.speech_start(1); cv.phrase("скажи агенту, пусть", 1); cv.turn_end(done)
         clk.t += max(wait - 0.05, 0)
         if wait:
             assert not any(a[0] == "send" for a in cv.tick()), done
@@ -2140,13 +2140,39 @@ def test_oma_asks_turn_end_about_whole_utterance():
 
     async def go():
         await oma.command({"do": "talk"})
+        await oma.event(("start", 1))
+        await oma.event(("start", 2))  # продолжил, пока распознаётся первая фраза: отправки по ней нет
         for n, (text, pcm) in enumerate((("какая погода", b"aa"), ("в москве", b"bb")), 1):
-            await oma.event(("start", n))
             oma.ear.audio[n] = pcm
             await oma.event(("phrase", text, n))
-        await oma.event(("tick",))  # договорил — без паузы
     run(go())
-    assert seen == [b"aa", b"aabb"] and oma.brain.texts == ["Какая погода в Москве?"]
+    assert seen == [b"aa", b"aabb"] and oma.brain.texts == ["Какая погода в Москве?"], "договорил — сразу, без тика"
+
+
+def test_smart_turn_only_for_accepted_phrases():
+    # эхо, фраза, пока она думает, и прочее непринятое Smart Turn не судит: зря жгли CPU (журнал 2026-11-07)
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    seen = []
+    oma.turn_end = SimpleNamespace(complete=lambda pcm: seen.append(pcm) or 0.3)
+    oma.ear.echo, oma.ear.audio = True, {}
+
+    async def go():
+        await oma.command({"do": "talk"})
+        oma.conv.ask("что ты умеешь")
+        await oma.event(("delta", "Могу смотреть, что делают твои агенты."))
+        await oma.event(("done", None))
+        await oma.event(("audio", True))
+        await oma.event(("start", 1))
+        oma.ear.audio[1] = b"echo"
+        await oma.event(("phrase", "Могу смотреть.", 1))  # её эхо
+        await oma.event(("audio", False))
+        clk.t += 5
+        await oma.event(("start", 2))
+        oma.ear.audio[2] = b"user"
+        await oma.event(("phrase", "а что с почтой", 2))
+    run(go())
+    assert seen == [b"user"]
 
 
 def test_turn_end_failure_falls_back_to_pause():

@@ -122,6 +122,7 @@ class Conversation:
         self.suspended = False # её речь на паузе по перебиву: перебил не ей («[молчу]», кашель) — продолжит, иначе выбросить
         self.head = ""         # начало хода до первого знака; ход с «[» — метка «[молчу]»/«[конец]», решится в done; None — решено
         self.send_at = None    # когда отправить черновик
+        self.heard_at = 0.0    # когда в черновик вошла последняя фраза
         self.quiet_at = None   # когда закончить разговор от тишины
         self.window = None     # разговор открыт окном ответа: {kind, said, first, close}
         self.echo = False      # слух — через эхоподавление (Ома в динамиках): её голос просачивается в микрофон
@@ -302,7 +303,7 @@ class Conversation:
             self.quiet_at = None
         return acts + [("draft", self.draft, True)]
 
-    def phrase(self, text, n, done=None):
+    def phrase(self, text, n):
         self.heard = max(self.heard, n)
         if self.window and not self.window["first"]:
             return []  # на окно уже ответили: речь в комнате — не Оме
@@ -324,10 +325,16 @@ class Conversation:
         if len(t) < 2 or is_noise(t):
             return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else [("drop_draft",)]
         self.draft = f"{self.draft} {t}".strip()
-        wait = SEND_PAUSE if done is None else 0.0 if done >= DONE else SEND_PAUSE if done >= UNDONE else WAIT_MORE
-        self.send_at = self.clock() + wait
+        self.heard_at = self.clock()
+        self.send_at = self.heard_at + SEND_PAUSE
         self.quiet_at = self.clock() + self.silence
         return pre + [("draft", self.draft, self.hearing)]
+
+    def turn_end(self, done):
+        """Smart Turn по фразе, вошедшей в черновик (done — вероятность, что договорил; None — не знает): уверен —
+        отправка сразу, оборвал на полуслове — ждать продолжения дольше. Эхо и непринятое он не судит: зря CPU."""
+        if done is not None and self.send_at is not None:
+            self.send_at = self.heard_at + (0.0 if done >= DONE else SEND_PAUSE if done >= UNDONE else WAIT_MORE)
 
     def tick(self):
         now = self.clock()

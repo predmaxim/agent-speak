@@ -170,15 +170,15 @@ class Oma:
             await self.act(c.speech_start(*ev[1:]))
         elif kind == "phrase":
             pcm, before = getattr(self.ear, "audio", {}).pop(ev[2], b""), c.draft
-            done = await self._turn_done(pcm) if pcm and ev[1].strip() else None
-            acts = c.phrase(ev[1], ev[2], done)
+            acts = c.phrase(ev[1], ev[2])
             if pcm and c.draft != before:  # фраза вошла в черновик; начало срезано как эхо — её звук целиком не распознавать
+                c.turn_end(await self._turn_done(pcm))  # Smart Turn — только по принятой: эхо и непринятое не судит
                 self.utter.append(pcm if c.draft.endswith(ev[1].strip()) else None)
                 self._prehear()
             if ev[1].strip():  # без текста: в нём бывает чужой разговор в комнате
                 verdict = "принята" if c.draft != before else ("эхо" if ev[2] == c.echo_n else "не принята")
                 print(f"agent_voice: слух: фраза {len(ev[1].split())} сл., {verdict}", file=sys.stderr, flush=True)
-            await self.act(acts)
+            await self.act(acts + c.tick())  # срок отправки уже настал (Smart Turn уверен) — не ждать тика (до 0,2 с)
         elif kind == "tick":
             await self.act(c.tick())
         elif kind == "locked":
