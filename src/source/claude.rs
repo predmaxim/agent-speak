@@ -179,6 +179,12 @@ fn main_records(content: &str) -> impl DoubleEndedIterator<Item = Value> + '_ {
     records(content, false)
 }
 
+/// В хвосте есть целая запись хода (главной ветки; sidechain — и сабагента): без неё turn_over и in_flight слепы,
+/// хвост читается дальше назад (`tail_of`).
+pub fn has_record(content: &str, sidechain: bool) -> bool {
+    records(content, sidechain).next().is_some()
+}
+
 /// Ход кончился: конец хода (stop_hook_summary, turn_duration), Esc пользователя или ошибка API — после них агент ждёт.
 /// Файл сессии бывает «busy» часами, пока идут фоновые задачи, а на Esc и ошибку API хуков нет.
 pub fn turn_over(content: &str) -> bool {

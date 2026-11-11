@@ -4,14 +4,36 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-/// Хвост транскрипта: последний вызов инструмента всегда в конце, весь файл (мегабайты) читать незачем.
-pub fn tail_of(path: &str) -> String {
-    let mut buf = Vec::new();
-    if let Ok(mut f) = std::fs::File::open(path) {
-        let _ = f.seek(SeekFrom::End(-256 * 1024)).or_else(|_| f.seek(SeekFrom::Start(0)));
-        let _ = f.read_to_end(&mut buf);
+/// Окно хвоста транскрипта: сначала столько, потом вдвое больше — но не больше TAIL_MAX.
+const TAIL: u64 = 256 * 1024;
+const TAIL_MAX: u64 = 16 << 20;
+
+/// Хвост транскрипта целыми строками: последний вызов инструмента всегда в конце, весь файл (мегабайты) читать незачем.
+/// Одна строка (результат инструмента, api-request-blob) бывает больше окна — тогда окно растёт вдвое, пока `enough`
+/// не найдёт в нём нужную запись, но не дальше TAIL_MAX.
+pub fn tail_of(path: &str, enough: impl Fn(&str) -> bool) -> String {
+    let Ok(mut f) = std::fs::File::open(path) else { return String::new() };
+    let len = f.metadata().map_or(0, |m| m.len());
+    let mut window = TAIL;
+    loop {
+        let start = len.saturating_sub(window);
+        let mut buf = Vec::new();
+        if f.seek(SeekFrom::Start(start)).is_err() || f.read_to_end(&mut buf).is_err() {
+            return String::new();
+        }
+        // первая строка окна посреди файла — обрезок
+        let from = if start == 0 { 0 } else { buf.iter().position(|&b| b == b'\n').map_or(buf.len(), |i| i + 1) };
+        let text = String::from_utf8_lossy(&buf[from..]).into_owned();
+        if start == 0 || window >= TAIL_MAX || enough(&text) {
+            return text;
+        }
+        window *= 2;
     }
-    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// В тексте есть целая строка JSON — для файлов без разбора записей (rollout Codex).
+pub fn has_line(text: &str) -> bool {
+    text.lines().any(|l| serde_json::from_str::<serde_json::Value>(l).is_ok())
 }
 
 pub struct Tailer {
@@ -53,6 +75,24 @@ impl Tailer {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn tail_reads_back_past_a_line_bigger_than_the_window() {
+        // результат инструмента или api-request-blob больше 256 КиБ: окно из одного обрезка — сторож слеп
+        let p = std::env::temp_dir().join(format!("tail-big-{}", std::process::id()));
+        let call = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash"}]}}"#;
+        let huge = format!("{{\"type\":\"api-request-blob\",\"x\":\"{}\"}}", "я".repeat(300 * 1024));
+        let old = "{\"type\":\"user\"}\n".repeat(100_000); // 1,5 МБ истории
+        std::fs::write(&p, format!("{old}{call}\n{huge}\n")).unwrap();
+        let path = p.to_string_lossy();
+        let t = tail_of(&path, |t| t.lines().any(|l| l.contains("\"assistant\"")));
+        assert!(t.contains(call), "окно дочитано назад до целой записи");
+        assert_eq!(t.lines().next(), Some("{\"type\":\"user\"}"), "обрезок строки в начале окна отброшен");
+        assert!(t.len() <= 1 << 20, "дальше нужного не читает: {}", t.len());
+        assert_eq!(tail_of(&path, |_| true), "", "окно не растёт без нужды; обрезок строки — не запись");
+        assert!(has_line(&t) && !has_line("обрезок\n"));
+        std::fs::remove_file(&p).unwrap();
+    }
 
     #[test]
     fn tail_starts_at_end() {

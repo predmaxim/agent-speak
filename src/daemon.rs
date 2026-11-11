@@ -12,7 +12,7 @@ use crate::news::{Board, Class, News, SUMMARY};
 use crate::notice::notify as notice;
 use crate::presence::{self, Mode, Presence};
 use crate::queue::{Item, Kind, Queue};
-use crate::source::{claude, codex, tail::{tail_of, Tailer}};
+use crate::source::{claude, codex, tail::{has_line, tail_of, Tailer}};
 use crate::speaker::{self, Shared};
 use crate::text::{prepare, terms::Terms};
 use crate::tts::Tts;
@@ -480,7 +480,7 @@ fn sub_call(transcript: &Path, call: &serde_json::Value) -> Option<serde_json::V
             && std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).is_some_and(|m| m["toolUseId"] == call["id"])
     })?;
     let jsonl = meta.to_string_lossy().strip_suffix(".meta.json")?.to_string() + ".jsonl";
-    claude::sub_in_flight(&tail_of(&jsonl))
+    claude::sub_in_flight(&tail_of(&jsonl, |t| claude::has_record(t, true)))
 }
 
 /// Факты сторожа: активность — новейшее из хуков, транскрипта и транскриптов сабагентов; у Claude — хвост транскрипта.
@@ -490,8 +490,9 @@ fn agent_facts(e: &Entry, activity: u64) -> Facts {
     f.active_at = f.active_at.max(mtime(t));
     (f.pane, f.shell) = (mux::locate(e.pid), shell_of(e.pid));
     f.resume = watch::resume_cmd(e.agent, &e.id, &cmdline(e.pid), watch::RESUME_PROMPT);
-    let tail = tail_of(&e.transcript);
-    if e.agent == "claude" {
+    let claude = e.agent == "claude";
+    let tail = tail_of(&e.transcript, |t| if claude { claude::has_record(t, false) } else { has_line(t) });
+    if claude {
         for s in std::fs::read_dir(t.with_extension("").join("subagents")).into_iter().flatten().flatten() {
             f.active_at = f.active_at.max(mtime(&s.path()));
         }
@@ -1428,7 +1429,7 @@ impl State {
                 // «ждёт ввода» — простой, а не вопрос: молчим, реестр не трогаем
                 let raw = p["message"].as_str().unwrap_or_default();
                 if !matches!(raw, "" | "Claude is waiting for your input") {
-                    let tail = tail_of(p["transcript_path"].as_str().unwrap_or_default());
+                    let tail = tail_of(p["transcript_path"].as_str().unwrap_or_default(), |t| claude::has_record(t, false));
                     let msg = notification_text(raw, || claude::last_tool(&tail));
                     let question = claude::last_question(&tail);
                     let text = question.as_ref().map_or(msg.clone(), |q| format!("вопрос: {q}"));
@@ -1457,7 +1458,7 @@ impl State {
                 let last = final_message(p, &transcript).unwrap_or_default();
                 // помощники в фоне — «Жду ревью» не итог, а агент работает
                 let since = self.registry.get(&session).map_or(0, |e| proc_started(e.pid));
-                let waiting = helpers(&transcript, &tail_of(&transcript.to_string_lossy()), since) > 0;
+                let waiting = helpers(&transcript, &tail_of(&transcript.to_string_lossy(), |t| claude::has_record(t, false)), since) > 0;
                 if waiting {
                     self.registry.status(&session, &last, now);
                 } else {

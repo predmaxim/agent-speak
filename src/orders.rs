@@ -90,7 +90,7 @@ pub fn tell(session: &str, option: usize, text: &str) -> Result<(), String> {
     let live = crate::agents::scan_all().into_iter().find(|l| l.id == session).ok_or("агента нет среди живых")?;
     let pane = mux::locate(live.pid).ok_or("агент не в Orca и не в herdr — передать не могу")?;
     // у Codex меню не разбираем — всегда текст
-    let call = if live.agent == "claude" { claude::in_flight(&tail_of(&live.transcript.to_string_lossy())) } else { None };
+    let call = if live.agent == "claude" { claude::in_flight(&tail_of(&live.transcript.to_string_lossy(), |t| claude::has_record(t, false))) } else { None };
     let steps = steps(call.as_ref(), &one_line(text), option, || mux::screen(&pane))?;
     mux::perform(&pane, &steps)
 }
