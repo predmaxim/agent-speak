@@ -2904,3 +2904,30 @@ def test_typed_ask_id_comes_back_with_its_chat_line():
     mine = [e["line"]["chat_delta"] for e in emitted if e["line"].get("chat_delta", {}).get("role") == "me"]
     assert mine == [{"key": "new", "role": "me", "text": "как дела у почты", "id": "q1"},
                     {"key": "new", "role": "me", "text": "а у спика"}], "голосом сказанное — без id"
+
+
+def test_order_of_interrupted_turn_is_not_passed_and_does_not_trip_the_next():
+    # 2026-11-12 (ревью): tell по плану ждал чтения экрана, а за это время начался следующий ход: tripped ставился уже
+    # в новом ходе (набранное поручение нового хода получало ложный отказ), а набранное поручение прерванного уходило
+    for voiced in (True, False):
+        gate, calls, asked_ = asyncio.Event(), [], []
+
+        async def fake(*args):
+            calls.append(args)
+            if args[0] == "menu":
+                await gate.wait()
+                return True, PLAN_MENU
+            return True, ""
+        o = Orders(run=fake, clock=Clock())
+        o.ask = lambda question, order: asked_.append(question)
+
+        async def go():
+            o.turn(voiced, "одобряю план", 1)
+            t = asyncio.create_task(o.tell(PLAN, "", "одобрить план", option=1))
+            await asyncio.sleep(0)  # tell ждёт agent-speak menu
+            o.turn(False, "передай почте: прогони тесты", 2)
+            gate.set()
+            return await t, await o.tell(E[0], "Прогони тесты", "прогнать тесты")
+        r1, r2 = run(go())
+        assert r1.startswith("Не передано: ход прерван") and asked_ == [] and not o.tripped, voiced
+        assert r2.startswith("Передано проекту omarchy-mail") and calls == [("menu", "s1"), ("tell", "s1", "0", "Прогони тесты")]
