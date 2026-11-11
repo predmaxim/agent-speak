@@ -493,8 +493,13 @@ fn agent_facts(e: &Entry, activity: u64) -> Facts {
     let claude = e.agent == "claude";
     let tail = tail_of(&e.transcript, |t| if claude { claude::has_record(t, false) } else { has_line(t) });
     if claude {
-        for s in std::fs::read_dir(t.with_extension("").join("subagents")).into_iter().flatten().flatten() {
-            f.active_at = f.active_at.max(mtime(&s.path()));
+        // сабагенты и агенты его Workflow (subagents/workflows/<run>/)
+        let subagents = t.with_extension("").join("subagents");
+        let runs = std::fs::read_dir(subagents.join("workflows")).into_iter().flatten().flatten().map(|r| r.path());
+        for dir in std::iter::once(subagents.clone()).chain(runs) {
+            for s in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                f.active_at = f.active_at.max(mtime(&s.path()));
+            }
         }
         (f.helpers, f.call, f.error) = (helpers(t, &tail, proc_started(e.pid)), claude::in_flight(&tail), claude::last_api_error(&tail));
         f.turn_over = claude::turn_over(&tail);
@@ -2466,6 +2471,29 @@ mod tests {
     fn live(id: &str) -> Live {
         Live { id: id.to_string(), agent: "claude", pid: 1, title: format!("T-{id}"),
             cwd: format!("/p/{id}"), transcript: PathBuf::new(), state: crate::agents::State::Working, status_at: 0 }
+    }
+
+    #[test]
+    fn workflow_agents_count_as_activity_and_helpers() {
+        // агент ждёт свой Workflow: молчит родитель, пишут агенты workflow — это не тишина, а помощник в работе
+        let root = std::env::temp_dir().join(format!("agent-speak-wf-facts-{}", std::process::id()));
+        let run = root.join("s/subagents/workflows/wf_1");
+        std::fs::create_dir_all(&run).unwrap();
+        let transcript = root.join("s.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        let old = std::time::UNIX_EPOCH + Duration::from_secs(1000);
+        std::fs::File::options().write(true).open(&transcript).unwrap().set_modified(old).unwrap();
+        std::fs::write(run.join("journal.jsonl"), "{\"type\":\"launched\"}\n").unwrap();
+        std::fs::write(run.join("agent-a.jsonl"), "{}\n").unwrap();
+        for d in [root.join("s/subagents/workflows"), root.join("s/subagents")] {
+            std::fs::File::open(&d).unwrap().set_modified(old).unwrap(); // папки — от запуска workflow, не от его работы
+        }
+        let mut reg = Registry::new();
+        reg.sync(vec![Live { transcript: transcript.clone(), pid: 0, ..live("s") }], 1000);
+        let f = agent_facts(reg.get("s").unwrap(), 0);
+        assert!(f.active_at > 1_000_000, "активность — по файлам агентов workflow: {}", f.active_at);
+        assert_eq!(f.helpers, 1, "идущий workflow — помощник");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn with_agents(st: &mut State, ids: &[&str]) {
