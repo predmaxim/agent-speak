@@ -595,6 +595,8 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
 }
 
 impl State {
+    /// Агент в фокусе — по требованию (перед речью, чтение, снимок мозга), не опросом: hyprctl и база Orca стоят
+    /// десятки мс. Флаг focused в строке агентов — с последнего такого вопроса.
     fn focused(&mut self) -> Option<SessionRef> {
         let now = (self.clock)();
         if !self.focus_cache.as_ref().is_some_and(|(t, _)| now.saturating_duration_since(*t) < Duration::from_millis(500)) {
@@ -602,9 +604,18 @@ impl State {
             if let Some(f) = &f {
                 self.projects.insert(f.id.clone(), f.project.clone());
             }
+            self.registry.set_focused(f.as_ref().map(|f| f.id.as_str()));
             self.focus_cache = Some((now, f));
         }
         self.focus_cache.as_ref().and_then(|(_, f)| f.clone())
+    }
+
+    /// Ома начинает ход (разговор, набранный вопрос, реплика голосом): её снимку агентов — свежий фокус.
+    /// Строка агентов уходит подписчикам раньше, чем команда — Оме.
+    fn refocus(&mut self) {
+        self.focus_cache = None;
+        self.focused();
+        self.push_agents();
     }
 
     fn quiet(&self) -> bool {
@@ -1074,7 +1085,7 @@ impl State {
     }
 
     /// Раз в секунду: Ома упала — выключить, срок вышел — поднять; граница тихого расписания.
-    /// Раз в SCAN_EVERY: состав агентов, «готово» → «простаивает», агент в фокусе.
+    /// Раз в SCAN_EVERY: состав агентов, «готово» → «простаивает».
     fn tick(&mut self) {
         let dead = self.oma.child.as_mut().is_some_and(|c| !matches!(c.try_wait(), Ok(None)));
         if dead {
@@ -1122,8 +1133,6 @@ impl State {
             self.next_scan = now + SCAN_EVERY;
             self.rescan();
             self.registry.tick((self.now_secs)());
-            let focused = self.focused().map(|f| f.id);
-            self.registry.set_focused(focused.as_deref());
             self.push_agents();
         }
         if self.cfg.agents_voice && now >= self.next_watch {
@@ -1195,6 +1204,7 @@ impl State {
                 if audible(&Kind::Voice, self.quiet()) {
                     crate::audio::chime(&self.shared.sink.lock().unwrap()); // туда же, куда её голос
                 }
+                self.refocus(); // реплика ушла мозгу — снимок агентов с фокусом этой минуты
             }
             Msg::VoiceState { state, talking } => {
                 if state == "idle" {
@@ -1205,7 +1215,13 @@ impl State {
                 self.oma.talking = talking;
                 self.purge();
             }
-            Msg::Oma { action } => self.oma_send(&action),
+            Msg::Oma { action } => {
+                // Esc и прочее фокус не ждут
+                if matches!(action["do"].as_str(), Some("talk" | "ask")) {
+                    self.refocus();
+                }
+                self.oma_send(&action)
+            }
             Msg::Emit { mut line } => {
                 // пузырь орба — простой текст, как у пузырей агентов; чат окна разметку рисует и получает её как есть
                 if let Some(t) = line["bubble"]["text"].as_str() {
@@ -2331,6 +2347,36 @@ mod tests {
         let line = serde_json::json!({"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text": text}]}});
         std::fs::write(&path, line.to_string()).unwrap();
         *env.0.lock().unwrap() = Some(SessionRef { transcript: path, ..sref(id) });
+    }
+
+    #[test]
+    fn focus_is_asked_on_demand_not_polled() {
+        let (mut st, (focus, _now)) = env_state();
+        let calls = Arc::new(Mutex::new(0));
+        let c = calls.clone();
+        st.focus_src = Box::new(move || {
+            *c.lock().unwrap() += 1;
+            focus.lock().unwrap().clone().or(Some(sref("b")))
+        });
+        with_agents(&mut st, &["a", "b"]);
+        for _ in 0..3 {
+            st.next_scan = (st.clock)();
+            st.tick();
+        }
+        assert_eq!(*calls.lock().unwrap(), 0, "скан состава hyprctl не зовёт");
+        // разговор начат — снимку мозга нужен фокус: строка агентов уходит до команды Оме
+        let mut r = sub(&mut st);
+        drain(&mut r);
+        st.on_msg(Msg::Oma { action: serde_json::json!({"do": "talk"}) });
+        assert_eq!(*calls.lock().unwrap(), 1);
+        let agents = drain(&mut r).into_iter().find(|l| l.get("agents").is_some()).expect("строка агентов");
+        let focused: Vec<&str> = agents["agents"].as_array().unwrap().iter().filter(|e| e["focused"] == true).map(|e| e["id"].as_str().unwrap()).collect();
+        assert_eq!(focused, ["b"]);
+        st.on_msg(Msg::Oma { action: serde_json::json!({"do": "cancel"}) });
+        assert_eq!(*calls.lock().unwrap(), 1, "Esc фокус не ждёт");
+        st.cfg.quiet_override = "on".into(); // щелчок в тесте не звучит
+        st.on_msg(Msg::Chime);
+        assert_eq!(*calls.lock().unwrap(), 2, "каждая реплика голосом — свежий фокус");
     }
 
     #[test]

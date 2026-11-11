@@ -3,7 +3,6 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Agent {
@@ -65,19 +64,21 @@ pub fn project_of(pid: u32) -> String {
 pub fn focused() -> Option<SessionRef> {
     // timeout: зависший hyprctl не должен вешать цикл событий
     let out = Command::new("timeout").args(["2", "hyprctl", "activewindow", "-j"]).output().ok()?;
-    let win = serde_json::from_slice::<Value>(&out.stdout).ok().and_then(|v| v["pid"].as_u64());
-    // опрос раз в секунду: пишем в журнал только переход «есть окно → нет окна»
-    if NO_WINDOW.swap(win.is_none(), Ordering::Relaxed) || win.is_some() {
-        let w = win? as u32;
-        let mut all = claude_under(w);
-        all.extend(codex_under(w));
-        return pick(all, crate::mux::active_among);
-    }
-    eprintln!("agent-speak: hyprctl: нет pid окна ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim());
-    None
+    let Ok(win) = window_pid(&out.stdout) else {
+        eprintln!("agent-speak: hyprctl activewindow не ответил ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim());
+        return None;
+    };
+    let w = win?;
+    let mut all = claude_under(w);
+    all.extend(codex_under(w));
+    pick(all, crate::mux::active_among)
 }
 
-static NO_WINDOW: AtomicBool = AtomicBool::new(false);
+/// Ответ `hyprctl activewindow -j`: pid окна; пустой стол — `{}` (Hyprland, activeWindowRequest), не ответ — Err.
+fn window_pid(stdout: &[u8]) -> Result<Option<u32>, ()> {
+    let v: Value = serde_json::from_slice(stdout).map_err(|_| ())?;
+    Ok(v["pid"].as_u64().and_then(|p| u32::try_from(p).ok()))
+}
 
 /// Агент из кандидатов (pid, сессия): один — он; несколько — по видимому терминалу (Orca — одно окно на всех).
 fn pick(all: Vec<(u32, SessionRef)>, active: impl Fn(&[u32]) -> Option<u32>) -> Option<SessionRef> {
@@ -154,6 +155,13 @@ pub fn parse_learned(out: &str, asked: &[String]) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_desktop_is_no_window_not_an_error() {
+        assert_eq!(window_pid(b"{}"), Ok(None), "Hyprland на пустом столе отвечает {{}}");
+        assert_eq!(window_pid(br#"{"pid": 42, "class": "foot"}"#), Ok(Some(42)));
+        assert!(window_pid(b"").is_err(), "hyprctl упал или не ответил — это в журнал");
+    }
+
     #[test]
     fn several_agents_under_one_window_need_the_mux() {
         let r = |id: &str| SessionRef { agent: Agent::Claude, id: id.into(), transcript: PathBuf::new(), project: String::new() };
