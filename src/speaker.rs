@@ -4,7 +4,7 @@
 use crate::audio::Player;
 use crate::queue::Queue;
 use crate::queue::{Item, Kind};
-use crate::tts::Tts;
+use crate::tts::{Failed, Tts};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -22,7 +22,7 @@ pub struct Shared {
 
 /// Синтезатор и приёмник звука — трейты только ради тестов с подделками.
 pub trait Synth {
-    fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Option<Vec<u8>>;
+    fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Result<Vec<u8>, Failed>;
 }
 pub trait Sink {
     fn write(&mut self, pcm: &[u8]) -> bool;
@@ -30,7 +30,7 @@ pub trait Sink {
     fn close(&mut self);
 }
 impl Synth for Tts {
-    fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Option<Vec<u8>> {
+    fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Result<Vec<u8>, Failed> {
         Tts::synth(self, text, speaker, rate)
     }
 }
@@ -163,21 +163,30 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
         };
         shared.set_busy(Some(&item.session));
         let (speaker, rate) = shared.voice.lock().unwrap().clone();
-        let Some(pcm) = tts.synth(&item.text, &speaker, &rate) else {
-            // синтез упал: очередь ждёт, а не теряет фразу
-            player.close();
-            let mut q = shared.queue.lock().unwrap();
-            requeue(&shared, &mut q, item, my_gen);
-            shared.set_busy(None);
-            let deadline = Instant::now() + RETRY;
-            while shared.generation.load(Ordering::SeqCst) == my_gen {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    break;
-                }
-                q = shared.cv.wait_timeout(q, left).unwrap().0;
+        let pcm = match tts.synth(&item.text, &speaker, &rate) {
+            Ok(pcm) => pcm,
+            Err(Failed::Text) => {
+                // модель не берёт этот текст (причина — в журнале от silero_tts): повтор не поможет, очередь не держим
+                eprintln!("agent-speak: синтез не смог фразу, пропущена: {}", item.text);
+                player.close();
+                continue;
             }
-            continue;
+            Err(Failed::Down) => {
+                // синтез упал: очередь ждёт, а не теряет фразу
+                player.close();
+                let mut q = shared.queue.lock().unwrap();
+                requeue(&shared, &mut q, item, my_gen);
+                shared.set_busy(None);
+                let deadline = Instant::now() + RETRY;
+                while shared.generation.load(Ordering::SeqCst) == my_gen {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    q = shared.cv.wait_timeout(q, left).unwrap().0;
+                }
+                continue;
+            }
         };
         let mut done = true;
         for chunk in pcm.chunks(CHUNK) {
@@ -212,15 +221,15 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
 mod tests {
     use super::*;
 
-    struct FakeSynth(Arc<Mutex<u32>>); // сколько первых вызовов провалить
+    struct FakeSynth(Arc<Mutex<u32>>, Failed); // сколько первых вызовов провалить и как
     impl Synth for FakeSynth {
-        fn synth(&mut self, _: &str, _: &str, _: &str) -> Option<Vec<u8>> {
+        fn synth(&mut self, _: &str, _: &str, _: &str) -> Result<Vec<u8>, Failed> {
             let mut n = self.0.lock().unwrap();
             if *n > 0 {
                 *n -= 1;
-                return None;
+                return Err(self.1);
             }
-            Some(vec![0; CHUNK * 2])
+            Ok(vec![0; CHUNK * 2])
         }
     }
     struct FakeSink(Arc<Mutex<Vec<&'static str>>>, Arc<Mutex<u32>>); // события; сколько первых write провалить
@@ -245,15 +254,15 @@ mod tests {
     type Events = Arc<Mutex<Vec<&'static str>>>;
 
     fn start(synth_fails: u32, write_fails: u32) -> (Arc<Shared>, Events) {
-        start_with(Arc::new(Mutex::new(synth_fails)), write_fails)
+        start_with(Arc::new(Mutex::new(synth_fails)), Failed::Down, write_fails)
     }
 
-    fn start_with(fails: Arc<Mutex<u32>>, write_fails: u32) -> (Arc<Shared>, Events) {
+    fn start_with(fails: Arc<Mutex<u32>>, how: Failed, write_fails: u32) -> (Arc<Shared>, Events) {
         let shared = Arc::new(Shared::new(Queue::new(), "x".into(), "m".into()));
         let ev: Events = Default::default();
         let (s, e) = (shared.clone(), ev.clone());
         std::thread::spawn(move || {
-            run_with(s, FakeSynth(fails), FakeSink(e, Arc::new(Mutex::new(write_fails))))
+            run_with(s, FakeSynth(fails, how), FakeSink(e, Arc::new(Mutex::new(write_fails))))
         });
         (shared, ev)
     }
@@ -309,12 +318,24 @@ mod tests {
     #[test]
     fn synth_failure_keeps_item_and_retries() {
         let fails = Arc::new(Mutex::new(1));
-        let (shared, ev) = start_with(fails.clone(), 0);
+        let (shared, ev) = start_with(fails.clone(), Failed::Down, 0);
         say(&shared);
         wait(|| *fails.lock().unwrap() == 0 && !shared.busy.load(Ordering::SeqCst) && !shared.queue.lock().unwrap().is_empty());
         assert_eq!(count(&ev, "write"), 0); // ждёт 10 с, не выбросила
         assert_eq!(count(&ev, "close"), 1); // pw-cat не простаивает, пока синтез лежит
         shared.interrupt(); // будит ожидание
+        wait(|| count(&ev, "write") == 2);
+    }
+
+    #[test]
+    fn text_the_model_rejects_is_dropped_not_retried() {
+        let fails = Arc::new(Mutex::new(1));
+        let (shared, ev) = start_with(fails.clone(), Failed::Text, 0);
+        say(&shared);
+        wait(|| *fails.lock().unwrap() == 0 && !shared.busy.load(Ordering::SeqCst));
+        assert!(shared.queue.lock().unwrap().is_empty(), "повтор того же текста не поможет — очередь не стоит");
+        assert_eq!(count(&ev, "close"), 1); // pw-cat не простаивает
+        say(&shared); // следующая фраза звучит сразу, без паузы RETRY
         wait(|| count(&ev, "write") == 2);
     }
 

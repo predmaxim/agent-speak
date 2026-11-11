@@ -1,4 +1,5 @@
-"""Сервер синтеза Silero: модель в памяти, запрос — JSON-строка, ответ — u32 длина + PCM s16le 48 кГц моно."""
+"""Сервер синтеза Silero: модель в памяти, запрос — JSON-строка, ответ — u32 длина + PCM s16le 48 кГц моно
+(длина ERROR — ошибка синтеза)."""
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import torch
 warnings.filterwarnings("ignore")
 torch.set_num_threads(4)
 MAX = 800  # Silero не берёт длинный текст за раз
+ERROR = 0xFFFFFFFF  # длина-ответ «синтез не удался»; её же ждёт src/tts.rs
 
 
 def chunks(text):
@@ -36,8 +38,13 @@ def synth(model, text, speaker, rate):
         else:
             safe = part.replace("&", " и ").replace("<", " ").replace(">", " ")
             audio = model.apply_tts(ssml_text=f'<speak><prosody rate="{rate}">{safe}</prosody></speak>', **kw)
-        out.append((audio * 32767).to(torch.int16).numpy().tobytes())
+        out.append(pcm16(audio))
     return b"".join(out)
+
+
+def pcm16(audio):
+    """float → s16le; у голоса eugene пики выше 1 — без clamp int16 заворачивается в треск."""
+    return (audio.clamp(-1, 1) * 32767).to(torch.int16).numpy().tobytes()
 
 
 def main():
@@ -54,11 +61,12 @@ def main():
             try:
                 req = json.loads(conn.makefile("rb").readline())
                 pcm = synth(model, req["text"], req.get("speaker", "xenia"), req.get("rate", "medium"))
+                reply = struct.pack("<I", len(pcm)) + pcm
             except Exception as e:  # плохой запрос не должен ронять сервер
                 print(f"silero_tts: {e}", file=sys.stderr, flush=True)
-                pcm = b""
+                reply = struct.pack("<I", ERROR)  # не пустой звук: тот значит «читать нечего»
             try:
-                conn.sendall(struct.pack("<I", len(pcm)) + pcm)
+                conn.sendall(reply)
             except OSError:
                 pass
 

@@ -974,6 +974,10 @@ impl State {
             let _ = self.learn.send((agent.clone(), w));
         }
         let n = sentences.len();
+        if n == 0 {
+            // весь текст — код, эмодзи или вырезки: звука не будет, текст остался только в пузыре
+            eprintln!("agent-speak: нечего сказать вслух: {}", raw.chars().take(80).collect::<String>());
+        }
         // образец — один элемент: каждый push Preview вытесняет прежний
         let sentences = if kind == Kind::Preview && !sentences.is_empty() { vec![sentences.join(" ")] } else { sentences };
         let mut q = self.shared.queue.lock().unwrap();
