@@ -565,6 +565,12 @@ fn bt_mode(mode: &str) -> bool {
     cli(mode, 20).inspect_err(|e| eprintln!("agent-speak: omarchy-bt-mode {mode}: {e}")).is_ok()
 }
 
+/// Путь, которым запущен демон (argv[0]): относительный — от его папки (Ома работает в другой), имя без папки — по PATH.
+fn own_path(argv0: &std::ffi::OsStr, cwd: &Path) -> PathBuf {
+    let p = Path::new(argv0);
+    if p.is_relative() && p.components().count() > 1 { cwd.join(p) } else { p.to_path_buf() }
+}
+
 /// Команда Оме открыть окно ответа; speakers — спросила в динамики: слушать ноутбуком, через эхоподавление.
 fn listen_cmd(kind: &str, said: &str, key: Option<String>, speakers: bool, secs: u64) -> serde_json::Value {
     let mut cmd = serde_json::json!({"do": "listen", "secs": secs, "kind": kind, "said": said});
@@ -1044,7 +1050,9 @@ impl State {
             .env("AGENT_SPEAK", "1") // хуки сессий Омы до демона не доходят
             // потоки OpenBLAS после каждого расчёта признаков whisper крутятся вхолостую: 0,9–1,5 с процессора на вызов
             .env("OPENBLAS_NUM_THREADS", "1")
-            .env("AGENT_SPEAK_BIN", std::env::current_exe().unwrap_or_default()) // Ома передаёт агентам через `agent-speak tell`
+            // Ома передаёт агентам через `agent-speak tell`; путь — каким запущена служба (ExecStart, ссылка в ~/.local/bin):
+            // current_exe() после пересборки — «… (deleted)»
+            .env("AGENT_SPEAK_BIN", own_path(&std::env::args_os().next().unwrap_or_default(), &std::env::current_dir().unwrap_or_default()))
             .stdin(std::process::Stdio::piped())
             .spawn();
         match child {
@@ -2471,6 +2479,15 @@ mod tests {
     fn live(id: &str) -> Live {
         Live { id: id.to_string(), agent: "claude", pid: 1, title: format!("T-{id}"),
             cwd: format!("/p/{id}"), transcript: PathBuf::new(), state: crate::agents::State::Working, status_at: 0 }
+    }
+
+    #[test]
+    fn oma_gets_the_path_the_service_was_started_by() {
+        // current_exe() после cargo build у живого демона — «… (deleted)»: tell у перезапущенной Омы не запустился бы
+        let cwd = Path::new("/home/u/src");
+        assert_eq!(own_path("/home/u/.local/bin/agent-speak".as_ref(), cwd), PathBuf::from("/home/u/.local/bin/agent-speak"), "ExecStart — ссылка");
+        assert_eq!(own_path("target/release/agent-speak".as_ref(), cwd), PathBuf::from("/home/u/src/target/release/agent-speak"), "Ома запускается в другой папке");
+        assert_eq!(own_path("agent-speak".as_ref(), cwd), PathBuf::from("agent-speak"), "по PATH — так и оставить");
     }
 
     #[test]
