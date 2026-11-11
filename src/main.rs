@@ -34,7 +34,12 @@ fn main() {
         Some("voice") => Msg::Oma { action: serde_json::json!({"do": "talk"}) },
         Some("statusline") => return statusline(&args[1..]),
         // Ома передаёт агентам ответы и задания: исход её мозгу нужен сразу — без демона
-        Some("tell") if args.len() == 4 => return done(args[2].parse().map_err(|_| "option — число".to_string()).and_then(|o| orders::tell(&args[1], o, &args[3]))),
+        // stdout — метка нажатого пункта меню с экрана (одобрение плана включает и auto mode — Ома её зачитывает)
+        Some("tell") if matches!(args.len(), 4 | 5) => {
+            let expect = args.get(4).map_or("", String::as_str);
+            let told = args[2].parse().map_err(|_| "option — число".to_string()).and_then(|o| orders::tell(&args[1], o, &args[3], expect));
+            return done(told.map(|chosen| if !chosen.is_empty() { println!("{chosen}") }));
+        }
         // где запускать: orca (по умолчанию) или herdr
         Some("launch") if matches!(args.len(), 3 | 4) => return done(orders::launch(&args[1], &args[2], args.get(3).map_or("orca", |s| s))),
         Some("projects") => return done(orders::projects(args.get(1).map_or("orca", |s| s)).map(|v| println!("{}", v.join("\n")))),
@@ -64,7 +69,7 @@ fn main() {
             Msg::Hook { kind, payload: serde_json::from_str(&raw).unwrap_or_default() }
         }
         _ => {
-            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> | launch <path> <text> [orca|herdr] | projects [orca|herdr]");
+            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | launch <path> <text> [orca|herdr] | projects [orca|herdr]");
             std::process::exit(2);
         }
     };
