@@ -126,6 +126,8 @@ fn requeue(shared: &Shared, q: &mut Queue, item: Item, my_gen: u64) {
 
 // ponytail: «синтез наперёд» — за счёт буфера канала pw-cat (~0,7 с): пока доигрывает хвост,
 // синтезируется следующая фраза. Явный конвейер на 1–2 фразы — если паузы между фразами заметны.
+// Замер 2026-11-12 (тест gap_between_sentences, от сети, нагрузка ~17): синтез 26–361 мс, пауз сверх звука Silero — 0 мс;
+// с каналом 4 КиБ (PIPE_SZ=4096) — 22–119 мс, то есть замер паузы видит.
 pub fn run(shared: Arc<Shared>, tts: Tts) {
     let player = Player::new(shared.sink.clone());
     run_with(shared, tts, player)
@@ -390,5 +392,85 @@ mod tests {
         let (shared, ev) = start(0, 1);
         say(&shared);
         wait(|| count(&ev, "write") == 2);
+    }
+
+    #[test]
+    #[ignore] // замер с моделью: cargo test --release gap_between_sentences -- --ignored --nocapture
+    fn gap_between_sentences() {
+        use std::io::{Read, Write};
+        const SAY: [&str; 8] = [
+            "Готово.",
+            "Агент в проекте агент спик закончил правку чисел и запустил тесты.",
+            "Да.",
+            "Все триста девяносто два теста прошли, ошибок нет, предупреждений тоже нет.",
+            "Нет.",
+            "Следующий шаг — проверить звук на наушниках, а потом закоммитить изменения в отдельную ветку и показать тебе разницу.",
+            "Смотрю агентов.",
+            "Второй агент ждёт ответа на вопрос про порядок миграций в базе данных.",
+        ];
+        let data = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".local/share/agent-speak");
+        let sock = std::env::temp_dir().join(format!("tts-gap-{}.sock", std::process::id()));
+        let mut tts = Tts::new(
+            data.join("venv/bin/python"),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/silero_tts.py"),
+            data.join("v5_ru.pt"),
+            sock.clone(),
+        );
+        tts.synth("Проверка связи.", "xenia", "medium").unwrap(); // модель загружена и прогрета
+        for s in SAY {
+            let t = Instant::now();
+            let n = tts.synth(s, "xenia", "medium").unwrap().len();
+            eprintln!("синтез {:>4} мс, звук {:>4} мс: {s}", t.elapsed().as_millis(), n * 1000 / 96000);
+        }
+        struct PipeSink(Option<std::io::PipeWriter>);
+        impl Sink for PipeSink {
+            fn write(&mut self, pcm: &[u8]) -> bool {
+                self.0.as_mut().is_some_and(|w| w.write_all(pcm).is_ok())
+            }
+            fn reset(&mut self) {}
+            fn close(&mut self) {
+                self.0 = None;
+            }
+        }
+        let (mut r, w) = std::io::pipe().unwrap();
+        if let Ok(sz) = std::env::var("PIPE_SZ") {
+            use std::os::fd::AsRawFd;
+            assert!(unsafe { libc::fcntl(w.as_raw_fd(), libc::F_SETPIPE_SZ, sz.parse::<i32>().unwrap()) } > 0);
+        }
+        // как pw-cat: канал 64 КиБ, читает в реальном времени и забирает наперёд не больше 100 мс
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 960];
+            let mut end: Option<Instant> = None;
+            let mut gaps = Vec::new();
+            loop {
+                let n = r.read(&mut buf).unwrap();
+                if n == 0 {
+                    return gaps;
+                }
+                let now = Instant::now();
+                let e = match end {
+                    Some(e) if e >= now => e,
+                    Some(e) => {
+                        gaps.push(now - e);
+                        now
+                    }
+                    None => now,
+                } + Duration::from_secs_f64(n as f64 / 96000.0);
+                end = Some(e);
+                let ahead = e.saturating_duration_since(Instant::now());
+                if ahead > Duration::from_millis(100) {
+                    std::thread::sleep(ahead - Duration::from_millis(100));
+                }
+            }
+        });
+        let shared = Arc::new(Shared::new(Queue::new(), "xenia".into(), "medium".into()));
+        for s in SAY {
+            shared.queue.lock().unwrap().push(Item { session: "s".into(), text: s.into(), kind: Kind::Read });
+        }
+        let s = shared.clone();
+        std::thread::spawn(move || run_with(s, tts, PipeSink(Some(w))));
+        let gaps: Vec<u128> = reader.join().unwrap().into_iter().filter(|g| *g > Duration::from_millis(5)).map(|g| g.as_millis()).collect();
+        eprintln!("паузы сверх звука Silero, мс: {gaps:?}, всего {}", gaps.iter().sum::<u128>());
+        let _ = std::process::Command::new("pkill").arg("-f").arg(&sock).status(); // сервер синтеза остался у потока speaker
     }
 }
