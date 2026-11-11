@@ -2088,6 +2088,27 @@ def test_smart_turn_features_and_missing_model():
     assert SmartTurn("/нет/такой/модели.onnx").complete(b"\0\0" * 1600) is None
 
 
+def test_smart_turn_threads_do_not_spin_idle(monkeypatch, tmp_path):
+    # потоки onnxruntime по умолчанию крутятся вхолостую после вызова: ~5 с CPU на фразу (замер 2026-11-11)
+    import numpy as np
+    import onnxruntime as ort
+    from agent_voice.turn import SmartTurn
+    seen = []
+
+    class Session:
+        def __init__(self, path, sess_options, providers):
+            seen.append(sess_options)
+        def run(self, out, feeds):
+            return [np.array([[0.9]], np.float32)]
+
+    monkeypatch.setattr(ort, "InferenceSession", Session)
+    model = tmp_path / "turn.onnx"
+    model.write_bytes(b"")
+    assert SmartTurn(str(model)).complete(b"\0\0" * 1600) == np.float32(0.9)
+    so = seen[0]
+    assert so.get_session_config_entry("session.intra_op.allow_spinning") == "0" and so.intra_op_num_threads == 2
+
+
 def test_whole_utterance_heard_ahead_while_pausing():
     # реплика целиком распознаётся, пока идёт пауза, а не при отправке: отправка её не ждёт
     sent, emitted, heard = [], [], []
