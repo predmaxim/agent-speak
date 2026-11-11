@@ -2199,6 +2199,49 @@ def test_voice_order_waits_for_yes_and_reads_back():
     assert calls == [("tell", "s1", "0", "Делай обе оптимизации")] and "подтвердил" in o.note
 
 
+def test_order_question_is_spoken_by_code_not_by_second_brain_pass():
+    # вопрос подтверждения строит код — второй проход Sonnet только повторял его (1,0–5,2 с, медиана 1,6 с по 14 ходам)
+    o, calls = _orders()
+    asked_ = []
+    o.ask = asked_.append
+    o.turn(True, "пусть запушит")
+    r = run(o.tell(E[0], "Запушь", "запушить"))
+    assert asked_ == ["Передать проекту omarchy-mail: запушить? Это пуш. Скажи: подтверждаю пуш."]
+    assert "[молчу]" in r and not calls
+    assert "[молчу]" in run(o.tell(E[0], "Запушь всё", "запушить всё")) and len(asked_) == 1, "второй раз в ходе — не спрашивает"
+
+
+def test_code_question_sounds_through_conversation_and_ends_the_turn():
+    # через Conversation: её слова знает защита от эха; после вопроса ход молчит — вопрос звучит последним
+    clk, cv = _conv()
+    cv.echo = True
+    cv.talk(); cv.speech_start(1); cv.phrase("пусть агент почты запушит", 1)
+    clk.t += SEND_PAUSE; cv.tick()
+    assert ("say", "Готовлю поручение.") in cv.tool("mcp__oma__tell")
+    acts = cv.question(ASK)
+    assert ("say", ASK) in acts and ("show", ASK) in acts and ASK in cv.said
+    assert cv.delta("Передать проекту почта") == [] and cv.tool("thinking") == []
+    assert cv.delta("[конец]") == [] and cv.done() == [] and cv.active, "разговор открыт: ждёт «да, передай»"
+    cv.audio(True); cv.audio(False)
+    assert cv.state == "listening"
+
+
+def test_oma_speaks_order_question_from_tool():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    oma.orders, calls = _orders(clk)
+    oma.orders.ask = oma._ask  # как в __init__
+
+    async def go():
+        await oma.command({"do": "talk"})
+        oma.conv.ask("пусть агент почты запушит")
+        oma.orders.turn(True, "пусть агент почты запушит")
+        await oma.orders.tell(E[0], "Запушь", "запушить")  # инструмент мозга — в задаче SDK
+        await settle(oma)
+    run(go())
+    assert {"cmd": "voice", "text": "Передать проекту omarchy-mail: запушить? Это пуш. Скажи: подтверждаю пуш."} in sent
+
+
 def test_continue_is_not_consent():
     for heard in ("продолжай", "У меня.", "давай", "ага", "да, и ещё скажи ему про тесты потом"):
         o, calls, _, _ = _ordinary()

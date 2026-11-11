@@ -55,6 +55,7 @@ class Oma:
         self.outbox = None  # последняя задача очереди к мозгу (to_brain)
         self.orders = orders or Orders()
         self.orders.show = self._show  # ждущее подтверждения поручение — полным текстом в окне
+        self.orders.ask = self._ask    # вопрос подтверждения — голосом через Conversation
         self.utter, self.sending = [], []  # звук фраз черновика; при выбросе черновика — к отправке
         self.pre = self.pre_sending = None  # (число фраз, задача) — реплика целиком, распознаваемая заранее
         self.turn_end = turn_end or SmartTurn()
@@ -68,6 +69,10 @@ class Oma:
     def _show(self, text):
         self.emit({"bubble": {"id": f"oma-{os.getpid()}-{self.n}", "who": "Ома", "text": text, "kind": "oma", "append": True}})
         self._chat("oma", text)
+
+    def _ask(self, text):
+        """Вопрос подтверждения из инструмента мозга (задача SDK) — в очередь диспетчера, по порядку с ходом мозга."""
+        self.events.put_nowait(("confirm", text))
 
     def emit(self, line):
         self.send({"cmd": "emit", "line": line})
@@ -215,6 +220,8 @@ class Oma:
             await self.act(c.delta(ev[1]))
         elif kind == "tool":
             await self.act(c.tool(ev[1]))
+        elif kind == "confirm":
+            await self.act(c.question(ev[1]))
         elif kind == "done":
             await self.act(c.done())
             self.emit({"chat": {"key": self.brain.key, "messages": self.history}})
