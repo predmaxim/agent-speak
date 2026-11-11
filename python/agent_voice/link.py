@@ -51,7 +51,8 @@ async def watch(on_status, on_agents, sock=SOCK):
 
 async def request(cmd, sock=SOCK, timeout=1.0):
     """Запрос с ответом — своим соединением: строка туда, строка обратно (dict); службы нет, молчит или ответила
-    не JSON — None. Не через send: непрочитанный ответ служба ждёт секунду и закрывает соединение с командами."""
+    не JSON — None. Не через send: ответ лёг бы в постоянное соединение непрочитанным, а когда такие ответы переполнят
+    буфер сокета, служба через секунду закроет его вместе с командами."""
     try:
         r, w = await asyncio.wait_for(asyncio.open_unix_connection(sock, limit=1 << 22), timeout)
         try:
