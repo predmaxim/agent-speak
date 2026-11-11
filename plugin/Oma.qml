@@ -68,10 +68,12 @@ Item {
     Component.onDestruction: Quickshell.execDetached(["hyprctl", "eval", luaOff])
   }
 
-  // omarchy-shell predmaxim.oma toggle | show | talk | cancel
+  // omarchy-shell predmaxim.oma toggle | show | start | talk | cancel
   IpcHandler {
     target: "predmaxim.oma"
     function toggle(): void { omaWindow.toggle() }
+    // The indicator's right click on Oma off: the service on, the orb as soon as it is up.
+    function start(): void { link.power(true) }
     // The app menu's «Oma»: the service was just turned on — open, never close.
     function show(): void {
       link.retry()

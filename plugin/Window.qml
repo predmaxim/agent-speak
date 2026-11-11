@@ -1,7 +1,6 @@
 import QtQuick
 import Quickshell
 import Quickshell.Hyprland
-import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
@@ -96,18 +95,8 @@ Item {
                     sound: quiet ? root.tr("Turn sound on") : root.tr("Turn sound off"), settings: root.tr("Settings"), back: root.tr("Back") }[id] }
   }
 
-  // Oma as a whole (the service): on, the link reconnects at once instead of in up to 5 s.
-  function power(on) {
-    powerProc.on = on
-    powerProc.running = true
-  }
-
-  Process {
-    id: powerProc
-    property bool on: false
-    command: [Quickshell.env("HOME") + "/.local/bin/agent-speak", on ? "on" : "off"]
-    onExited: if (on && root.link) root.link.retry()
-  }
+  // Oma as a whole (the service), through the link: on, it reconnects at once.
+  function power(on) { if (root.link) root.link.power(on) }
 
   function focusedScreen() {
     var name = Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : ""
