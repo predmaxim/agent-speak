@@ -11,12 +11,13 @@ pub fn abbreviations(s: &str) -> String {
         let prev = if i == 0 { None } else { Some(c[i - 1]) };
         let fresh = prev.is_none_or(|p| !p.is_alphanumeric());
         if fresh {
-            if let Some((full, len)) = short_phrase(&c[i..]) {
-                out.push_str(full);
+            let after_number = c[..i].iter().rev().find(|x| !x.is_whitespace()).is_some_and(char::is_ascii_digit);
+            if let Some((full, can_end, len)) = short_phrase(&c[i..], after_number) {
+                out.push_str(&full);
                 i += len;
                 // «т. е.» стоит внутри фразы; точку после «т. д.»/«т. п.» оставляем, если дальше новое предложение
                 let rest = c[i..].iter().find(|x| !x.is_whitespace());
-                if !full.ends_with("есть") && rest.is_none_or(|x| x.is_uppercase()) {
+                if can_end && rest.is_none_or(|x| x.is_uppercase()) {
                     out.push('.');
                 }
                 continue;
@@ -29,8 +30,11 @@ pub fn abbreviations(s: &str) -> String {
             }
         }
         out.push(c[i]);
-        // «v5» → «v 5»: иначе число приклеивается к букве; «0x1F», «3D» не трогаем
-        if c[i].is_ascii_alphabetic() && c.get(i + 1).is_some_and(char::is_ascii_digit) && !prev.is_some_and(|p| p.is_ascii_digit()) {
+        // «v5» → «v 5», «5GB» → «5 GB»: иначе число приклеивается к букве; «0x1F», «mp3v2» не трогаем
+        if c[i].is_ascii_alphabetic() && c.get(i + 1).is_some_and(char::is_ascii_digit) && !prev.is_some_and(|p| p.is_ascii_digit())
+            || c[i].is_ascii_digit() && c.get(i + 1).is_some_and(char::is_ascii_alphabetic)
+                && !prev.is_some_and(|p| p.is_ascii_alphabetic()) && !c.get(i + 2).is_some_and(char::is_ascii_digit)
+        {
             out.push(' ');
         }
         i += 1;
@@ -38,31 +42,31 @@ pub fn abbreviations(s: &str) -> String {
     out
 }
 
-/// «т. е.» / «т.д.» / «т. п.» (без учёта регистра) → слова и длина совпадения в символах.
-fn short_phrase(c: &[char]) -> Option<(&'static str, usize)> {
-    let is = |i: usize, set: &str| c.get(i).is_some_and(|x| set.contains(*x));
-    if !is(0, "тТ") || !is(1, ".") {
-        return None;
-    }
-    let j = if is(2, " ") { 3 } else { 2 };
-    let full = match c.get(j)?.to_lowercase().next()? {
-        'е' => "то есть",
-        'д' => "так далее",
-        'п' => "тому подобное",
-        _ => return None,
-    };
-    if !is(j + 1, ".") {
-        return None;
-    }
-    Some((if is(j, "ЕДП") && is(0, "Т") { upper_first(full) } else { full }, j + 2))
-}
+/// Сокращения с точкой: образец (пробел в нём необязателен), слова, может ли сокращение закончить предложение.
+const SHORT: [(&str, &str, bool); 7] = [
+    ("т. е.", "то есть", false), ("т. к.", "так как", false), ("т. д.", "так далее", true), ("т. п.", "тому подобное", true),
+    ("см.", "смотри", false), ("напр.", "например", false), ("тыс.", "тысяч", true),
+];
 
-fn upper_first(s: &str) -> &'static str {
-    match s {
-        "то есть" => "То есть",
-        "так далее" => "Так далее",
-        _ => "Тому подобное",
+/// Сокращение (без учёта регистра) → слова, может ли закончить предложение, длина совпадения в символах.
+fn short_phrase(c: &[char], after_number: bool) -> Option<(String, bool, usize)> {
+    'next: for (pat, full, can_end) in SHORT {
+        if after_number && pat == "см." {
+            continue; // «10 см.» — сантиметры
+        }
+        let mut j = 0;
+        for p in pat.chars() {
+            if c.get(j).is_some_and(|x| x.to_lowercase().next() == Some(p)) {
+                j += 1;
+            } else if p != ' ' {
+                continue 'next;
+            }
+        }
+        // первая буква кириллицей — 2 байта
+        let full = if c[0].is_uppercase() { full[..2].to_uppercase() + &full[2..] } else { full.to_string() };
+        return Some((full, can_end, j));
     }
+    None
 }
 
 /// Внутри предложения, до чисел: аббревиатуры ТЗ/ИИ → названия букв, одиночные «б», «в» перед знаком → название.
@@ -133,6 +137,8 @@ mod tests {
         assert_eq!(abbreviations("Это, т. е. так, и т.д. и т. п."), "Это, то есть так, и так далее и тому подобное.");
         assert_eq!(abbreviations("и т. д. Потом"), "и так далее. Потом");
         assert_eq!(abbreviations("Т. Е. да"), "То есть да");
+        assert_eq!(abbreviations("Не работает, т.к. нет прав, см. выше, напр. в файле."), "Не работает, так как нет прав, смотри выше, например в файле.");
+        assert_eq!(abbreviations("См. выше: 5 тыс. строк, 10 см. Потом 3 тыс. Всё"), "Смотри выше: 5 тысяч строк, 10 см. Потом 3 тысяч. Всё");
     }
 
     #[test]
@@ -144,7 +150,8 @@ mod tests {
     #[test]
     fn latin_glued_to_digit() {
         assert_eq!(abbreviations("версии v5 и x86, utf8"), "версии v 5 и x 86, utf 8");
-        assert_eq!(abbreviations("3D и 2FA"), "3D и 2FA");
+        assert_eq!(abbreviations("3D и 2FA, 5GB, 10x"), "3 D и 2 FA, 5 GB, 10 x");
+        assert_eq!(abbreviations("0x1F и mp3v2"), "0x1F и mp 3v2");
     }
 
     #[test]

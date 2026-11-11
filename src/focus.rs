@@ -145,11 +145,8 @@ fn codex_under(win: u32) -> Vec<(u32, SessionRef)> {
 pub fn parse_learned(out: &str, asked: &[String]) -> Vec<(String, String)> {
     out.lines()
         .filter_map(|l| l.split_once('\t'))
-        .map(|(w, p)| (w.trim().to_lowercase(), crate::text::plus_stress(p.trim())))
-        .filter(|(w, p)| {
-            asked.contains(w) && !p.is_empty() && p.chars().any(|c| ('а'..='я').contains(&c.to_lowercase().next().unwrap()))
-                && !p.chars().any(|c| c.is_alphabetic() && !('\u{400}'..='\u{4FF}').contains(&c)) // латиница (и é) — движок давится
-        })
+        .filter_map(|(w, p)| Some((w.trim().to_lowercase(), crate::text::terms::speakable(&crate::text::plus_stress(p.trim()))?)))
+        .filter(|(w, _)| asked.contains(w))
         .collect()
 }
 
@@ -201,6 +198,13 @@ mod tests {
         let asked = vec!["demo".to_string(), "mode".to_string(), "ok".to_string()];
         let out = "demo\tдé+мо\nmode\tмóуд\nok\tок-ей\n";
         assert_eq!(parse_learned(out, &asked), vec![("ok".to_string(), "ок-ей".to_string())]);
+    }
+
+    #[test]
+    fn learned_explanations_and_foreign_letters_rejected() {
+        let asked: Vec<String> = ["stdin", "key", "toggleswitch", "plugins"].map(String::from).to_vec();
+        let out = "stdin\tстандартный вход (или \"стдин\")\nkey\tкѝ\ntoggleswitch\tт+оггл свич\nplugins\tпла\u{301}гинс\n";
+        assert_eq!(parse_learned(out, &asked), vec![("plugins".to_string(), "пл+агинс".to_string())]);
     }
 
     #[test]

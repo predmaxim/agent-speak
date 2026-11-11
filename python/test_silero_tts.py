@@ -11,11 +11,20 @@ def ask(req):
     s.connect(SOCK)
     s.sendall((json.dumps(req) + "\n").encode())
     n = struct.unpack("<I", s.recv(4, socket.MSG_WAITALL))[0]
+    if n == 0xFFFFFFFF:  # ошибка синтеза — не пустой звук
+        return None
     data = b""
     while len(data) < n:
         data += s.recv(n - len(data))
     return data
 
+
+sys.path.insert(0, HERE)
+import torch
+from silero_tts import pcm16
+
+# у голоса eugene пик 1,155: без ограничения int16 заворачивается (1,2 → -26216) — треск
+assert struct.unpack("<3h", pcm16(torch.tensor([1.2, -1.3, 0.5]))) == (32767, -32767, 16383)
 
 if os.path.exists(SOCK):
     os.unlink(SOCK)
@@ -30,7 +39,9 @@ try:
     assert len(pcm) % 2 == 0
     fast = ask({"text": "Привет, это проверка.", "speaker": "xenia", "rate": "fast"})
     assert 0 < len(fast) < len(pcm), (len(fast), len(pcm))
-    assert ask({"text": "hello 123", "speaker": "xenia", "rate": "medium"}) == b""
+    assert ask({"text": "hello 123", "speaker": "xenia", "rate": "medium"}) == b""  # нечего читать — пусто, это не ошибка
+    assert ask({"text": "Привет.", "speaker": "nobody", "rate": "medium"}) is None
+    assert len(ask({"text": "Снова работает.", "speaker": "xenia", "rate": "medium"})) > 48000  # ошибка сервер не роняет
     print("ok")
 finally:
     p.terminate()

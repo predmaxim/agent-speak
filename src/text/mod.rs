@@ -21,7 +21,8 @@ pub fn plus_stress(p: &str) -> String {
 }
 
 pub fn prepare(raw: &str, terms: &Terms) -> (Vec<String>, Vec<String>) {
-    let cleaned = abbr::abbreviations(&clean::clean(&plus_stress(raw)));
+    // ударение — после clean: там буквальный «+» становится словом «плюс»
+    let cleaned = abbr::abbreviations(&plus_stress(&clean::clean(raw)));
     let mut out = Vec::new();
     let mut unknown = Vec::new();
     for s in sentences::drop_gutted(sentences::split(&cleaned)) {
@@ -52,6 +53,25 @@ mod tests {
         let (s, u) = prepare("## Готово\nПоправил `~/.config/hypr/hyprland.lua`, 3 правки → Hyprland.\n```\nx\n```", &t);
         assert_eq!(s, vec!["Готово.", "Поправил хайпрлэнд точка луа, три правки в хайпрлэнд."]);
         assert_eq!(u, vec!["lua"]);
+    }
+
+    #[test]
+    fn prepare_plus_is_not_stress() {
+        let (s, _) = prepare("Стало +5 строк на C++, ударе\u{301}ние на месте.", &Terms::from_str(""));
+        assert_eq!(s, vec!["Стало плюс пять строк на си плюс плюс, удар+ение на месте."]);
+    }
+
+    #[test]
+    fn prepare_short_forms_keep_sentence() {
+        let (s, _) = prepare("Не работает, т.к. нет прав, см. выше, напр. в файле.", &Terms::from_str(""));
+        assert_eq!(s, vec!["Не работает, так как нет прав, смотри выше, например в файле."]);
+    }
+
+    #[test]
+    fn prepare_numbers() {
+        let t = Terms::from_str("gb\tгигаб+айт\n");
+        let (s, _) = prepare("Порог 0.05, всего 1\u{202f}000 строк к 12:30, файл 5GB, код E0502.", &t);
+        assert_eq!(s, vec!["Порог ноль точка ноль пять, всего одна тысяча строк к двенадцать тридцать, файл пять гигаб+айт, код е ноль пять ноль два."]);
     }
 
     #[test]

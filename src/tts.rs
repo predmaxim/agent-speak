@@ -50,24 +50,24 @@ impl Tts {
         false
     }
 
-    fn request(&self, text: &str, speaker: &str, rate: &str) -> std::io::Result<Vec<u8>> {
+    fn request(&self, text: &str, speaker: &str, rate: &str) -> std::io::Result<Option<Vec<u8>>> {
         let mut s = UnixStream::connect(&self.sock)?;
         s.set_read_timeout(Some(Duration::from_secs(60)))?;
         let req = serde_json::json!({"text": text, "speaker": speaker, "rate": rate});
         s.write_all(format!("{req}\n").as_bytes())?;
-        let mut len = [0u8; 4];
-        s.read_exact(&mut len)?;
-        let mut pcm = vec![0u8; u32::from_le_bytes(len) as usize];
-        s.read_exact(&mut pcm)?;
-        Ok(pcm)
+        read_reply(&mut s)
     }
 
-    pub fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Option<Vec<u8>> {
+    pub fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Result<Vec<u8>, Failed> {
         for _ in 0..3 {
             if self.ensure() {
-                if let Ok(pcm) = self.request(text, speaker, rate) {
-                    self.failures = 0;
-                    return Some(pcm);
+                match self.request(text, speaker, rate) {
+                    Ok(Some(pcm)) => {
+                        self.failures = 0;
+                        return Ok(pcm);
+                    }
+                    Ok(None) => return Err(Failed::Text), // сервер жив: перезапуск не поможет
+                    Err(_) => {}
                 }
             }
             self.kill();
@@ -81,8 +81,28 @@ impl Tts {
             }
             self.failures = 0;
         }
-        None
+        Err(Failed::Down)
     }
+}
+
+/// Почему нет звука: сервер синтеза не отвечает (фраза подождёт) или не смог этот текст (повтор не поможет).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Failed {
+    Down,
+    Text,
+}
+
+/// Ответ silero_tts.py: u32 длина + PCM; длина u32::MAX — ошибка синтеза (None), 0 — читать нечего.
+fn read_reply(r: &mut impl Read) -> std::io::Result<Option<Vec<u8>>> {
+    let mut len = [0u8; 4];
+    r.read_exact(&mut len)?;
+    let n = u32::from_le_bytes(len);
+    if n == u32::MAX {
+        return Ok(None);
+    }
+    let mut pcm = vec![0u8; n as usize];
+    r.read_exact(&mut pcm)?;
+    Ok(Some(pcm))
 }
 
 impl Drop for Tts {
@@ -96,6 +116,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn error_reply_is_not_empty_sound() {
+        let mut ok = std::io::Cursor::new([2u8, 0, 0, 0, 7, 8]);
+        assert_eq!(read_reply(&mut ok).unwrap(), Some(vec![7, 8]));
+        let mut empty = std::io::Cursor::new([0u8; 4]);
+        assert_eq!(read_reply(&mut empty).unwrap(), Some(vec![]), "читать нечего — пусто, не ошибка");
+        let mut err = std::io::Cursor::new([0xFFu8; 4]);
+        assert_eq!(read_reply(&mut err).unwrap(), None);
+    }
+
+    #[test]
     #[ignore] // нужна модель: cargo test tts -- --ignored
     fn synthesizes_and_restarts() {
         let data = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".local/share/agent-speak");
@@ -107,6 +137,7 @@ mod tests {
             sock,
         );
         assert!(t.synth("Проверка связи.", "xenia", "medium").unwrap().len() > 48000);
+        assert!(matches!(t.synth("Привет.", "nobody", "medium"), Err(Failed::Text)));
         t.kill();
         assert!(t.synth("Снова работает.", "xenia", "medium").unwrap().len() > 48000);
     }

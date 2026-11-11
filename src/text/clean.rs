@@ -23,7 +23,8 @@ pub fn clean(raw: &str) -> String {
             strip_marker(l).to_string()
         };
         let l = inline(&l);
-        let l = l.split_whitespace().collect::<Vec<_>>().join(" ");
+        // замена знака словом («C++,» → «C плюс плюс ,») оставляет пробел перед пунктуацией
+        let l = l.split_whitespace().collect::<Vec<_>>().join(" ").replace(" ,", ",");
         if l.is_empty() {
             continue;
         }
@@ -97,8 +98,16 @@ fn inline(l: &str) -> String {
     let s = links(&s);
     let s = s.replace("**", "").replace("__", "").replace('*', "");
     let s = s.replace('→', " в ").replace('←', " из ").replace('·', ",");
+    let s = SAY.iter().fold(s, |s, (sign, said)| s.replace(sign, said));
     s.chars().filter(|c| !is_emoji(*c)).collect()
 }
+
+/// Знаков нет в алфавите Silero: модель выбросила бы их молча и склеила слова («да/нет» → «данет»).
+/// «+» у неё — ударение, а в тексте агента это плюс («C++», «+5»); ударение из U+0301 ставится позже.
+const SAY: [(&str, &str); 12] = [
+    ("==", " равно "), ("=", " равно "), ("≠", " не равно "), ("≥", " не меньше "), ("≤", " не больше "),
+    ("≈", " около "), ("~", " около "), ("×", " на "), ("№", " номер "), ("−", " минус "), ("+", " плюс "), ("/", " "),
+];
 
 /// `код`: URL → домен; путь → имя файла; команда/выражение → GAP; одно слово → как есть.
 fn code_span(c: &str) -> String {
@@ -112,7 +121,7 @@ fn code_span(c: &str) -> String {
     if c.contains(' ') || c.chars().any(|ch| "=|$;(){}<>&\"'".contains(ch)) {
         return GAP.to_string();
     }
-    c.split(':').next().unwrap_or(c).to_string()
+    strip_line(c).to_string()
 }
 
 fn url_domain(u: &str) -> Option<String> {
@@ -122,8 +131,22 @@ fn url_domain(u: &str) -> Option<String> {
 
 /// Последний непустой сегмент пути без суффикса `:строка`.
 fn path_name(p: &str) -> String {
-    let name = p.trim_end_matches('/').rsplit('/').next().unwrap_or(p);
-    name.split(':').next().unwrap_or(name).to_string()
+    strip_line(p.trim_end_matches('/').rsplit('/').next().unwrap_or(p)).to_string()
+}
+
+/// «x.rs:120», «x.rs:120:5» → «x.rs»; «Player::write» не трогаем.
+fn strip_line(s: &str) -> &str {
+    match s.rsplit_once(':') {
+        Some((head, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => strip_line(head),
+        _ => s,
+    }
+}
+
+/// Относительный путь «src/x.rs:120»: у последней части «:строка» или расширение; «и/или», «МБ/с» — не путь.
+fn is_rel_path(t: &str) -> bool {
+    let name = path_name(t);
+    let ext = name.rsplit_once('.').is_some_and(|(a, e)| !a.is_empty() && e.bytes().all(|b| b.is_ascii_alphanumeric()) && e.bytes().any(|b| b.is_ascii_alphabetic()));
+    t.contains('/') && (ext || strip_line(t).len() < t.len())
 }
 
 /// [текст](url) → текст; голый URL → домен.
@@ -146,7 +169,7 @@ fn links(s: &str) -> String {
     out.split(' ').map(word).collect::<Vec<_>>().join(" ")
 }
 
-/// Слово вне код-спанов: URL → домен, абсолютный путь → имя файла,
+/// Слово вне код-спанов: URL → домен, путь (абсолютный или относительный с именем файла) → имя файла,
 /// хеш/идентификатор из букв и цифр (≥6) → GAP; окружающая пунктуация сохраняется.
 fn word(w: &str) -> String {
     let lead_end = w.len() - w.trim_start_matches(['(', '[', '{', '"', '\'', '«']).len();
@@ -157,7 +180,7 @@ fn word(w: &str) -> String {
     let (lead, core, trail) = (&w[..lead_end], &w[lead_end..core_end], &w[core_end..]);
     let new = if let Some(d) = url_domain(core) {
         d
-    } else if (core.starts_with('/') || core.starts_with("~/")) && core[1..].contains('/') {
+    } else if (core.starts_with('/') || core.starts_with("~/")) && core[1..].contains('/') || is_rel_path(core) {
         path_name(core)
     } else if is_ident(core) {
         GAP.to_string()
@@ -257,7 +280,31 @@ mod tests {
         assert_eq!(clean("Правка в /etc/hypr/hyprland.lua:42 готова"), "Правка в hyprland.lua готова.");
         assert_eq!(clean("Правка в ~/.config/a.toml, ок"), "Правка в a.toml, ок.");
         assert_eq!(clean("Папка `src/text/`"), "Папка text.");
-        assert_eq!(clean("и/или"), "и/или.");
+        assert_eq!(clean("и/или"), "и или.");
+    }
+
+    #[test]
+    fn relative_paths_become_file_name() {
+        assert_eq!(clean("Правка в src/speaker.rs:120 и ветке feature/oma-x."), "Правка в speaker.rs и ветке feature oma-x.");
+        assert_eq!(clean("Смотри (docs/rules.md), и/или Да/нет, МБ/с, 0.5/1.0"), "Смотри (rules.md), и или Да нет, МБ с, 0.5 1.0.");
+    }
+
+    #[test]
+    fn code_span_drops_only_line_suffix() {
+        assert_eq!(clean("Метод `Player::write` в `speaker.rs:12:5`"), "Метод Player::write в speaker.rs.");
+    }
+
+    #[test]
+    fn symbols_outside_silero_alphabet_spoken() {
+        assert_eq!(
+            clean("Да/нет, МБ/с, два×три, №5, ≥ 10, ≤2, −3, ~20, ≈7, a = b, x == y, a≠b"),
+            "Да нет, МБ с, два на три, номер 5, не меньше 10, не больше 2, минус 3, около 20, около 7, a равно b, x равно y, a не равно b."
+        );
+    }
+
+    #[test]
+    fn literal_plus_is_said() {
+        assert_eq!(clean("C++ и +5, a + b"), "C плюс плюс и плюс 5, a плюс b.");
     }
 
     #[test]

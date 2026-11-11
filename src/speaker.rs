@@ -4,7 +4,7 @@
 use crate::audio::Player;
 use crate::queue::Queue;
 use crate::queue::{Item, Kind};
-use crate::tts::Tts;
+use crate::tts::{Failed, Tts};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -22,7 +22,7 @@ pub struct Shared {
 
 /// Синтезатор и приёмник звука — трейты только ради тестов с подделками.
 pub trait Synth {
-    fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Option<Vec<u8>>;
+    fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Result<Vec<u8>, Failed>;
 }
 pub trait Sink {
     fn write(&mut self, pcm: &[u8]) -> bool;
@@ -30,7 +30,7 @@ pub trait Sink {
     fn close(&mut self);
 }
 impl Synth for Tts {
-    fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Option<Vec<u8>> {
+    fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Result<Vec<u8>, Failed> {
         Tts::synth(self, text, speaker, rate)
     }
 }
@@ -126,6 +126,8 @@ fn requeue(shared: &Shared, q: &mut Queue, item: Item, my_gen: u64) {
 
 // ponytail: «синтез наперёд» — за счёт буфера канала pw-cat (~0,7 с): пока доигрывает хвост,
 // синтезируется следующая фраза. Явный конвейер на 1–2 фразы — если паузы между фразами заметны.
+// Замер 2026-11-12 (тест gap_between_sentences, от сети, нагрузка ~17): синтез 26–361 мс, пауз сверх звука Silero — 0 мс;
+// с каналом 4 КиБ (PIPE_SZ=4096) — 22–119 мс, то есть замер паузы видит.
 pub fn run(shared: Arc<Shared>, tts: Tts) {
     let player = Player::new(shared.sink.clone());
     run_with(shared, tts, player)
@@ -163,21 +165,30 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
         };
         shared.set_busy(Some(&item.session));
         let (speaker, rate) = shared.voice.lock().unwrap().clone();
-        let Some(pcm) = tts.synth(&item.text, &speaker, &rate) else {
-            // синтез упал: очередь ждёт, а не теряет фразу
-            player.close();
-            let mut q = shared.queue.lock().unwrap();
-            requeue(&shared, &mut q, item, my_gen);
-            shared.set_busy(None);
-            let deadline = Instant::now() + RETRY;
-            while shared.generation.load(Ordering::SeqCst) == my_gen {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    break;
-                }
-                q = shared.cv.wait_timeout(q, left).unwrap().0;
+        let pcm = match tts.synth(&item.text, &speaker, &rate) {
+            Ok(pcm) => pcm,
+            Err(Failed::Text) => {
+                // модель не берёт этот текст (причина — в журнале от silero_tts): повтор не поможет, очередь не держим
+                eprintln!("agent-speak: синтез не смог фразу, пропущена: {}", item.text);
+                player.close();
+                continue;
             }
-            continue;
+            Err(Failed::Down) => {
+                // синтез упал: очередь ждёт, а не теряет фразу
+                player.close();
+                let mut q = shared.queue.lock().unwrap();
+                requeue(&shared, &mut q, item, my_gen);
+                shared.set_busy(None);
+                let deadline = Instant::now() + RETRY;
+                while shared.generation.load(Ordering::SeqCst) == my_gen {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    q = shared.cv.wait_timeout(q, left).unwrap().0;
+                }
+                continue;
+            }
         };
         let mut done = true;
         for chunk in pcm.chunks(CHUNK) {
@@ -212,15 +223,15 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
 mod tests {
     use super::*;
 
-    struct FakeSynth(Arc<Mutex<u32>>); // сколько первых вызовов провалить
+    struct FakeSynth(Arc<Mutex<u32>>, Failed); // сколько первых вызовов провалить и как
     impl Synth for FakeSynth {
-        fn synth(&mut self, _: &str, _: &str, _: &str) -> Option<Vec<u8>> {
+        fn synth(&mut self, _: &str, _: &str, _: &str) -> Result<Vec<u8>, Failed> {
             let mut n = self.0.lock().unwrap();
             if *n > 0 {
                 *n -= 1;
-                return None;
+                return Err(self.1);
             }
-            Some(vec![0; CHUNK * 2])
+            Ok(vec![0; CHUNK * 2])
         }
     }
     struct FakeSink(Arc<Mutex<Vec<&'static str>>>, Arc<Mutex<u32>>); // события; сколько первых write провалить
@@ -245,15 +256,15 @@ mod tests {
     type Events = Arc<Mutex<Vec<&'static str>>>;
 
     fn start(synth_fails: u32, write_fails: u32) -> (Arc<Shared>, Events) {
-        start_with(Arc::new(Mutex::new(synth_fails)), write_fails)
+        start_with(Arc::new(Mutex::new(synth_fails)), Failed::Down, write_fails)
     }
 
-    fn start_with(fails: Arc<Mutex<u32>>, write_fails: u32) -> (Arc<Shared>, Events) {
+    fn start_with(fails: Arc<Mutex<u32>>, how: Failed, write_fails: u32) -> (Arc<Shared>, Events) {
         let shared = Arc::new(Shared::new(Queue::new(), "x".into(), "m".into()));
         let ev: Events = Default::default();
         let (s, e) = (shared.clone(), ev.clone());
         std::thread::spawn(move || {
-            run_with(s, FakeSynth(fails), FakeSink(e, Arc::new(Mutex::new(write_fails))))
+            run_with(s, FakeSynth(fails, how), FakeSink(e, Arc::new(Mutex::new(write_fails))))
         });
         (shared, ev)
     }
@@ -309,12 +320,24 @@ mod tests {
     #[test]
     fn synth_failure_keeps_item_and_retries() {
         let fails = Arc::new(Mutex::new(1));
-        let (shared, ev) = start_with(fails.clone(), 0);
+        let (shared, ev) = start_with(fails.clone(), Failed::Down, 0);
         say(&shared);
         wait(|| *fails.lock().unwrap() == 0 && !shared.busy.load(Ordering::SeqCst) && !shared.queue.lock().unwrap().is_empty());
         assert_eq!(count(&ev, "write"), 0); // ждёт 10 с, не выбросила
         assert_eq!(count(&ev, "close"), 1); // pw-cat не простаивает, пока синтез лежит
         shared.interrupt(); // будит ожидание
+        wait(|| count(&ev, "write") == 2);
+    }
+
+    #[test]
+    fn text_the_model_rejects_is_dropped_not_retried() {
+        let fails = Arc::new(Mutex::new(1));
+        let (shared, ev) = start_with(fails.clone(), Failed::Text, 0);
+        say(&shared);
+        wait(|| *fails.lock().unwrap() == 0 && !shared.busy.load(Ordering::SeqCst));
+        assert!(shared.queue.lock().unwrap().is_empty(), "повтор того же текста не поможет — очередь не стоит");
+        assert_eq!(count(&ev, "close"), 1); // pw-cat не простаивает
+        say(&shared); // следующая фраза звучит сразу, без паузы RETRY
         wait(|| count(&ev, "write") == 2);
     }
 
@@ -369,5 +392,85 @@ mod tests {
         let (shared, ev) = start(0, 1);
         say(&shared);
         wait(|| count(&ev, "write") == 2);
+    }
+
+    #[test]
+    #[ignore] // замер с моделью: cargo test --release gap_between_sentences -- --ignored --nocapture
+    fn gap_between_sentences() {
+        use std::io::{Read, Write};
+        const SAY: [&str; 8] = [
+            "Готово.",
+            "Агент в проекте агент спик закончил правку чисел и запустил тесты.",
+            "Да.",
+            "Все триста девяносто два теста прошли, ошибок нет, предупреждений тоже нет.",
+            "Нет.",
+            "Следующий шаг — проверить звук на наушниках, а потом закоммитить изменения в отдельную ветку и показать тебе разницу.",
+            "Смотрю агентов.",
+            "Второй агент ждёт ответа на вопрос про порядок миграций в базе данных.",
+        ];
+        let data = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".local/share/agent-speak");
+        let sock = std::env::temp_dir().join(format!("tts-gap-{}.sock", std::process::id()));
+        let mut tts = Tts::new(
+            data.join("venv/bin/python"),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/silero_tts.py"),
+            data.join("v5_ru.pt"),
+            sock.clone(),
+        );
+        tts.synth("Проверка связи.", "xenia", "medium").unwrap(); // модель загружена и прогрета
+        for s in SAY {
+            let t = Instant::now();
+            let n = tts.synth(s, "xenia", "medium").unwrap().len();
+            eprintln!("синтез {:>4} мс, звук {:>4} мс: {s}", t.elapsed().as_millis(), n * 1000 / 96000);
+        }
+        struct PipeSink(Option<std::io::PipeWriter>);
+        impl Sink for PipeSink {
+            fn write(&mut self, pcm: &[u8]) -> bool {
+                self.0.as_mut().is_some_and(|w| w.write_all(pcm).is_ok())
+            }
+            fn reset(&mut self) {}
+            fn close(&mut self) {
+                self.0 = None;
+            }
+        }
+        let (mut r, w) = std::io::pipe().unwrap();
+        if let Ok(sz) = std::env::var("PIPE_SZ") {
+            use std::os::fd::AsRawFd;
+            assert!(unsafe { libc::fcntl(w.as_raw_fd(), libc::F_SETPIPE_SZ, sz.parse::<i32>().unwrap()) } > 0);
+        }
+        // как pw-cat: канал 64 КиБ, читает в реальном времени и забирает наперёд не больше 100 мс
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 960];
+            let mut end: Option<Instant> = None;
+            let mut gaps = Vec::new();
+            loop {
+                let n = r.read(&mut buf).unwrap();
+                if n == 0 {
+                    return gaps;
+                }
+                let now = Instant::now();
+                let e = match end {
+                    Some(e) if e >= now => e,
+                    Some(e) => {
+                        gaps.push(now - e);
+                        now
+                    }
+                    None => now,
+                } + Duration::from_secs_f64(n as f64 / 96000.0);
+                end = Some(e);
+                let ahead = e.saturating_duration_since(Instant::now());
+                if ahead > Duration::from_millis(100) {
+                    std::thread::sleep(ahead - Duration::from_millis(100));
+                }
+            }
+        });
+        let shared = Arc::new(Shared::new(Queue::new(), "xenia".into(), "medium".into()));
+        for s in SAY {
+            shared.queue.lock().unwrap().push(Item { session: "s".into(), text: s.into(), kind: Kind::Read });
+        }
+        let s = shared.clone();
+        std::thread::spawn(move || run_with(s, tts, PipeSink(Some(w))));
+        let gaps: Vec<u128> = reader.join().unwrap().into_iter().filter(|g| *g > Duration::from_millis(5)).map(|g| g.as_millis()).collect();
+        eprintln!("паузы сверх звука Silero, мс: {gaps:?}, всего {}", gaps.iter().sum::<u128>());
+        let _ = std::process::Command::new("pkill").arg("-f").arg(&sock).status(); // сервер синтеза остался у потока speaker
     }
 }
