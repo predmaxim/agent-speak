@@ -41,6 +41,10 @@ fn main() {
             });
             return done(told.map(|chosen| if !chosen.is_empty() { println!("{chosen}") }));
         }
+        // пункты меню агента с экрана — только чтение, без службы: Ома называет пункт в вопросе подтверждения до tell
+        Some("menu") if args.len() == 2 => {
+            return done(orders::menu_of(&args[1]).map(|items| items.iter().enumerate().for_each(|(i, t)| println!("{}. {t}", i + 1))));
+        }
         // запуск и проекты пишут не в терминал агента — без службы, исход её мозгу нужен сразу
         // где запускать: orca (по умолчанию) или herdr
         Some("launch") if matches!(args.len(), 3 | 4) => return done(orders::launch(&args[1], &args[2], args.get(3).map_or("orca", |s| s))),
@@ -71,7 +75,7 @@ fn main() {
             Msg::Hook { kind, payload: serde_json::from_str(&raw).unwrap_or_default() }
         }
         _ => {
-            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | launch <path> <text> [orca|herdr] | projects [orca|herdr]");
+            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | menu <session> | launch <path> <text> [orca|herdr] | projects [orca|herdr]");
             std::process::exit(2);
         }
     };

@@ -1,5 +1,5 @@
 //! Ответы и задания агентам от Омы: как передать (текстом или клавишами меню), куда, запуск нового агента.
-//! Зовёт Ома через CLI `agent-speak tell | launch | projects`: исход нужен её мозгу сразу. tell исполняет служба в своём
+//! Зовёт Ома через CLI `agent-speak tell | menu | launch | projects`: исход нужен её мозгу сразу. tell исполняет служба в своём
 //! потоке действий, в одной очереди с действиями сторожа: две записи в одну панель не перемешаются.
 
 use crate::mux::{self, Key, Step};
@@ -30,12 +30,49 @@ fn item_of(screen: &str, label: &str) -> Option<usize> {
     })
 }
 
-/// Текст пункта n меню на экране: последняя строка «❯ n. текст» или «  n. текст» — меню внизу, выше бывает нумерованный план.
+/// Строка «❯ n. текст» или «  n. текст» → (n, текст).
+fn numbered(l: &str) -> Option<(usize, &str)> {
+    let (num, rest) = l.trim_start_matches(|c: char| c.is_whitespace() || c == '❯').split_once(". ")?;
+    Some((num.parse().ok()?, rest.trim()))
+}
+
+/// Текст пункта n меню на экране: последняя строка «n. текст» — меню внизу, выше бывает нумерованный план.
 fn item_text(screen: &str, n: usize) -> Option<&str> {
-    screen.lines().rev().find_map(|l| {
-        let (num, rest) = l.trim_start_matches(|c: char| c.is_whitespace() || c == '❯').split_once(". ")?;
-        (num.parse() == Ok(n)).then(|| rest.trim())
-    })
+    screen.lines().rev().find_map(|l| numbered(l).filter(|(k, _)| *k == n).map(|(_, t)| t))
+}
+
+/// Пункты меню на экране по порядку, как их видит пользователь: «n. текст» снизу вверх (меню — внизу), номера подряд
+/// с 1, строка каждого — ниже предыдущего (нумерованный план над меню — не пункты); без курсора «❯» меню нет — пусто.
+fn menu(screen: &str) -> Vec<String> {
+    if !menu_on(screen) {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = screen.lines().collect();
+    let mut items: Vec<String> = Vec::new();
+    let mut after = None;
+    for n in 1.. {
+        let found = lines.iter().enumerate().rev().find_map(|(i, l)| numbered(l).filter(|(k, _)| *k == n).map(|(_, t)| (i, t)));
+        match found {
+            Some((i, t)) if after.is_none_or(|a| i > a) => {
+                items.push(t.to_string());
+                after = Some(i);
+            }
+            _ => break,
+        }
+    }
+    items
+}
+
+/// Пункты меню агента session с экрана его терминала — только чтение, ничего не нажимается (`agent-speak menu`):
+/// Ома называет в вопросе подтверждения тот пункт, что увидит пользователь (у плана — «Yes, and use auto mode»).
+pub fn menu_of(session: &str) -> Result<Vec<String>, String> {
+    let live = crate::agents::scan_all().into_iter().find(|l| l.id == session).ok_or("агента нет среди живых")?;
+    let pane = mux::locate(live.pid).ok_or("агент не в Orca и не в herdr — экран не прочитать")?;
+    let items = menu(&mux::screen(&pane)?);
+    if items.is_empty() {
+        return Err("на экране агента нет меню".into());
+    }
+    Ok(items)
 }
 
 /// Цифра пункта n — только если на экране у него ожидаемый текст: устаревший или двойной клик, другое меню
@@ -265,6 +302,17 @@ mod tests {
     }
 
     #[test]
+    fn menu_lists_options_as_on_screen() {
+        // Ома называет в вопросе подтверждения пункт с экрана: одобрение плана включает и auto mode
+        assert_eq!(menu(PLAN_SCREEN), ["Yes, and use auto mode", "Yes, manually approve edits", "Tell Claude what to change"]);
+        let numbered = format!("План:\n1. Удалить старое\n2. Написать новое\n3. Проверить\n4. Закоммитить\n{PLAN_SCREEN}");
+        assert_eq!(menu(&numbered).len(), 3, "строки плана выше меню — не пункты");
+        assert_eq!(menu(&ask_screen(2, false)), ["вариант 1", "вариант 2", "Type something.", "Chat about this"]);
+        assert!(menu("Готово:\n1. тесты\n2. доки\n❯ ").is_empty(), "нумерованный текст без курсора меню — не меню");
+        assert!(menu("").is_empty());
+    }
+
+    #[test]
     fn task_text_is_one_line() {
         assert_eq!(one_line("Сделай так:\n1. тесты\n\n2. доки  "), "Сделай так: 1. тесты 2. доки");
     }
@@ -272,5 +320,6 @@ mod tests {
     #[test]
     fn tell_unknown_session_is_error() {
         assert!(tell("нет-такой-сессии", 0, "привет", "").unwrap_err().contains("нет среди живых"));
+        assert!(menu_of("нет-такой-сессии").unwrap_err().contains("нет среди живых"));
     }
 }
