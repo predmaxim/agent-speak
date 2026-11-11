@@ -165,7 +165,7 @@ class Oma:
         elif do in ("ask", "new"):  # реплика в чате или новый чат — мозг переходит туда
             want = cmd.get("key")
             key = "new" if do == "new" else await self.general() if want == "general" else want or self.brain.key
-            was = "general" if want == "general" else None
+            was = "general" if want == "general" else None  # окно ждёт ответа на «general» и примет настоящий ключ
             if key != self.brain.key:
                 await self.switch(key, was)
             elif do == "new":
