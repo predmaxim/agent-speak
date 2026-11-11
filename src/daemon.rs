@@ -804,6 +804,7 @@ impl State {
             if !self.quiet() {
                 self.board.push(News { session: d.session, class: Class::Final, say: d.say, born: (self.now_secs)() });
             }
+            self.speak_news();
             return;
         }
         let Some(e) = self.registry.get(&d.session) else { return };
@@ -845,6 +846,7 @@ impl State {
             self.board.push(News { session: d.session, class, say, born: (self.now_secs)() });
         }
         self.push_agents();
+        self.speak_news(); // пересказ готов — звучит сразу, а не со следующим тиком
     }
 
     /// Новости — когда Ома молчит, ничего не звучит и пользователь слушает; слух греется заранее, чтобы ответ услышать сразу.
@@ -2520,7 +2522,7 @@ mod tests {
         st.on_digest(dg("s", Ask::Step, false, "Ревьювер принял ответ."));
         assert!(st.board.is_empty(), "переписка оркестратора с помощниками — не новость");
         st.on_digest(dg("s", Ask::Step, true, "Вся работа готова и влита."));
-        assert!(!st.board.is_empty(), "работа целиком готова — звучит");
+        assert_eq!(texts(&st), ["плуг: Вся работа готова и влита."], "работа целиком готова — звучит");
         st.on_hook("user-prompt-submit", &report);
         st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s", "prompt": "а что с тестами?"}));
         stop(&mut st, "s", "Тесты зелёные.");
@@ -2549,8 +2551,7 @@ mod tests {
         let b = bubbles(&mut r);
         assert_eq!(b.len(), 1);
         assert_eq!((b[0]["kind"].as_str(), b[0]["text"].as_str(), b[0]["who"].as_str()), (Some("final"), Some("Фича готова."), Some("T-s")));
-        st.tick();
-        assert_eq!(pop1(&st), "плуг: Фича готова.");
+        assert_eq!(pop1(&st), "плуг: Фича готова.", "звучит сразу, а не со следующим тиком");
     }
 
     #[test]
@@ -2613,10 +2614,12 @@ mod tests {
         let mut st = test_state();
         st.cfg.agents_voice = true;
         with_agents(&mut st, &["s", "t"]);
+        st.hold(true); // Ома говорит — новости ждут на доске
         st.on_digest(dg("s", Ask::Final, true, "Фича готова."));
         question(&mut st, "t", true, "Удалить старый код?");
         st.cfg.agents_voice = false;
         st.apply();
+        st.hold(false);
         st.tick();
         assert!(texts(&st).is_empty()); // слежка выключена — и вопросы с доски ушли
         st.cfg.agents_voice = true;
@@ -3525,8 +3528,10 @@ mod tests {
     fn short_absence_no_greeting() {
         let (mut st, _now) = presence_state(1120);
         snap(&mut st, serde_json::json!({"at": 1120, "idle_since": 1000}));
-        final_s(&mut st); // без tick: «не уверена» с новостью спросила бы «Ты тут?»
+        st.hold(true); // Ома говорит: «не уверена» с новостью спросила бы «Ты тут?»
+        final_s(&mut st);
         snap(&mut st, serde_json::json!({"at": 1120, "idle_since": 0}));
+        st.hold(false);
         st.tick();
         assert_eq!(texts(&st), ["плуг: Фича готова."]);
     }
