@@ -284,7 +284,7 @@ def test_are_you_there_yes_closes():
 def test_are_you_there_other_goes_to_brain():
     clk, cv = _conv()
     cv.listen(5, "here", "Ты тут?")
-    assert ("send", "через минуту", "Ома спросила: «Эй, ты тут? Есть новости». ") in _say(clk, cv, "через минуту")
+    assert ("send", "через минуту", "Ома спросила: «Ты тут?» ") in _say(clk, cv, "через минуту"), "вопрос — как его дала служба"
 
 
 def test_are_you_there_ignores_talk_not_to_oma():
@@ -2748,3 +2748,47 @@ def test_reply_without_sound_ends_speaking():
     cv.delta("`cargo test`. "); cv.done()
     assert cv.state == "speaking"
     assert cv.audio(False, clk.t) == [("state", "listening")], "служба: звука не было — played_at сейчас"
+
+
+
+HERE = "Эй, ты тут? Есть новости."
+
+
+def test_are_you_there_echo_judged_by_its_own_question():
+    # окно «Ты тут?» открыто с начала вопроса: эхо узнаётся по её вопросу (said службы), а не по прошлому ответу —
+    # с прошлым «Да, тут всё готово.» ответ «Да, тут.» под её голос выбросился бы как эхо
+    clk, cv = _conv()
+    cv.echo, cv.said = True, "Да, тут всё готово."
+    cv.listen(20, "here", HERE)
+    cv.audio(True)  # вопрос звучит, окно уже слушает
+    cv.speech_start(1)
+    assert cv.phrase("Тут? Есть новости.", 1) == [] and cv.draft == "", "её же вопрос из динамиков — не ответ"
+    cv.speech_start(2)
+    cv.phrase("Да, тут.", 2)
+    clk.t += SEND_PAUSE
+    assert ("presence", "here") in cv.tick()
+
+
+def test_are_you_there_window_is_not_cut_by_echo_or_room_talk():
+    # окно — secs службы от начала вопроса; эхо в хвосте и непринятая речь его не сокращают до WINDOW_END
+    clk, cv = _conv()
+    cv.echo = True
+    cv.listen(20, "here", HERE)
+    cv.audio(True)
+    clk.t = 2.0
+    cv.audio(False, clk.t + 0.7)
+    clk.t = 2.3
+    cv.speech_start(1); cv.phrase("Есть новости.", 1)  # её хвост из динамиков
+    clk.t = 3.0
+    _say(clk, cv, "Бабы, бабы, бабы.", n=2)  # речь в комнате — не ответ Оме
+    clk.t = 14.0
+    assert cv.tick() == [] and cv.active, "ответ на 8–14 секунде ещё принимается"
+    assert ("presence", "here") in _say(clk, cv, "да, я тут", n=3)
+    clk2, cv2 = _conv()
+    cv2.listen(20, "here", HERE)
+    clk2.t = 3.0
+    _say(clk2, cv2, "Бабы, бабы, бабы.", n=1)
+    clk2.t = 19.9
+    assert cv2.tick() == [] and cv2.active
+    clk2.t = 20.1
+    assert ("ear", False) in cv2.tick() and not cv2.active, "молчит — окно кончается, когда сказала служба"

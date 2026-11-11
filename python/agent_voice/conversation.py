@@ -148,10 +148,16 @@ class Conversation:
             return []
         self.state = state
         if self.active and state in ("listening", "paused"):
-            self.quiet_at = self.clock() + self.silence
+            self.quiet_at = self._silence_until()
         elif state in ("thinking", "speaking"):
             self.quiet_at = None
         return [("state", state)]
+
+    def _silence_until(self):
+        """Когда закончить разговор от тишины; окно ответа, на которое ещё не ответили, — не раньше своего конца (secs
+        службы от его начала): эхо её вопроса и речь в комнате его не сокращают."""
+        t = self.clock() + self.silence
+        return max(t, self.window["until"]) if self.window and self.window["first"] else t
 
     def _rest(self):
         """Состояние покоя: когда ничего не говорим и не ждём ответ."""
@@ -232,7 +238,7 @@ class Conversation:
         if first and w["kind"] == "here":
             if is_yes(text):
                 return acts + self.end()
-            ctx = "Ома спросила: «Эй, ты тут? Есть новости». "
+            ctx = f"Ома спросила: «{w['said']}» "
         elif first:
             if w["kind"] == "news" and is_ack(text):
                 return acts + self.end()
@@ -246,13 +252,15 @@ class Conversation:
         return self.window and self.window["close"] and not self.turn
 
     def listen(self, secs, kind="news", said=""):
-        """Окно ответа после новостей: слух на secs секунд; заговорил пользователь — обычный разговор."""
+        """Окно ответа после новостей или вопроса «Ты тут?» (он ещё звучит): слух на secs секунд; said — что она
+        сказала, по нему узнаётся эхо; заговорил пользователь — обычный разговор."""
         if self.state != "idle" or self.quiet or self.mic:  # не мешаем ходу, звуку и чужому микрофону
             return []
         self.active = True
-        self.window = {"kind": kind, "said": said, "first": True, "close": False}
+        self.window = {"kind": kind, "said": said, "first": True, "close": False, "until": self.clock() + secs}
+        self.said = said  # эхо — по ней, а не по её прошлому ответу
         acts = [("ear", True)] + self._to("listening")
-        self.quiet_at = self.clock() + secs  # после _to: он ставит SILENCE_END
+        self.quiet_at = self.window["until"]  # после _to: окно — ровно secs, а не WINDOW_END
         return acts
 
     def end(self):
@@ -333,7 +341,7 @@ class Conversation:
         self.draft = f"{self.draft} {t}".strip()
         self.heard_at = self.clock()
         self.send_at = self.heard_at + SEND_PAUSE
-        self.quiet_at = self.clock() + self.silence
+        self.quiet_at = self._silence_until()
         return pre + [("draft", self.draft, self.hearing)]
 
     def turn_end(self, done):
@@ -347,7 +355,7 @@ class Conversation:
         if self.active and not self.hearing and self.state in ("listening", "paused"):
             # дедлайны снимает speech_start; если фраза их не вернула (шум, отмена) — взводим здесь
             if self.quiet_at is None:
-                self.quiet_at = now + self.silence
+                self.quiet_at = self._silence_until()
             if self.draft and self.send_at is None:
                 self.send_at = now + SEND_PAUSE
         if self.state == "listening" and not self.hearing and self.draft and self.send_at is not None and now >= self.send_at:
