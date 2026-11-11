@@ -251,14 +251,22 @@ class Brain:
     def chats(self) -> list:
         return general_chats(list_sessions(OMA_DIR))
 
+    @staticmethod
+    def _sid(key: str):
+        """id сессии чата key: у "chat:<id>" — он сам, у "agent:<id>" — по тегу; у нового чата — None."""
+        if key.startswith("chat:"):
+            return key[5:]
+        return find_agent_chat(list_sessions(OMA_DIR), key[6:]) if key.startswith("agent:") else None
+
+    def messages(self, key: str) -> list:
+        """История чата key — только чтение: окно смотрит чат, мозг не переключается, claude не трогается."""
+        sid = self._sid(key)
+        return messages_of(get_session_messages(sid, directory=OMA_DIR)) if sid else []
+
     async def open(self, key: str) -> list:
         """Перейти к чату key и вернуть его историю. claude не запускается: подключится первый send."""
         await self.close()
-        self.key, self.sid, self.used = key, None, time.time()
-        if key.startswith("chat:"):
-            self.sid = key[5:]
-        elif key.startswith("agent:"):
-            self.sid = find_agent_chat(list_sessions(OMA_DIR), key[6:])
+        self.key, self.sid, self.used = key, self._sid(key), time.time()
         return messages_of(get_session_messages(self.sid, directory=OMA_DIR)) if self.sid else []
 
     async def _connect(self):

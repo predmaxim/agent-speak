@@ -132,14 +132,20 @@ class Oma:
             self.emit({"chats": await asyncio.to_thread(self.brain.chats)})
         elif do == "open" and not cmd.get("key"):  # окно спрашивает текущий чат: без переключения, was "*" — принять его ключ
             self.emit({"chat": {"key": self.brain.key, "was": "*", "messages": self.history}})
-        elif do in ("ask", "open", "new"):
+        elif do == "open":  # окно смотрит чат (клик по агенту): мозг не переключается — её ответ не обрывается, claude живёт
+            want = cmd.get("key")
+            key = await self.general() if want == "general" else want
+            was = "general" if want == "general" else None  # окно ждёт ответа на «general» и примет настоящий ключ
+            msgs = self.history if key == self.brain.key else await asyncio.to_thread(self.brain.messages, key)
+            self.emit({"chat": {"key": key, **({"was": was} if was else {}), "messages": msgs}})
+        elif do in ("ask", "new"):  # реплика в чате или новый чат — мозг переходит туда
             want = cmd.get("key")
             key = "new" if do == "new" else await self.general() if want == "general" else want or self.brain.key
-            was = "general" if want == "general" else None  # окно ждёт ответа на «general» и примет настоящий ключ
+            was = "general" if want == "general" else None
             if key != self.brain.key:
                 await self.switch(key, was)
-            elif do != "ask":
-                self.emit({"chat": {"key": key, **({"was": was} if was else {}), "messages": self.history}})
+            elif do == "new":
+                self.emit({"chat": {"key": key, "messages": self.history}})
             if do == "ask":
                 await self.act(c.ask(cmd.get("text", "")))
 

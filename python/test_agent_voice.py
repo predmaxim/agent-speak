@@ -884,6 +884,7 @@ def test_oma_stale_chat_line_lands_in_new_chat_and_done_syncs():
     class FakeBrain:
         key = "new"
         async def open(self, k): self.key = k; return [{"role": "me", "text": "давно"}]
+        def messages(self, k): return [{"role": "me", "text": "давно"}]
         async def send(self, t):
             if self.key.startswith("chat:"):  # как Brain при устаревшем чате: "opened" в очередь, ключ уже "new"
                 self.pending, self.key = ("opened", "new", self.key), "new"
@@ -911,6 +912,24 @@ def test_oma_stale_chat_line_lands_in_new_chat_and_done_syncs():
     asyncio.run(run())
 
 
+def test_viewing_agent_chat_keeps_her_answer_and_brain():
+    # 2026-11-11: клик по агенту в окне (open) обрывал её ответ и закрывал прогретый claude — смотреть ленту
+    # агента и переключать мозг — разное: мозг переключают реплика (ask), разговор и окно ответа агенту
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    opened = []
+    oma.brain.open = lambda k: opened.append(k)
+    oma.brain.messages = lambda k: [{"role": "oma", "text": f"история {k}"}]
+
+    async def go():
+        await oma.command({"do": "talk"})
+        oma.conv.ask("как дела у агентов")
+        await oma.command({"do": "open", "key": "agent:s1"})
+    run(go())
+    assert oma.conv.turn and oma.conv.state == "thinking" and opened == [] and oma.brain.key == "new"
+    assert {"chat": {"key": "agent:s1", "messages": [{"role": "oma", "text": "история agent:s1"}]}} in [e["line"] for e in emitted]
+
+
 def test_oma_open_without_key_reports_current_chat():
     lines, opened = [], []
 
@@ -935,6 +954,7 @@ def test_general_chat_for_talk_and_window():
         key = "agent:a1"
         updated = time.time() - 600
         async def open(self, k): opened.append(k); self.key = k; return []
+        def messages(self, k): return []
         async def interrupt(self): pass
         async def warm(self): pass
         def chats(self): return [{"key": "chat:g", "updated": self.updated}]
@@ -948,10 +968,11 @@ def test_general_chat_for_talk_and_window():
         await oma.command({"do": "talk"})  # слушала — клик закрывает разговор, чат тот же
         assert opened == ["chat:g"]
         oma.brain.key, oma.brain.updated = "agent:a1", time.time() - 3 * 3600
-        await oma.command({"do": "open", "key": "general"})
-        assert opened[-1] == "new" and lines[-1]["chat"]["key"] == "new" and lines[-1]["chat"]["was"] == "general"
-        await oma.command({"do": "open", "key": "general"})  # уже в общем — он и есть
-        assert opened[-1] == "new" and len(opened) == 2 and lines[-1]["chat"] == {"key": "new", "was": "general", "messages": []}
+        await oma.command({"do": "open", "key": "general"})  # окно смотрит общий чат, мозг не переключается
+        assert opened == ["chat:g"] and lines[-1]["chat"] == {"key": "new", "was": "general", "messages": []}
+        before = len(lines)
+        await oma.command({"do": "ask", "key": "general", "text": "привет"})  # написали в нём — мозг туда
+        assert opened[-1] == "new" and (lines[before]["chat"]["key"], lines[before]["chat"]["was"]) == ("new", "general")
     asyncio.run(go())
 
 
