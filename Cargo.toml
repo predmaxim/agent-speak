@@ -10,3 +10,7 @@ toml = "0.8"
 notify = "6"
 base64 = "0.22"
 libc = "0.2"
+
+[profile.release]
+# паника любого потока завершает службу, и systemd поднимает её (Restart=on-failure): немой демон с мёртвым потоком хуже
+panic = "abort"
