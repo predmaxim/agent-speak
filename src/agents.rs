@@ -626,7 +626,7 @@ mod tests {
         // проба волны 0: ненулевой код Bash приходит сбоем — это ответ команды (ls, grep, красный прогон TDD), не сбой
         assert!(!tool_failed(&bash("Exit code 2\nls: cannot access '/x': No such file or directory")));
         assert!(!tool_failed(&bash("Exit code 1")));
-        assert!(tool_failed(&bash("Command timed out after 2m 0.0s")), "команда не доработала — сбой");
+        assert!(tool_failed(&bash("Error: Bash tool could not run")), "не код выхода команды — сбой самого вызова (текст условный: другие виды ошибок Bash проба не ловила)");
         assert!(tool_failed(&json!({"session_id": "s", "tool_name": "Edit", "error": "String to replace not found in file."})));
         assert!(!tool_failed(&json!({"session_id": "s", "tool_name": "Edit", "error": "x", "is_interrupt": true})), "прервал пользователь");
         assert!(!tool_failed(&json!({"session_id": "s", "tool_name": "Edit", "error": "x", "agent_id": "a1"})), "у сабагента — свой счёт, не агента");
