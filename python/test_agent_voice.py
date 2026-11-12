@@ -4541,9 +4541,6 @@ def test_ear_log_is_off_without_its_dir_and_keeps_last_ten(monkeypatch, tmp_path
     from agent_voice import earlog
     d = tmp_path / "ear"
     monkeypatch.setattr(earlog, "DIR", str(d))
-    monkeypatch.setattr(earlog, "_checked", -10.0)
-    monkeypatch.setattr(earlog, "_last", {})
-    earlog._ring.clear()
     earlog.frame(b"\0" * 1024)
     earlog.phrase(1, b"\0" * 3200, "да")
     assert not d.exists() and not earlog._ring, "выключено — ни файла, ни звука в памяти"
@@ -4555,9 +4552,21 @@ def test_ear_log_is_off_without_its_dir_and_keeps_last_ten(monkeypatch, tmp_path
         earlog.phrase(n, b"\0" * 3200, f"фраза {n}")
     dirs = sorted(os.listdir(d))
     assert len(dirs) == 10 and dirs[0].endswith("-000003") and dirs[-1].endswith("-000012"), "последние 10, старые удалены"
+    earlog.mark(12)
+    for _ in range(5):
+        earlog.frame(b"\1" * 1024, paused=True)
     earlog.verdict(12, verdict="эхо", her_words="Скажи: да, передай.")
     earlog.whole("да передай", "Да, передай.")
     info = json.load(open(d / dirs[-1] / "info.json"))
     assert info["text"] == "фраза 12" and info["verdict"] == "эхо" and info["sent_whole"] == "Да, передай."
     with wave.open(str(d / dirs[-1] / "stream.wav")) as w:
         assert w.getframerate() == 16000 and w.getnframes() == 40 * 512
+    earlog.phrase(13, b"\0" * 3200, "после паузы")
+    with wave.open(str(d / sorted(os.listdir(d))[-1] / "stream.wav")) as w:
+        assert w.readframes(10 ** 6)[-5 * 1024:] == bytes(5 * 1024), "на паузе слуха — тишина, а не чужая запись"
+    import shutil; shutil.rmtree(d)
+    monkeypatch.setattr(earlog, "_checked", -10.0)
+    earlog.on()
+    monkeypatch.setattr(earlog, "_on", True)  # кэш ещё «вкл», а каталог уже удалён
+    earlog.phrase(14, b"\0" * 3200, "после удаления")
+    assert not d.exists(), "удалённый каталог запись не создаёт заново"

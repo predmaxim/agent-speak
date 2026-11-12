@@ -10,7 +10,8 @@ import shutil
 import time
 import wave
 
-DIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "agent-speak-ear")
+# без XDG_RUNTIME_DIR — выключена: в общем /tmp каталог мог бы завести чужой пользователь
+DIR = os.path.join(os.environ["XDG_RUNTIME_DIR"], "agent-speak-ear") if os.environ.get("XDG_RUNTIME_DIR") else None
 KEEP = 10
 RATE, FRAME = 16000, 512
 RING = 20  # с звука с микрофона до конца куска
@@ -18,6 +19,7 @@ RING = 20  # с звука с микрофона до конца куска
 _ring = collections.deque(maxlen=RING * RATE // FRAME)
 _checked, _on = 0.0, False
 _last = {}  # номер речи → её папка
+_marks = {}  # номер речи → звук микрофона на конце её куска
 
 
 def on(now=None):
@@ -25,15 +27,28 @@ def on(now=None):
     global _checked, _on
     now = time.monotonic() if now is None else now
     if now - _checked >= 1.0:
-        _checked, _on = now, os.path.isdir(DIR)
+        _checked, _on = now, bool(DIR) and os.path.isdir(DIR)
     return _on
 
 
-def frame(b):
+def frame(b, paused=False):
+    """Кадр микрофона; на паузе слуха (микрофон у диктовки, звонка; mute) — тишина: чужая запись не держится."""
     if on():
-        _ring.append(b)
+        _ring.append(bytes(len(b)) if paused else b)
     elif _ring:
-        _ring.clear()
+        reset()
+
+
+def reset():
+    """Слух закрыт: звук прежнего сеанса к новому не приклеивается."""
+    _ring.clear()
+    _marks.clear()
+
+
+def mark(n):
+    """Конец куска n: звук микрофона до этого места — распознавание кончится позже, кольцо уйдёт дальше."""
+    if on():
+        _marks[n] = b"".join(_ring)
 
 
 def _wav(path, pcm):
@@ -62,9 +77,9 @@ def phrase(n, pcm, text):
         return
     try:
         path = os.path.join(DIR, f"{time.strftime('%Y%m%d-%H%M%S')}-{n:06d}")  # имена сортируются по порядку: старые — первыми
-        os.makedirs(path, exist_ok=True)
+        os.mkdir(path)  # каталог удалили (выключили) — FileNotFoundError, а не новый каталог с записью
         _wav(os.path.join(path, "phrase.wav"), pcm)
-        _wav(os.path.join(path, "stream.wav"), b"".join(_ring))
+        _wav(os.path.join(path, "stream.wav"), _marks.pop(n, b"") or b"".join(_ring))
         _info(path, n=n, at=time.strftime("%H:%M:%S"), text=text, phrase_s=round(len(pcm) / 2 / RATE, 2))
         _last[n] = path
         old = sorted(os.listdir(DIR))[:-KEEP]

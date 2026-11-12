@@ -216,6 +216,7 @@ class Ear:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)  # до reap: дочитывать stdout, пока его ждёт _read, нельзя
         await reap(proc, aec, sub)
+        earlog.reset()
         await self._closed()
 
     async def _closed(self):
@@ -272,6 +273,7 @@ class Ear:
                 self.seq += 1  # начало речи — первый из start_frames кадров речи подряд
                 await self.out.put(("start", self.seq, base + (k - seg.start_frames) * FRAME / RATE))
             else:
+                earlog.mark(self.seq)
                 phrases.put_nowait((self.seq, ev[1]))  # фраза закрывает последнюю начатую речь
 
     async def _read(self, proc, phrases):
@@ -289,7 +291,7 @@ class Ear:
                     a = await aec.stdout.readexactly(FRAME * 2)
                     if self.speaking:
                         b = a
-                earlog.frame(b)  # диагностика слуха: каталога нет — ничего
+                earlog.frame(b, self.paused)  # диагностика слуха: каталога нет — ничего
                 if self.waking != mode:  # побудка ↔ разговор: начатая в другом режиме речь не тянется
                     seg, mode = Segmenter(), self.waking
                     at, self._replay = self._replay, None
