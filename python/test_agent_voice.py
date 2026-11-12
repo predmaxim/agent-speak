@@ -903,6 +903,11 @@ def test_oma_answers_every_listen_with_voice_state(monkeypatch):
         sent.clear()
         await oma.command({"do": "listen", "secs": 5})
         assert [c["state"] for c in sent] == ["listening"], "окно открылось — одна строка, без повтора"
+        await oma.command({"do": "talk"})
+        sent.clear()
+        with pytest.raises(ValueError):
+            await oma.command({"do": "listen", "secs": "много"})  # сбой до окна (ручная команда `oma` с плохим secs)
+        assert sent == [{"cmd": "voice_state", "state": "idle", "talking": False}], "и на сбой — ответ: флаг службы не залипает"
 
     asyncio.run(run())
 

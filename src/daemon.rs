@@ -89,6 +89,9 @@ const HERE_WAIT: u64 = 20;
 /// Начало сводки, когда кончилась тишина по причине (показ экрана): «Пока было тихо: 2 проекта закончили».
 const QUIET_OVER: &str = "Пока было тихо";
 
+/// Сессия срочного сторожа, сказанного при Busy (видео, созвон): звук не держит — музыку и видео не ставят на паузу.
+const URGENT_BUSY: &str = "urgent";
+
 /// Итогов на доске к возвращению больше — их сжимает одна сводка модели, а не склейка подряд.
 const SUMMARY_OVER: usize = 3;
 
@@ -1021,9 +1024,11 @@ impl State {
 
     /// Звук занят Омой — плагин держит музыку на паузе: она говорит, идёт разговор или окно ответа, окно назначено после
     /// новостей (listen_at — только при listen_after) или listen ушёл, а её voice_state нет. На паузе пользователя она
-    /// молчит — назначенное окно звук не держит.
+    /// молчит — назначенное окно звук не держит. Срочное сторожа при Busy (видео, созвон) звучит, а звук не держит: видео
+    /// трогает только сам пользователь (правило 7 дизайна «Джарвис»).
     fn media_hold(&self) -> bool {
-        self.shared.busy.load(Ordering::SeqCst) || self.oma.talking || self.listen_sent || (self.listen_after.is_some() && !self.user_paused())
+        let speaking = self.shared.busy.load(Ordering::SeqCst) && *self.shared.current.lock().unwrap() != URGENT_BUSY;
+        speaking || self.oma.talking || self.listen_sent || (self.listen_after.is_some() && !self.user_paused())
     }
 
     /// Состояние всем подписчикам.
@@ -1208,7 +1213,7 @@ impl State {
             if mode == Mode::Busy {
                 if let Some(t) = self.board.take_urgent(now) {
                     eprintln!("agent-speak: говорю (срочное, {mode:?}): {}", t.chars().take(200).collect::<String>());
-                    self.enqueue(Agent::Claude, "news", &t, Kind::News);
+                    self.enqueue(Agent::Claude, URGENT_BUSY, &t, Kind::News);
                 }
             }
             return;
@@ -1301,6 +1306,8 @@ impl State {
 
     /// Заговорила или смолкла (поток воспроизведения).
     fn on_busy(&mut self) {
+        // смолкла — накопленное встаёт в очередь сейчас, а не со следующим tick: музыка не вклинивается на 0–1 с
+        self.speak_news();
         self.broadcast();
         self.after_speech();
     }
@@ -1659,6 +1666,8 @@ impl State {
                 self.oma.talking = talking;
                 self.listen_sent = false;
                 self.purge();
+                // разговор или окно ответа кончились — накопленное встаёт в очередь сейчас, до рассылки: музыка не вклинивается
+                self.speak_news();
             }
             Msg::Oma { action } => self.oma_send(&action),
             Msg::Emit { mut line } => {
@@ -3881,8 +3890,8 @@ mod tests {
         st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
         st.tick();
         assert!(texts(&st).is_empty());
-        st.on_msg(Msg::VoiceState { state: "idle".into(), talking: false });
         st.shared.set_busy(Some("r")); // ещё звучит другое
+        st.on_msg(Msg::VoiceState { state: "idle".into(), talking: false });
         st.tick();
         assert!(texts(&st).is_empty());
         st.shared.set_busy(None);
@@ -4007,6 +4016,64 @@ mod tests {
         assert_eq!(holds(&mut r), [true, false], "окно закрылось — музыка снова играет");
         st.on_msg(Msg::Set { key: "music_pause".into(), value: false.into() });
         assert_eq!(line(&st)["music_pause"], false);
+    }
+
+    /// media_hold строк состояния, которые получил подписчик.
+    fn holds(r: &mut BufReader<UnixStream>) -> Vec<bool> {
+        drain(r).into_iter().filter(|l| l.get("running").is_some()).map(|l| l["media_hold"] == true).collect()
+    }
+
+    #[test]
+    fn media_hold_no_gap_between_talk_and_kept_news() {
+        // новости, накопленные за разговор, встают в очередь, когда разговор кончился, а не со следующим tick:
+        // иначе музыка на 0–1 с вклинивается между окном ответа и новостью
+        let mut st = test_state();
+        st.cfg.agents_voice = true;
+        with_agents(&mut st, &["s"]);
+        let mut r = sub(&mut st);
+        drain(&mut r);
+        st.on_msg(Msg::VoiceState { state: "listening".into(), talking: true });
+        st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
+        st.tick();
+        st.on_msg(Msg::VoiceState { state: "idle".into(), talking: false });
+        st.tick();
+        let h = holds(&mut r);
+        assert!(!h.is_empty() && !h.contains(&false), "музыка не вклинивается: {h:?}");
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
+    }
+
+    #[test]
+    fn media_hold_no_gap_between_read_and_kept_news() {
+        // то же после чтения по хоткею: busy погас — новость встаёт в очередь сразу
+        let mut st = test_state();
+        st.cfg.agents_voice = true;
+        with_agents(&mut st, &["s"]);
+        let mut r = sub(&mut st);
+        drain(&mut r);
+        st.shared.set_busy(Some("s"));
+        st.on_busy();
+        st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
+        st.shared.set_busy(None);
+        st.on_busy();
+        st.tick();
+        let h = holds(&mut r);
+        assert!(!h.is_empty() && !h.contains(&false), "музыка не вклинивается: {h:?}");
+    }
+
+    #[test]
+    fn urgent_news_while_video_does_not_pause_it() {
+        // видео — Busy: срочное сторожа звучит, но видео трогает только сам пользователь (правило 7 дизайна)
+        let (mut st, _now) = presence_state(1000);
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 990, "video": true}));
+        st.board.push(News { session: "s".into(), class: Class::Urgent, say: "плуг: агент завис.".into(), born: 1000 });
+        st.tick();
+        let item = st.shared.queue.lock().unwrap().pop().unwrap();
+        assert_eq!(item.text, "плуг: агент завис.");
+        st.shared.set_busy(Some(&item.session));
+        assert!(!st.media_hold(), "срочное при видео — видео не на паузе");
+        st.shared.set_busy(None);
+        st.shared.set_busy(Some("s")); // чтение по хоткею — явное действие: пауза есть
+        assert!(st.media_hold());
     }
 
     #[test]

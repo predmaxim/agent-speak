@@ -175,21 +175,24 @@ class Oma:
         elif do == "warm":  # демон прогревает слух до окна ответа: whisper не грузится при открытом микрофоне
             self.warm()
         elif do == "listen":
-            acts = []
-            # экран заблокирован или микрофон держит чужой (conv.mic при закрытом слухе не знает: pid нет) — не открываем
-            if not await asyncio.to_thread(locked) and not foreign_capture(await asyncio.to_thread(mic_outputs), set()):
-                self.ear.speakers = True if cmd.get("speakers") else None  # «Ты тут?» в динамики — и слушать ноутбуком
-                key = cmd.get("key")  # окно после вопроса — ответ в чат спросившего агента
-                idle = c.state == "idle"
-                acts = c.listen(float(cmd.get("secs", 5)), cmd.get("kind", "news"), cmd.get("said", ""))
-                await self.act(acts)
-                if idle and c.active:  # окно ответа открылось — разговор начался
-                    await self.follow(key if key != self.brain.key else None)
-                if key and c.active:
-                    self.to_brain(self.brain.warm)  # ответ агенту: claude поднимается, пока окно слушает
-            # ответ на каждый listen — и на отказ: служба держит музыку на паузе, пока его ждёт (media_hold)
-            if not any(a[0] == "state" for a in acts):
-                await self.act([("state", c.state)])
+            answered = False
+            try:
+                # экран заблокирован или микрофон держит чужой (conv.mic при закрытом слухе не знает: pid нет) — не открываем
+                if not await asyncio.to_thread(locked) and not foreign_capture(await asyncio.to_thread(mic_outputs), set()):
+                    self.ear.speakers = True if cmd.get("speakers") else None  # «Ты тут?» в динамики — и слушать ноутбуком
+                    key = cmd.get("key")  # окно после вопроса — ответ в чат спросившего агента
+                    idle = c.state == "idle"
+                    acts = c.listen(float(cmd.get("secs", 5)), cmd.get("kind", "news"), cmd.get("said", ""))
+                    await self.act(acts)
+                    answered = any(a[0] == "state" for a in acts)
+                    if idle and c.active:  # окно ответа открылось — разговор начался
+                        await self.follow(key if key != self.brain.key else None)
+                    if key and c.active:
+                        self.to_brain(self.brain.warm)  # ответ агенту: claude поднимается, пока окно слушает
+            finally:
+                # ответ на каждый listen — и на отказ и сбой: служба держит музыку на паузе, пока его ждёт (media_hold)
+                if not answered:
+                    await self.act([("state", c.state)])
         elif do == "chats":
             self.emit({"chats": await asyncio.to_thread(self.brain.chats)})
         elif do == "open" and not cmd.get("key"):  # окно спрашивает текущий чат: без переключения, was "*" — принять его ключ
