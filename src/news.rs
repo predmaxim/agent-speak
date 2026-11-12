@@ -323,8 +323,7 @@ fn batch(finals: &[News]) -> Vec<Chunk> {
     }
     let (own, rest): (Vec<&News>, Vec<&News>) = finals.iter().partition(|i| i.important || i.project.is_empty());
     // факты git в пачке — только тревожные: «Закоммичено» не звучит
-    let alarm = |i: &News| if i.facts.dirty > 0 { i.facts } else { Facts::default() };
-    let mut chunks: Vec<Chunk> = own.into_iter().map(|i| Chunk::of(&News { facts: alarm(i), ..i.clone() })).collect();
+    let mut chunks: Vec<Chunk> = own.into_iter().map(|i| Chunk { text: if i.facts.dirty > 0 { i.facts.after(&i.say) } else { i.say.clone() }, ..Chunk::of(i) }).collect();
     let alarms: Vec<String> = rest.iter().filter_map(|i| i.facts.alarm(&i.project)).collect();
     let mut names: Vec<&str> = Vec::new();
     for i in rest {
@@ -338,7 +337,7 @@ fn batch(finals: &[News]) -> Vec<Chunk> {
         chunks.push(Chunk { class: Some(Class::Final), project: String::new(), text: format!("{verb}{more}: {}.", names.join(", ")) });
     }
     for a in alarms {
-        // два агента в одном репозитории — одна фраза
+        // одинаковая фраза — один раз: два агента в одном репозитории
         if !chunks.iter().any(|c| c.text == a) {
             chunks.push(Chunk { class: Some(Class::Final), project: String::new(), text: a });
         }
