@@ -261,6 +261,9 @@ class Conversation:
     def _window_send(self, text):
         """Реплика в разговоре из окна ответа: «ок»/«да» без отправки, пометка для мозга."""
         w = self.window
+        if w.get("asked"):  # ответ на вопрос подтверждения: его сверит код поручения, после — окно закроется, как было
+            w.update(asked=False, close=True)
+            return self._send(text)
         if w["first"] and w["kind"] == "here" and not is_answer(text):
             return []  # речь в комнате не Оме — «Эй, ты тут?» ждёт ответа дальше
         first, w["first"] = w["first"], False
@@ -334,6 +337,8 @@ class Conversation:
         t = text.strip()
         if not t:
             return []
+        if self.window and self.window.get("asked"):  # ответ на её вопрос подтверждения набран — окно ответа его уже не ждёт
+            self.window.update(asked=False, close=True)
         return self._stop_turn() + self._drop() + self._send(t, voiced=False)
 
     def _echoing(self, at):
@@ -353,8 +358,8 @@ class Conversation:
         if self._echoing(at) and (self.audio_busy or self.state == "speaking"):
             self.started = n  # её голос или перебив — решит распознанный текст: обрывать её по эху нельзя
             return []
-        if self.window and not self.window["first"]:
-            return []  # на окно уже ответили: дальше — не Оме, её ответ не обрывать
+        if self.window and not self.window["first"] and not self.window.get("asked"):
+            return []  # на окно уже ответили: дальше — не Оме, её ответ не обрывать; ответ на её вопрос подтверждения — Оме
         if self.turn and self.state == "thinking" and not self.audio_busy:
             self.started = self.held = n  # кашель, пока она думает, не обрывает ответ: перебив решит текст (phrase)
             return [("draft", self.draft, True)]
@@ -371,8 +376,8 @@ class Conversation:
 
     def phrase(self, text, n):
         self.heard = max(self.heard, n)
-        if self.window and not self.window["first"]:
-            return []  # на окно уже ответили: речь в комнате — не Оме
+        if self.window and not self.window["first"] and not self.window.get("asked"):
+            return []  # на окно уже ответили: речь в комнате — не Оме; ответ на её вопрос подтверждения — Оме
         pre = []
         if n == self.echo_n:  # началась под её голос — начало может быть её, когда бы фразу ни распознали
             if is_echo(text, self.said):
@@ -494,6 +499,8 @@ class Conversation:
         знает защита от эха. Ход мозга на нём кончается (хук PostToolUse в brain.py) — вопрос звучит последним."""
         if not self.turn:
             return []
+        if self.window:  # окно, открытое ею, закрылось бы после этого ответа — а вопрос ждёт ответа: ещё одна реплика
+            self.window.update(close=False, asked=True)
         return self._discard() + self._speak(self.chunker.flush() + [text])
 
     def tool(self, name):

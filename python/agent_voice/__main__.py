@@ -322,6 +322,8 @@ class Oma:
             await self.act(c.delta(ev[1]))
         elif kind == "tool":
             await self.act(c.tool(ev[1]))
+        elif kind == "ask_again":  # переспрос подтверждения кодом: вопрос того же хода, поручение уже ждёт
+            await self.act(c.question(ev[1]) if ev[2] == c.turn_no else [])
         elif kind == "confirm":  # вопрос — только в ходе, который вызвал инструмент; не прозвучал — поручение не ждёт
             acts = c.question(ev[1]) if ev[2]["n"] == c.turn_no else []
             if acts:
@@ -456,7 +458,8 @@ class Oma:
         if failed:  # ход уже в «thinking», done() вернёт в покой
             self.events.put_nowait(("error", f"Claude: {failed}", n))
         if said is not None:  # фраза кода вместо ответа мозга — как его ход
-            self.events.put_nowait(("delta", said, n))
+            # «Не расслышала. Скажи: да, передай» — снова вопрос подтверждения: окно ответа его тоже ждёт (Conversation.question)
+            self.events.put_nowait(("ask_again" if self.orders.pending else "delta", said, n))
             self.events.put_nowait(("done", None, n))
 
     def _ear_line(self):

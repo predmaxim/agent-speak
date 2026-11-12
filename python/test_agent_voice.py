@@ -274,6 +274,57 @@ def test_auto_window_closes_after_reply():
     assert ("ear", False) in cv.audio(False) or ("ear", False) in cv.tick()
 
 
+def test_order_question_in_auto_window_keeps_listening_for_the_answer():
+    # 2026-11-12, вживую: после новости «передай агенту …» — Ома спросила «Скажи: да, передай» и закрыла микрофон
+    # (окно, открытое ею, — одна реплика и ответ): подтвердить было нечем. Вопрос подтверждения ждёт ответа, одного
+    clk, cv = _conv()
+    cv.listen(5, "news", "agent-speak: готово")
+    _say(clk, cv, "передай ему: что значит работает на новом коде")
+    cv.question("Передать проекту agent-speak: уточнить? Скажи: да, передай."); cv.audio(True); cv.done()
+    assert ("ear", False) not in cv.audio(False) and cv.state == "listening", "вопрос задан — ответ слушается"
+    clk.t += 1
+    acts = _say(clk, cv, "да, передай", n=2)
+    assert ("send", "да, передай", "") in acts, "ответ на вопрос уходит — его сверит код подтверждения"
+    cv.delta("Передала. "); cv.audio(True); cv.done()
+    assert cv.audio(False)[-2:] == [("ear", False), ("state", "idle")], "после ответа на вопрос окно снова закрывается"
+
+
+def test_order_answer_in_auto_window_late_or_in_two_parts_is_heard():
+    # ревью 2026-11-12: начало ответа в конце 5 с и ответ двумя кусками («да» … «передай») — слух их не терял
+    clk, cv = _conv()
+    cv.listen(5, "news", "agent-speak: готово")
+    _say(clk, cv, "передай ему: проверь тесты")
+    cv.question("Передать? Скажи: да, передай."); cv.audio(True); cv.done(); cv.audio(False)
+    clk.t += 4.0
+    cv.speech_start(2); clk.t += 1.5
+    assert cv.tick() == [] and cv.active, "говорит под конец окна — окно ждёт фразу"
+    cv.phrase("да", 2)
+    clk.t += 0.3; cv.speech_start(3); clk.t += 1
+    assert not any(a[0] == "send" for a in cv.tick()), "второй кусок ещё звучит — «да» одно не уходит"
+    cv.phrase("передай", 3); clk.t += SEND_PAUSE
+    assert ("send", "да передай", "") in cv.tick()
+
+
+def test_typed_answer_to_order_question_closes_the_window_after_reply():
+    # ревью 2026-11-12: ответ на вопрос набран в окне — окно не должно ещё 5 с слушать комнату для Claude
+    clk, cv = _conv()
+    cv.listen(5, "news", "agent-speak: готово")
+    _say(clk, cv, "передай ему: проверь тесты")
+    cv.question("Передать? Скажи: да, передай."); cv.audio(True); cv.done(); cv.audio(False)
+    cv.ask("да, передай")
+    cv.delta("Передала. "); cv.audio(True); cv.done()
+    assert cv.audio(False)[-2:] == [("ear", False), ("state", "idle")]
+
+
+def test_order_question_in_auto_window_waits_its_silence_then_closes():
+    clk, cv = _conv()
+    cv.listen(5, "news", "agent-speak: готово")
+    _say(clk, cv, "передай ему: проверь тесты")
+    cv.question("Передать? Скажи: да, передай."); cv.audio(True); cv.done(); cv.audio(False)
+    clk.t += 4.9; assert cv.tick() == [] and cv.active
+    clk.t += 0.2; assert cv.tick() == [("ear", False), ("state", "idle")], "не ответили — окно закрылось по своей тишине"
+
+
 def test_are_you_there_room_talk_with_yes_inside_is_ignored():
     clk, cv = _conv()
     cv.listen(5, "here", "Эй, ты тут?")
@@ -3283,6 +3334,38 @@ def test_question_of_interrupted_turn_is_not_asked_and_waits_for_nothing():
     run(go())
     assert not any(c["cmd"] == "voice" and "Скажи" in c["text"] for c in sent) and oma.orders.pending is None
     assert run(oma.orders.confirm("да, передай")) is None and calls == []
+
+
+def test_order_in_answer_window_is_asked_reasked_and_delivered():
+    # 2026-11-12, вживую: после новости «передай …» — вопрос «Скажи: да, передай» закрывал микрофон окна ответа; ревью:
+    # и переспрос «Не расслышала…» его закрывал. Оба — вопросы: окно ждёт ответа, ответ уходит в код подтверждения
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    oma.orders, calls = _orders(clk)
+    oma.orders.ask = oma._ask
+    c = oma.conv
+
+    async def say(text, n):
+        await oma.event(("start", n)); await oma.event(("phrase", text, n))
+        clk.t += SEND_PAUSE; await oma.event(("tick",)); await settle(oma)
+
+    async def go():
+        await oma.act(c.listen(5, "news", "почта: готово"))
+        await say("передай почте: проверь тесты", 1)
+        oma.orders.turn(True, "передай почте: проверь тесты", c.turn_no)  # мозг этого хода вызвал tell
+        await oma.orders.tell(E[0], "Проверь тесты", "проверить тесты")
+        await settle(oma)
+        await oma.event(("done", None)); await oma.act(c.audio(False)); await settle(oma)
+        assert c.active and c.state == "listening", "вопрос прозвучал — слушает ответ"
+        await say("да", 2)
+        assert any(x["cmd"] == "voice" and "Не расслышала" in x["text"] for x in sent)
+        await oma.act(c.audio(False)); await settle(oma)
+        assert c.active and c.state == "listening", "переспрос — тоже вопрос: окно ждёт ответа"
+        await say("да, передай", 3)
+        await oma.act(c.audio(False)); await settle(oma)
+        assert not c.active, "ответ на вопрос дан — окно закрылось, как было"
+    run(go())
+    assert calls == [("tell", "s1", "0", "Проверь тесты")]
 
 
 def test_confirmation_counts_only_after_question_sounded():
