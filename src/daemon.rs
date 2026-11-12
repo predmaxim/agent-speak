@@ -2277,7 +2277,7 @@ impl State {
         // модели — суть и совет агента: его текст и ввод вызова; перевод уведомления — запасная фраза
         // мозг Омы отвечает по тем же вариантам и видит план целиком
         self.registry.asking(session, &claude::question_context(&tail, claude::ASK_MAX));
-        self.ask(session, Ask::Question, &claude::question_context(&tail, claude::TOOL_MAX), Some(msg));
+        self.ask(session, Ask::Question, &claude::question_context(&tail, claude::TOOL_MAX), Some(msg), None);
     }
 
     /// Хук PermissionRequest: карточка в окне и пузыре — сразу, а не через ~6 с уведомления; «просит разрешение» звучит,
@@ -2435,7 +2435,7 @@ impl State {
         let title = self.registry.get(session).map(|e| e.title.clone());
         self.bubble(if title.is_some() { session } else { "" }, id, &title.unwrap_or_else(|| "Ома".into()), &line, "status");
         if !self.quiet() {
-            self.board.push(News { session: id.into(), class: Class::Now, project: who.into(), say: text.into(), important: true, born: (self.now_secs)() });
+            self.board.push(News { session: id.into(), class: Class::Now, project: who.into(), say: text.into(), important: true, born: (self.now_secs)(), facts: Default::default() });
         }
     }
 
