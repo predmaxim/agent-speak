@@ -249,17 +249,50 @@ function dismiss(stack, id) {
   return stack.filter(function(b) { return b.id !== id })
 }
 
-// The window's main page: row 0 is Oma's general chat, then the agents. The
-// key cursor keeps a row's chat key, not its number: news and new agents move
+// The window's main page: row 0 is Oma's general chat, then the rows `top` (the permission cards and the deferred
+// orders, topRows), then the agents. The key cursor keeps a row's key, not its number: news and new agents move
 // rows, the cursor stays on its agent; a row that is gone is -1.
-function rowKey(agents, i) {
-  return i === 0 ? "general" : i > 0 && i <= agents.length ? "agent:" + agents[i - 1].id : ""
+function mainRows(agents, top) {
+  return ["general"].concat(top || [], Array.prototype.slice.call(agents || []).map(function(a) { return "agent:" + a.id }))
 }
 
-function rowIndex(agents, key) {
-  if (key === "general") return 0
-  for (var i = 0; i < agents.length; i++) if ("agent:" + agents[i].id === key) return i + 1
-  return -1
+function rowKey(agents, i, top) {
+  var rows = mainRows(agents, top)
+  return i >= 0 && i < rows.length ? rows[i] : ""
+}
+
+function rowIndex(agents, key, top) {
+  return key === "" ? -1 : mainRows(agents, top).indexOf(key)
+}
+
+// The rows between Oma and the agents: «Permissions» (perm:<id>), then «Later» (later:<id>), the daemon's order.
+function topRows(perms, later) {
+  var keys = function(list, prefix) { return Array.prototype.slice.call(list || []).map(function(x) { return prefix + x.id }) }
+  return keys(perms, "perm:").concat(keys(later, "later:"))
+}
+
+// The permission cards as the orb's bubbles: from the daemon's `permissions` line, apart from the TTL'd stack — up while
+// the request lives. `hidden` (the screen is shared): no command — the orb draws «Permission» and no buttons.
+function permBubbles(perms, hidden) {
+  return Array.prototype.slice.call(perms || []).map(function(p) {
+    return { id: "perm:" + p.id, perm: p.id, agent: p.agent, who: p.who, kind: "permission", text: hidden ? "" : p.tool + ": " + p.text, hidden: !!hidden }
+  })
+}
+
+// The orb's bubbles with the permission cards next to it: they take their slots first, the newest stack bubbles the rest.
+function withPerms(stack, perms) {
+  var room = Math.max(0, BUBBLES_MAX - perms.length)
+  return (room ? stack.slice(-room) : []).concat(perms.slice(-BUBBLES_MAX))
+}
+
+// A permission card's button: the click is the user's own — the daemon answers the hook at once.
+function permit(id, allow) {
+  return JSON.stringify({ cmd: "permit", id: id, allow: allow }) + "\n"
+}
+
+// A deferred order's [×] or Delete: cancelled at once (it sends nothing to an agent).
+function laterCancel(id) {
+  return JSON.stringify({ cmd: "later", do: "cancel", id: id }) + "\n"
 }
 
 // Oma (the Python half) takes commands: the daemon is up and she has said
@@ -387,7 +420,7 @@ var SETTINGS_SECTIONS = [
   { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours", "screencast_privacy", "hush_summary"] },
   { title: "Hearing", rows: ["music_pause"] },
   { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites", "orb_moods", "orb_idle_motion"] },
-  { title: "Agents", rows: ["agents_voice", "progress_digest", "news_every", "done_facts", "memory", "memory_page", "agent_inbox", "limit_warn"] }
+  { title: "Agents", rows: ["agents_voice", "progress_digest", "news_every", "done_facts", "permission_buttons", "memory", "memory_page", "agent_inbox", "limit_warn"] }
 ]
 
 // «Results aloud at most every»: minutes between batches of finished turns (news_every); 0 — each at once, no batch.
@@ -415,7 +448,7 @@ function settingStep(row, st, dx) {
   if (row === "music_pause") return { key: row, value: !st.music_pause, sample: false }
   if (row === "limit_warn" || row === "agent_inbox") return { key: row, value: !st[row], sample: false }
   if (row === "memory") return { key: row, value: !st.memory, sample: false }
-  if (row === "intonation" || row === "earcons") return { key: row, value: !st[row], sample: false }
+  if (row === "intonation" || row === "earcons" || row === "permission_buttons") return { key: row, value: !st[row], sample: false }
   if (row === "done_facts") return { key: row, value: !st.done_facts, sample: false }
   if (row === "news_every") {
     var k = NEWS_EVERY.length, j = NEWS_EVERY.indexOf(st.news_every)

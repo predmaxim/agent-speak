@@ -46,7 +46,14 @@ enum Event {
     Note(String, u32, String, Sender<Result<String, String>>), // `agent-speak note`: сессия, pid CLI, текст; ответ — агенту
     Bt(&'static str, bool), // режим наушников переключён (headset | music) и переключала ли его Ома
     Outs(String, String), // выходы звука сменились: выход по умолчанию, динамики ноутбука — от потока `pactl subscribe`
+    Permission(String, serde_json::Value, UnixStream), // хук PermissionRequest: id карточки, вход хука, его соединение (туда — решение)
+    PermGone(String), // соединение хука закрылось (вышел или убит: «No» и Esc в терминале) — карточка id снята
+    Later(Msg, Sender<Result<String, String>>), // `agent-speak later …`: отложенное поручение, ответ — id или ошибка
+    LaterDone(crate::later::Done), // исход отложенного: передача (поток действий) или проверки PR (поток gh)
 }
+
+/// Номер карточки разрешения: id «perm-N» знает поток соединения хука — по его EOF карточка снимается.
+static PERM_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Микрофон наушников для «Ты тут?»: ушёл в наушниках — ответ услышит только он.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -310,6 +317,8 @@ struct State {
     voice_base: u64, // столько их было до запуска нынешней Омы: voiced считается от него
     rate_now: Option<String>, // темп этого ответа с колеса над орбом; None — из настроек
     struggling_sent: usize,   // struggling последней разосланной строки состояния
+    perms: crate::perm::Cards, // карточки разрешений: хуки PermissionRequest ждут кнопку окна или пузыря
+    later: crate::later::Later, // отложенные поручения: передать на конце хода, исход проверок PR
 }
 
 fn home() -> PathBuf {
@@ -415,6 +424,16 @@ pub fn run() {
         eprintln!("agent-speak: не слежу за присутствием: {e}");
     }
     let facts = runtime.join(presence::FILE);
+    let (ltx, lrx) = mpsc::channel::<crate::later::Done>();
+    {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for d in lrx {
+                let _ = tx.send(Event::LaterDone(d));
+            }
+        });
+    }
+    let later = crate::later::Later::load(data.join("later.json"), ltx, crate::later::spawn_gh);
     let (atx, arx) = mpsc::channel::<mux::Done>();
     let act = mux::spawn(atx);
     let (bt, brx) = mpsc::channel::<&'static str>();
@@ -516,6 +535,8 @@ pub fn run() {
         voice_base: 0,
         rate_now: None,
         struggling_sent: 0,
+        perms: Default::default(),
+        later,
     };
     st.board.every = st.cfg.news_every * 60; // дальше — apply() при каждой смене настроек
     {
@@ -549,6 +570,12 @@ pub fn run() {
             Event::Note(session, pid, text, reply) => drop(reply.send(st.inbox(&session, pid, &text))),
             Event::Bt(mode, switched) => st.on_bt(mode, switched),
             Event::Outs(default, speakers) => st.on_outs(default, speakers),
+            Event::Permission(id, payload, hook) => st.on_permission(id, payload, hook),
+            Event::PermGone(id) => st.perm_gone(&id),
+            Event::Later(m, reply) => {
+                let _ = reply.send(st.later_cmd(m));
+            }
+            Event::LaterDone(d) => st.on_later_done(d),
         }
     }
 }
@@ -755,7 +782,7 @@ fn listen_cmd(kind: &str, said: &str, key: Option<String>, speakers: bool, secs:
 /// Ответ на запрос (tell, turn) — строкой в то же соединение (не подписанное: там запрос получает отказ). Ответ ложится
 /// в буфер сокета; клиент, который его не читает, не держит поток вечно: буфер полон — запись ждёт не больше секунды,
 /// затем соединение закрывается — клиент переподключится.
-fn answer(conn: &UnixStream, line: &str) -> bool {
+pub(crate) fn answer(conn: &UnixStream, line: &str) -> bool {
     let _ = conn.set_write_timeout(Some(Duration::from_secs(1)));
     let mut w = conn;
     w.write_all(line.as_bytes()).is_ok()
@@ -769,6 +796,7 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
     // молчун без первой строки не держит поток вечно; подписка снимает таймаут
     let _ = input.set_read_timeout(Some(Duration::from_secs(1)));
     let mut subscribed = false;
+    let mut perm = None; // соединение держит хук PermissionRequest: его EOF снимает карточку
     for line in BufReader::new(input).lines() {
         let Ok(line) = line else { break };
         let _ = conn.set_read_timeout(None); // первая строка пришла — постоянное соединение (agent_voice) живёт молча
@@ -837,6 +865,25 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
                     break;
                 }
             }
+            Ok(Msg::Permission { payload }) if !subscribed && perm.is_none() => match conn.try_clone() {
+                Ok(w) => {
+                    let id = format!("perm-{}", PERM_N.fetch_add(1, Ordering::SeqCst) + 1);
+                    let _ = tx.send(Event::Permission(id.clone(), payload, w));
+                    perm = Some(id);
+                }
+                Err(_) => break,
+            },
+            Ok(m @ Msg::Later { .. }) if !subscribed => {
+                let (rtx, rrx) = mpsc::channel();
+                let reply = match tx.send(Event::Later(m, rtx)).ok().and_then(|()| rrx.recv().ok()) {
+                    Some(Ok(ok)) => serde_json::json!({"ok": ok}),
+                    Some(Err(e)) => serde_json::json!({"err": e}),
+                    None => serde_json::json!({"err": "служба не ответила"}),
+                };
+                if !answer(&conn, &format!("{reply}\n")) {
+                    break;
+                }
+            }
             Ok(Msg::Subscribe) => match conn.try_clone() {
                 Ok(w) => {
                     let _ = conn.set_read_timeout(None); // таймаут общий для клонов сокета
@@ -850,6 +897,9 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
             }
             Err(e) => eprintln!("agent-speak: плохое сообщение: {e}"),
         }
+    }
+    if let Some(id) = perm {
+        let _ = tx.send(Event::PermGone(id));
     }
 }
 
@@ -1039,7 +1089,7 @@ impl State {
             intonation: self.cfg.intonation,
             // волна 4: агенты
             done_facts: self.cfg.done_facts,
-            permission_buttons: false,
+            permission_buttons: self.cfg.permission_buttons,
             agent_inbox: self.cfg.agent_inbox,
             // волна 5: слово-побудка
             wake: "off",
@@ -1068,11 +1118,11 @@ impl State {
     }
 
     /// Новому подписчику — строка состояния, строка агентов, затем списки карточек разрешений и отложенных поручений
-    /// (волна 4 дизайна «Джарвис»; пока их нет — пустые: протокол подписки тот же, что будет).
+    /// (волна 4 дизайна «Джарвис»).
     fn subscribe(&mut self, mut s: UnixStream) {
         let _ = s.set_write_timeout(Some(Duration::from_millis(100))); // зависший подписчик не держит цикл
-        let lists = "{\"permissions\":[]}\n{\"later\":[]}\n";
-        if s.write_all((self.status_line() + &self.registry.line() + lists).as_bytes()).is_ok() {
+        let lists = self.perms_line() + &self.later.line();
+        if s.write_all((self.status_line() + &self.registry.line() + &lists).as_bytes()).is_ok() {
             self.subs.push(s);
         }
     }
@@ -1142,6 +1192,7 @@ impl State {
         let reg = &self.registry;
         self.board.retain_sessions(|s| reg.get(s).is_some());
         self.progress.retain(|s, _| reg.get(s).is_some());
+        self.later_gone();
         // разрешение дали в терминале (хука нет, файл сессии — «работает»): вопрос не звучит и итогов не держит
         for s in self.board.question_sessions() {
             if self.registry.get(&s).is_none_or(|e| e.state != agents::State::Waiting) {
@@ -1770,6 +1821,7 @@ impl State {
             self.purge(); // снимок присутствия устарел — показа больше нет
             self.broadcast();
         }
+        self.deliver_later(); // пользователь перестал печатать в агенте — поручение уходит сейчас
         self.speak_news(); // раньше окна ответа: новые новости встают перед ним, а не поверх
         // «Ты тут?» решён, разговор кончился и всё стихло — гарнитуру, включённую Омой, — обратно в музыку;
         // смена профиля роняет звук наушников: новость, начатая после «да», ушла бы в тишину
@@ -1911,7 +1963,15 @@ impl State {
                 self.on_back(back);
             }
             Msg::View { agent } => self.viewing = agent,
-            Msg::Subscribe | Msg::Tell { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. } => {} // приходят как Event::Subscribe, Tell, Turn, Show и Note
+            Msg::Permit { id, allow } => self.permit(&id, allow),
+            m @ Msg::Later { .. } => {
+                // кнопка окна (подписанное соединение): ответа нет, ошибка — в журнал
+                if let Err(e) = self.later_cmd(m) {
+                    eprintln!("agent-speak: later: {e}");
+                }
+            }
+            // приходят как Event::Subscribe, Tell, Turn, Show, Note и Permission (с подписанного соединения запрос не держится)
+            Msg::Subscribe | Msg::Tell { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. } | Msg::Permission { .. } => {}
         }
         if changes {
             self.broadcast();
@@ -2079,20 +2139,21 @@ impl State {
             }
             return;
         }
+        if kind == "post-tool-use" {
+            // на каждый вызов инструмента — только карточки: запрос, показанный карточкой, одобрен в терминале и отработал
+            if self.perms.ran(p) {
+                self.push_perms();
+            }
+            return;
+        }
         let session = p["session_id"].as_str().unwrap_or_default().to_string();
         if let Some(cwd) = p["cwd"].as_str().filter(|_| !session.is_empty()) {
             let name = Path::new(cwd).file_name().and_then(|n| n.to_str()).unwrap_or_default();
             self.projects.insert(session.clone(), name.to_string());
         }
-        // новая сессия ещё не в реестре — пересканировать до обработки, не чаще SCAN_EVERY:
-        // `claude -p` и SDK с хуками пользователя в реестр не попадают никогда, а MessageDisplay идёт на каждый кусок
-        // ponytail: общий срок на все незнакомые сессии — новая сессия в первые 2 с после чужой ждёт tick
+        // новая сессия ещё не в реестре — пересканировать до обработки
         let id = p["session_id"].as_str().or(p["thread-id"].as_str()).unwrap_or_default();
-        let at = (self.clock)();
-        if !id.is_empty() && self.registry.get(id).is_none() && at >= self.unknown_scan_at {
-            self.unknown_scan_at = at + SCAN_EVERY;
-            self.rescan();
-        }
+        self.rescan_unknown(id);
         let now = (self.now_secs)();
         if !id.is_empty() {
             self.activity.insert(id.to_string(), now);
@@ -2113,16 +2174,10 @@ impl State {
             "notification" => {
                 // «ждёт ввода» — простой, а не вопрос: молчим, реестр не трогаем
                 let raw = p["message"].as_str().unwrap_or_default();
-                if !matches!(raw, "" | "Claude is waiting for your input") {
-                    let tail = tail_of(p["transcript_path"].as_str().unwrap_or_default(), |t| claude::has_record(t, false));
-                    let msg = notification_text(raw, || claude::last_tool(&tail));
-                    let question = claude::last_question(&tail);
-                    let text = question.as_ref().map_or(msg.clone(), |q| format!("вопрос: {q}"));
-                    self.registry.question(&session, &text, now);
-                    // модели — суть и совет агента: его текст и ввод вызова; перевод уведомления — запасная фраза
-                    // мозг Омы отвечает по тем же вариантам и видит план целиком
-                    self.registry.asking(&session, &claude::question_context(&tail, claude::ASK_MAX));
-                    self.ask(&session, Ask::Question, &claude::question_context(&tail, claude::TOOL_MAX), Some(msg), None);
+                // запрос разрешения, показанный карточкой (~6 с назад), — «просит разрешение» прозвучало при ней
+                let carded = p["notification_type"] == "permission_prompt" && self.perms.carded(&session, p["prompt_id"].as_str().unwrap_or_default());
+                if !matches!(raw, "" | "Claude is waiting for your input") && !carded {
+                    self.asks_user(&session, raw, p);
                 }
             }
             "message-display" => {
@@ -2151,6 +2206,10 @@ impl State {
                 }
                 self.registry.reload(&session, &last);
                 self.board.answered(&session); // ход кончился — вопрос решён, хоть разрешение и дали в терминале без промпта
+                // ход кончился — его запросы разрешений тоже, хуки не переживают Stop; помощники в фоне — их запросы живы
+                if self.perms.end(&session, !waiting) {
+                    self.push_perms();
+                }
                 self.progress.remove(&session); // промежуточное покрывает итог
                 // shortcut: вопрос текстом в конце такого хода не звучит (AskUserQuestion — звучит), научить, если начнёт теряться; помощник без отчёта держит ход «работает», пока его запуск не уйдёт из хвоста 256 КБ
                 if !waiting {
@@ -2158,6 +2217,7 @@ impl State {
                         self.ask(&session, Ask::Step, &last, None, None); // переписка с помощниками звучит, только если важна
                     } else {
                         self.ask(&session, Ask::Final, &last, None, p["cwd"].as_str());
+                        self.later_due(&session, &last); // ход-отчёт помощника — не конец хода агента
                     }
                 } else {
                     self.helper_turn.remove(&session);
@@ -2178,16 +2238,220 @@ impl State {
                 self.board.answered(&thread);
                 self.progress.remove(&thread);
                 self.ask(&thread, Ask::Final, last, None, None);
+                self.later_due(&thread, last);
             }
             "session-end" => self.watch.ended(&session), // вышел сам — исчезновение не падение
             "post-tool-use-failure" => {
                 if agents::tool_failed(p) {
                     self.registry.failed(&session);
                 }
+                if self.perms.ran(p) {
+                    self.push_perms(); // одобрен в терминале, вызов упал — запрос всё равно решён
+                }
             }
             other => eprintln!("agent-speak: неизвестный хук {other}"),
         }
         self.push_agents();
+    }
+
+    /// Сессия не из реестра — пересканировать до обработки, не чаще SCAN_EVERY: `claude -p` и SDK с хуками
+    /// пользователя в реестр не попадают никогда, а MessageDisplay идёт на каждый кусок.
+    // ponytail: общий срок на все незнакомые сессии — новая сессия в первые 2 с после чужой ждёт tick
+    fn rescan_unknown(&mut self, id: &str) {
+        let at = (self.clock)();
+        if !id.is_empty() && self.registry.get(id).is_none() && at >= self.unknown_scan_at {
+            self.unknown_scan_at = at + SCAN_EVERY;
+            self.rescan();
+        }
+    }
+
+    /// Агент ждёт пользователя (уведомление Claude Code или запрос разрешения): в ленту, «ждёт ответа», пересказ вопроса.
+    /// raw — текст уведомления Claude Code.
+    fn asks_user(&mut self, session: &str, raw: &str, p: &serde_json::Value) {
+        let now = (self.now_secs)();
+        let tail = tail_of(p["transcript_path"].as_str().unwrap_or_default(), |t| claude::has_record(t, false));
+        let msg = notification_text(raw, || claude::last_tool(&tail));
+        let question = claude::last_question(&tail);
+        let text = question.as_ref().map_or(msg.clone(), |q| format!("вопрос: {q}"));
+        self.registry.question(session, &text, now);
+        // модели — суть и совет агента: его текст и ввод вызова; перевод уведомления — запасная фраза
+        // мозг Омы отвечает по тем же вариантам и видит план целиком
+        self.registry.asking(session, &claude::question_context(&tail, claude::ASK_MAX));
+        self.ask(session, Ask::Question, &claude::question_context(&tail, claude::TOOL_MAX), Some(msg));
+    }
+
+    /// Хук PermissionRequest: карточка в окне и пузыре — сразу, а не через ~6 с уведомления; «просит разрешение» звучит,
+    /// как по уведомлению, одобрять голосом нельзя. Сессия не из реестра (чаты Orca, `claude -p`), «Кнопки разрешений»
+    /// выключены, вопрос и план (им нужен updatedInput) — хуку сразу «без решения», уведомление звучит как раньше.
+    fn on_permission(&mut self, id: String, p: serde_json::Value, hook: UnixStream) {
+        let session = p["session_id"].as_str().unwrap_or_default().to_string();
+        self.rescan_unknown(&session);
+        let shown = self.cfg.permission_buttons && self.registry.get(&session).is_some();
+        if self.perms.add(&id, &p, hook, shown, (self.now_secs)()).is_none() {
+            return;
+        }
+        let tool = p["tool_name"].as_str().unwrap_or_default();
+        self.asks_user(&session, &format!("Claude needs your permission to use {tool}"), &p);
+        self.push_perms();
+        self.push_agents();
+    }
+
+    /// Кнопка карточки: клик равен набранному — решение хуку сразу. Агент уже не ждёт (ответили в терминале, а PostToolUse
+    /// придёт только после конца команды) — Claude Code решение проигнорировал бы: карточка снимается без решения, и
+    /// пузырь говорит, что запрос уже решён. Решение — строкой в ленте агента.
+    fn permit(&mut self, id: &str, allow: bool) {
+        let Some(session) = self.perms.session_of(id) else { return };
+        let answered = self.registry.get(&session).is_none_or(|e| e.state != agents::State::Waiting);
+        let Some((card, ok)) = self.perms.decide(id, if answered { "" } else if allow { "allow" } else { "deny" }) else { return };
+        if answered || !ok {
+            self.bubble("", &format!("perm-{session}"), "Ома", "Запрос уже решён в терминале.", "oma");
+        } else {
+            let what = format!("{} в окне Омы: {}", if allow { "Разрешено" } else { "Отклонено" }, card.line());
+            if self.perms.open(&session) > 0 {
+                // открыт ещё запрос той же сессии (помощники, параллельные вызовы): агент по-прежнему ждёт
+                self.registry.question(&session, &what, (self.now_secs)());
+            } else {
+                self.registry.status(&session, &what, (self.now_secs)());
+                self.board.answered(&session); // решено — «просит разрешение» больше не звучит
+            }
+        }
+        self.push_perms();
+        self.push_agents();
+    }
+
+    /// Соединение хука закрылось: он вышел (решение дошло) или его убил Claude Code («No», Esc в терминале).
+    fn perm_gone(&mut self, id: &str) {
+        if self.perms.gone(id) {
+            self.push_perms();
+        }
+    }
+
+    /// `agent-speak later …` и кнопка окна. tell — одно на агента; голосом его ставит код Омы после «да, передай»
+    /// (python/agent_voice/orders.py: свободному агенту она отложить не предлагает), набранное — сразу.
+    fn later_cmd(&mut self, m: Msg) -> Result<String, String> {
+        let Msg::Later { act, session, text, gist, path, pr, id } = m else { return Err("не later".into()) };
+        let now = (self.now_secs)();
+        let r = match act.as_str() {
+            "tell" => {
+                let e = self.registry.get(&session).ok_or("такого агента нет")?;
+                // агент уже закончил (пока Ома ждала «да, передай») — поручение уходит сразу: одно подтверждение — одна передача
+                let (who, free) = (e.project.clone(), matches!(e.state, agents::State::Done | agents::State::Idle));
+                let r = self.later.tell(&session, &who, &text, &gist, now);
+                if r.is_ok() && free {
+                    self.later.list.iter_mut().filter(|o| o.kind == "tell" && o.agent == session).for_each(|o| o.due = true);
+                }
+                r
+            }
+            "checks" => self.later.checks(&path, pr, now),
+            "cancel" => self.later.take(&id).map(|o| o.id).ok_or_else(|| "такого поручения нет".to_string()),
+            "list" => return Ok(self.later.json()),
+            _ => return Err("later: tell | checks | cancel | list".into()),
+        };
+        if r.is_ok() {
+            self.push_later();
+            self.deliver_later();
+        }
+        r
+    }
+
+    /// Ход агента кончился (Stop без помощников в фоне и не ход-отчёт помощника, codex-notify): его поручение — к
+    /// передаче, если ход кончился не вопросом (тогда — со следующим концом хода).
+    fn later_due(&mut self, session: &str, last: &str) {
+        if crate::later::ends_with_question(last) {
+            return;
+        }
+        for o in self.later.list.iter_mut().filter(|o| o.kind == "tell" && o.agent == session) {
+            o.due = true;
+        }
+        self.deliver_later();
+    }
+
+    /// Передать поручения, чей ход кончился: агент «готово» и пользователь не печатает в нём (перед текстом идёт Ctrl+U —
+    /// он стёр бы черновик), иначе — со следующим тиком; агент снова работает — ждём его следующего конца хода. Снимается
+    /// до передачи: одно подтверждение — одна передача, удачная или нет.
+    fn deliver_later(&mut self) {
+        let due: Vec<(String, String)> = self.later.list.iter().filter(|o| o.due).map(|o| (o.id.clone(), o.agent.clone())).collect();
+        for (id, agent) in due {
+            let state = self.registry.get(&agent).map(|e| e.state);
+            if !matches!(state, Some(agents::State::Done | agents::State::Idle)) {
+                self.later.list.iter_mut().filter(|o| o.id == id).for_each(|o| o.due = false);
+                continue;
+            }
+            let now = (self.now_secs)();
+            if self.focused().is_some_and(|f| f.id == agent) && now.saturating_sub(self.presence.last_input(now)) < FOCUS_INPUT {
+                continue;
+            }
+            let Some(order) = self.later.take(&id) else { continue };
+            eprintln!("agent-speak: отложенное {id} — передаю {}", order.who);
+            let out = self.later.out.clone();
+            // поток действий упал — дело выброшено; поручение уже снято
+            let _ = self.act.send(mux::Work::Other(Box::new(move || {
+                let result = crate::orders::tell(&order.agent, 0, &order.text, "").map(|_| ());
+                let _ = out.send(crate::later::Done::Told { order, result });
+            })));
+            self.push_later();
+        }
+    }
+
+    /// Агент закрылся, не дождавшись поручения: снято, Ома говорит, что не передала.
+    fn later_gone(&mut self) {
+        let gone: Vec<String> = self.later.list.iter().filter(|o| o.kind == "tell" && self.registry.get(&o.agent).is_none()).map(|o| o.id.clone()).collect();
+        for id in gone {
+            if let Some(o) = self.later.take(&id) {
+                self.later_say("", &o.id, "", &format!("{} закрылся — поручение не передала", o.who));
+                self.push_later();
+            }
+        }
+    }
+
+    /// Исход передачи или проверок — вслух сразу (СЕЙЧАС, класс Now) и пузырём.
+    fn on_later_done(&mut self, d: crate::later::Done) {
+        match d {
+            crate::later::Done::Told { order: o, result } => {
+                let text = match result {
+                    Ok(()) => format!("передала — {}", o.gist),
+                    Err(e) => format!("не передала: {e}"),
+                };
+                self.later_say(&o.agent, &o.id, &o.who, &text);
+            }
+            crate::later::Done::Checked { id, result } => {
+                let Some(o) = self.later.finished(&id) else { return }; // отменены — молча
+                let text = match result {
+                    Ok(true) => format!("проверки PR {} прошли", o.pr),
+                    Ok(false) => format!("проверки PR {} упали", o.pr),
+                    Err(e) => format!("не смогла проверить PR {}: {e}", o.pr),
+                };
+                self.later_say("", &o.id, &o.who, &text);
+                self.push_later();
+            }
+        }
+    }
+
+    /// Фраза об отложенном поручении id: пузырь (агента, если он жив) и доска, класс СЕЙЧАС — своей записью (сессия — id):
+    /// промпт, которым поручение ушло агенту, снимает его «нужно», но не этот исход.
+    fn later_say(&mut self, session: &str, id: &str, who: &str, text: &str) {
+        let line = news::Chunk { class: Some(Class::Now), project: who.into(), text: text.into() }.line();
+        eprintln!("agent-speak: отложенное {id}: {line}");
+        let title = self.registry.get(session).map(|e| e.title.clone());
+        self.bubble(if title.is_some() { session } else { "" }, id, &title.unwrap_or_else(|| "Ома".into()), &line, "status");
+        if !self.quiet() {
+            self.board.push(News { session: id.into(), class: Class::Now, project: who.into(), say: text.into(), important: true, born: (self.now_secs)() });
+        }
+    }
+
+    fn push_later(&mut self) {
+        let line = self.later.line();
+        self.broadcast_line(&line);
+    }
+
+    /// Строка карточек разрешений: кто — проект агента.
+    fn perms_line(&self) -> String {
+        self.perms.line(|s| self.registry.get(s).map(|e| e.project.clone()).unwrap_or_default())
+    }
+
+    fn push_perms(&mut self) {
+        let line = self.perms_line();
+        self.broadcast_line(&line);
     }
 
     fn on_file(&mut self, path: &Path) {
@@ -2416,6 +2680,8 @@ mod tests {
             voice_base: 0,
             rate_now: None,
             struggling_sent: 0,
+            perms: Default::default(),
+            later: crate::later::Later::load(PathBuf::new(), mpsc::channel().0, |_, _| Err("gh не установлен — проверки PR не умею".into())),
         }
     }
 
@@ -3939,6 +4205,263 @@ mod tests {
         let live: Vec<Live> = ids.iter().map(|id| live(id)).collect();
         st.scan = Box::new(move || live.clone());
         st.rescan();
+    }
+
+    // --- карточки разрешений (хук PermissionRequest) ---
+
+    fn perm_req(session: &str, prompt: &str, cmd: &str) -> serde_json::Value {
+        serde_json::json!({"session_id": session, "prompt_id": prompt, "hook_event_name": "PermissionRequest", "tool_name": "Bash",
+            "tool_input": {"command": cmd, "description": "Run"}, "transcript_path": "/nonexistent", "permission_suggestions": []})
+    }
+
+    /// Хук держит соединение: (сторона службы, читатель хука).
+    fn perm_hook() -> (UnixStream, BufReader<UnixStream>) {
+        let (a, b) = UnixStream::pair().unwrap();
+        (a, reader(b))
+    }
+
+    fn decision(r: &mut BufReader<UnixStream>) -> String {
+        next(r)["decision"].as_str().unwrap().to_string()
+    }
+
+    fn perms(lines: &[serde_json::Value]) -> Option<serde_json::Value> {
+        lines.iter().rev().find_map(|l| l.get("permissions").cloned())
+    }
+
+    #[test]
+    fn permission_card_at_once_voiced_once_and_click_answers_the_hook() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        let j = jobs(&mut st);
+        let (h, mut hr) = perm_hook();
+        st.on_permission("perm-1".into(), perm_req("a", "p1", "cargo test --release"), h);
+        let lines = drain(&mut r);
+        let card = &perms(&lines).expect("строка карточек сразу, а не через 6 с уведомления")[0];
+        assert_eq!((card["id"].as_str(), card["text"].as_str(), card["note"].as_str(), card["who"].as_str()), (Some("perm-1"), Some("cargo test --release"), Some("Run"), Some("a")));
+        assert_eq!(st.registry.get("a").unwrap().state, crate::agents::State::Waiting, "орб — красный «?», как сейчас");
+        assert_eq!(j.try_recv().unwrap().ask, Ask::Question, "«просит разрешение» — пересказом, как по уведомлению");
+        // уведомление того же запроса через ~6 с — уже показано карточкой: второй раз не звучит
+        st.on_hook("notification", &serde_json::json!({"session_id": "a", "prompt_id": "p1", "message": "Claude needs your permission", "notification_type": "permission_prompt", "transcript_path": "/nonexistent"}));
+        assert!(j.try_recv().is_err());
+        st.on_msg(Msg::Permit { id: "perm-1".into(), allow: true });
+        assert_eq!(decision(&mut hr), "allow");
+        assert_eq!(perms(&drain(&mut r)).unwrap(), serde_json::json!([]));
+        let a = st.registry.get("a").unwrap();
+        assert_eq!((a.state, a.feed.back().unwrap().text.as_str()), (crate::agents::State::Working, "Разрешено в окне Омы: Bash: cargo test --release"));
+        st.on_msg(Msg::Permit { id: "perm-1".into(), allow: false }); // второй клик — мимо
+        assert!(drain(&mut r).is_empty());
+    }
+
+    #[test]
+    fn permission_two_open_cards_each_answered_by_its_click() {
+        // помощники или параллельные вызовы одной сессии: первый клик не делает второй карточке «уже решено»
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let (h1, mut r1) = perm_hook();
+        let (h2, mut r2) = perm_hook();
+        st.on_permission("perm-1".into(), perm_req("a", "p1", "cargo test"), h1);
+        st.on_permission("perm-2".into(), perm_req("a", "p1", "cargo build"), h2);
+        st.on_msg(Msg::Permit { id: "perm-1".into(), allow: true });
+        assert_eq!(decision(&mut r1), "allow");
+        assert_eq!(st.registry.get("a").unwrap().state, crate::agents::State::Waiting, "второй запрос ещё ждёт");
+        st.on_msg(Msg::Permit { id: "perm-2".into(), allow: false });
+        assert_eq!(decision(&mut r2), "deny");
+        assert_eq!(st.registry.get("a").unwrap().state, crate::agents::State::Working);
+    }
+
+    #[test]
+    fn permission_click_after_terminal_answer_does_not_pretend() {
+        // «Yes» в терминале: хуку ничего не приходит, PostToolUse — только после конца команды; файл сессии уже «работает»
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let (h, mut hr) = perm_hook();
+        st.on_permission("perm-1".into(), perm_req("a", "p1", "cargo test"), h);
+        st.scan = Box::new(|| vec![Live { status_at: 2000, ..live("a") }]);
+        st.now_secs = Box::new(|| 2000);
+        st.rescan();
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        st.on_msg(Msg::Permit { id: "perm-1".into(), allow: false });
+        assert_eq!(decision(&mut hr), "", "решение не шлётся: Claude Code его бы проигнорировал");
+        let lines = drain(&mut r);
+        assert_eq!(perms(&lines).unwrap(), serde_json::json!([]));
+        assert!(!st.registry.get("a").unwrap().feed.iter().any(|l| l.text.contains("Отклонено")));
+        let b: Vec<_> = lines.iter().filter_map(|l| l.get("bubble")).collect();
+        assert_eq!(b[0]["text"], "Запрос уже решён в терминале.");
+    }
+
+    #[test]
+    fn permission_card_withdrawn_by_terminal_answer_hook_exit_and_stop() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let (h1, mut r1) = perm_hook();
+        let (h2, mut r2) = perm_hook();
+        let (h3, _r3) = perm_hook();
+        st.on_permission("perm-1".into(), perm_req("a", "p1", "cargo test"), h1);
+        st.on_permission("perm-2".into(), perm_req("a", "p1", "cargo build"), h2);
+        st.on_permission("perm-3".into(), perm_req("a", "p1", "ls"), h3);
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        // «Yes» в терминале — вызов отработал: тот же сеанс, промпт и ввод (у PermissionRequest нет tool_use_id)
+        let mut ran = perm_req("a", "p1", "cargo test");
+        ran["hook_event_name"] = "PostToolUse".into();
+        ran["tool_use_id"] = "toolu_1".into();
+        st.on_hook("post-tool-use", &ran);
+        assert_eq!(decision(&mut r1), "", "хук выходит, а не висит до своего timeout");
+        assert_eq!(perms(&drain(&mut r)).unwrap().as_array().unwrap().len(), 2);
+        st.perm_gone("perm-3"); // «No» или Esc: Claude Code убил хук — EOF его соединения
+        assert_eq!(perms(&drain(&mut r)).unwrap().as_array().unwrap().len(), 1);
+        stop(&mut st, "a", "Готово.");
+        assert_eq!(decision(&mut r2), "");
+        assert_eq!(perms(&drain(&mut r)).unwrap(), serde_json::json!([]));
+    }
+
+    #[test]
+    fn permission_without_card_answers_at_once_and_voices_as_before() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let j = jobs(&mut st);
+        let (h, mut hr) = perm_hook();
+        st.on_permission("perm-1".into(), perm_req("чужая", "p1", "ls"), h); // чат Orca, `claude -p`: не в реестре
+        assert_eq!(decision(&mut hr), "");
+        st.cfg.permission_buttons = false;
+        let (h, mut hr) = perm_hook();
+        st.on_permission("perm-2".into(), perm_req("a", "p1", "ls"), h);
+        assert_eq!(decision(&mut hr), "", "кнопки выключены — терминал спрашивает как обычно");
+        assert!(j.try_recv().is_err(), "без карточки озвучивает уведомление, как раньше");
+        st.on_hook("notification", &serde_json::json!({"session_id": "a", "prompt_id": "p1", "message": "Claude needs your permission", "notification_type": "permission_prompt", "transcript_path": "/nonexistent"}));
+        assert_eq!(j.try_recv().unwrap().ask, Ask::Question);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["permission_buttons"], false);
+    }
+
+    #[test]
+    fn permission_hook_holds_its_connection_and_eof_withdraws() {
+        let (tx, rx) = mpsc::channel();
+        let (server, mut client) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || serve(server, tx));
+        client.write_all(b"{\"cmd\":\"permission\",\"payload\":{\"session_id\":\"a\"}}\n").unwrap();
+        let Ok(Event::Permission(id, p, mut hook)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("запрос не дошёл до цикла") };
+        assert!(id.starts_with("perm-") && p["session_id"] == "a");
+        hook.write_all(b"{\"decision\":\"allow\"}\n").unwrap();
+        assert_eq!(decision(&mut reader(client.try_clone().unwrap())), "allow", "решение — в то же соединение");
+        drop(client); // хук вышел или убит
+        let Ok(Event::PermGone(gone)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("EOF хука — карточку снять") };
+        assert_eq!(gone, id);
+    }
+
+    // --- отложенные поручения ---
+
+    fn later_msg(act: &str, session: &str, text: &str) -> Msg {
+        Msg::Later { act: act.into(), session: session.into(), text: text.into(), gist: "прогони тесты".into(), path: String::new(), pr: 0, id: String::new() }
+    }
+
+    /// Дело поручения из потока действий: исполняется подделкой tell (терминалы в тестах не трогаются).
+    fn delivered(rx: &mpsc::Receiver<mux::Work>) -> bool {
+        matches!(rx.try_recv(), Ok(mux::Work::Other(_)))
+    }
+
+    fn laters(lines: &[serde_json::Value]) -> Option<serde_json::Value> {
+        lines.iter().rev().find_map(|l| l.get("later").cloned())
+    }
+
+    #[test]
+    fn later_tell_goes_once_at_the_end_of_the_turn_and_says_so() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let acts = acts(&mut st);
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        assert_eq!(st.later_cmd(later_msg("tell", "a", "Прогони тесты и пришли итог")), Ok("later-1".into()));
+        assert!(st.later_cmd(later_msg("tell", "a", "Ещё")).unwrap_err().contains("уже есть"), "одно поручение на агента");
+        let list = laters(&drain(&mut r)).unwrap();
+        assert_eq!((list[0]["who"].as_str(), list[0]["text"].as_str()), (Some("a"), Some("Прогони тесты и пришли итог")));
+        stop(&mut st, "a", "Сделал. Запушить?");
+        assert!(!delivered(&acts), "кончил ход вопросом — ждём следующего конца хода");
+        st.tick();
+        assert!(!delivered(&acts));
+        stop(&mut st, "a", "Готово.");
+        assert!(delivered(&acts), "передаёт поток действий, не цикл событий");
+        assert_eq!(laters(&drain(&mut r)).unwrap(), serde_json::json!([]), "одно подтверждение — одна передача");
+        stop(&mut st, "a", "Готово.");
+        st.tick();
+        assert!(!delivered(&acts));
+        let order = crate::later::Order { id: "later-1".into(), kind: "tell".into(), agent: "a".into(), who: "a".into(), text: "Прогони тесты и пришли итог".into(), gist: "прогони тесты".into(), path: String::new(), pr: 0, since: 1000, due: false };
+        st.on_later_done(crate::later::Done::Told { order, result: Ok(()) });
+        assert_eq!(bubbles(&mut r)[0]["text"], "a: передала — прогони тесты");
+        assert_eq!(board_line(&mut st, 2000).unwrap(), "a: передала — прогони тесты", "исход — сразу, класс СЕЙЧАС");
+    }
+
+    #[test]
+    fn later_tell_to_a_finished_agent_goes_at_once_and_waits_while_the_user_types_in_it() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let acts = acts(&mut st);
+        assert_eq!(st.later_cmd(later_msg("tell", "нет", "x")), Err("такого агента нет".into()));
+        // агент закончил, пока Ома спрашивала «да, передай» (свободному Ома не предлагает отложить — проверка в orders.py)
+        st.registry.finished("a", "Готово.", 1000);
+        st.later_cmd(later_msg("tell", "a", "x")).unwrap();
+        assert!(delivered(&acts), "одно подтверждение — одна передача: сейчас");
+        st.registry.prompt("a", "дальше", 1000);
+        st.later_cmd(later_msg("tell", "a", "Прогони тесты")).unwrap();
+        st.focus_src = Box::new(|| Some(sref("a"))); // его вкладка в фокусе, ввод — только что: Ctrl+U стёр бы черновик
+        st.focus_cache = None;
+        stop(&mut st, "a", "Готово.");
+        assert!(!delivered(&acts));
+        st.focus_src = Box::new(|| None);
+        st.focus_cache = None;
+        st.tick();
+        assert!(delivered(&acts), "перестал печатать в нём — со следующего тика");
+    }
+
+    #[test]
+    fn later_tell_of_a_closed_agent_is_dropped_aloud_and_cancel_is_at_once() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a", "b"]);
+        st.later_cmd(later_msg("tell", "a", "Прогони тесты")).unwrap();
+        let id = st.later_cmd(later_msg("tell", "b", "Глянь логи")).unwrap();
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        st.on_msg(Msg::Later { act: "cancel".into(), session: String::new(), text: String::new(), gist: String::new(), path: String::new(), pr: 0, id }); // кнопка окна
+        assert_eq!(laters(&drain(&mut r)).unwrap().as_array().unwrap().len(), 1);
+        with_agents(&mut st, &["b"]);
+        assert_eq!(laters(&drain(&mut r)).unwrap(), serde_json::json!([]));
+        assert_eq!(board_line(&mut st, 2000).unwrap(), "a закрылся — поручение не передала");
+        assert_eq!(st.later_cmd(later_msg("cancel", "", "")), Err("такого поручения нет".into()));
+        assert_eq!(st.later_cmd(later_msg("list", "", "")), Ok("[]".into()));
+    }
+
+    #[test]
+    fn later_checks_say_their_outcome_and_need_gh() {
+        let mut st = test_state();
+        let checks = |path: &str| Msg::Later { act: "checks".into(), session: String::new(), text: String::new(), gist: String::new(), path: path.into(), pr: 12, id: String::new() };
+        assert_eq!(st.later_cmd(checks("/tmp")), Err("gh не установлен — проверки PR не умею".into()));
+        st.later = crate::later::Later::load(PathBuf::new(), mpsc::channel().0, |_, _| Ok(std::fs::File::open("/dev/null").unwrap().into()));
+        let id = st.later_cmd(checks("/tmp")).unwrap();
+        st.on_later_done(crate::later::Done::Checked { id: id.clone(), result: Ok(false) });
+        assert_eq!(board_line(&mut st, 2000).unwrap(), "tmp: проверки PR 12 упали");
+        st.on_later_done(crate::later::Done::Checked { id, result: Ok(true) });
+        assert_eq!(board_line(&mut st, 2000), None, "исход — один раз; отменённые проверки молчат");
+        let id = st.later_cmd(checks("/tmp")).unwrap();
+        st.on_later_done(crate::later::Done::Checked { id, result: Err("no checks reported on the 'x' branch".into()) });
+        assert_eq!(board_line(&mut st, 2000).unwrap(), "tmp: не смогла проверить PR 12: no checks reported on the 'x' branch");
+    }
+
+    #[test]
+    fn later_is_a_request_and_from_the_window_a_plain_command() {
+        let (tx, rx) = mpsc::channel();
+        let (server, client) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || serve(server, tx));
+        let mut w = client.try_clone().unwrap();
+        w.write_all(b"{\"cmd\":\"later\",\"do\":\"list\"}\n").unwrap();
+        let Ok(Event::Later(Msg::Later { act, .. }, reply)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("запрос не дошёл до цикла") };
+        assert_eq!(act, "list");
+        reply.send(Ok("Отложенных поручений нет.".into())).unwrap();
+        assert_eq!(next(&mut reader(client.try_clone().unwrap()))["ok"], "Отложенных поручений нет.");
+        w.write_all(b"{\"cmd\":\"subscribe\"}\n{\"cmd\":\"later\",\"do\":\"cancel\",\"id\":\"later-1\"}\n").unwrap();
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(3)), Ok(Event::Subscribe(_))));
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(3)), Ok(Event::Msg(Msg::Later { .. }))), "окно подписано: отмена — без ответа");
     }
 
     #[test]

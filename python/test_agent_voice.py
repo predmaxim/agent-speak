@@ -1833,6 +1833,73 @@ def test_confirm_rejects_negation():
         assert run(o.confirm(heard)) == "Хорошо, не передаю." and calls == [] and o.pending is None, heard
 
 
+def _later_orders(listed="[]", clk=None):
+    """Orders с подделкой CLI: `later list` отвечает listed, `later tell` — id поручения."""
+    calls = []
+
+    async def fake(*args):
+        calls.append(args)
+        return True, listed if args[:2] == ("later", "list") else "later-3" if args[:2] == ("later", "tell") else ""
+
+    o = Orders(run=fake, clock=clk or Clock())
+    o.ask = lambda question, order: (setattr(o, "pending", order), setattr(o, "question", question))
+    return o, calls
+
+
+def test_later_tell_by_voice_waits_for_yes_and_goes_once():
+    # «когда спик закончит, передай: прогони тесты» — тот же код подтверждения, что у tell; одно «да» — одна передача
+    o, calls = _later_orders()
+    o.turn(True, "когда спик закончит, передай: прогони тесты")
+    r = run(o.later_tell(E[1], "Прогони тесты и пришли итог", "прогони тесты"))
+    assert "да, передай" in r and o.question == "Когда agent-speak закончит, передать: прогони тесты? Скажи: да, передай."
+    assert calls == [("later", "list")], "голосом — ничего не поставлено до «да, передай»"
+    assert o.pending["shown"] == "Передам проекту agent-speak, когда закончит: «Прогони тесты и пришли итог»"
+    assert run(o.confirm("да, передай")) == "Передам проекту agent-speak, когда закончит: прогони тесты."
+    assert calls[-1] == ("later", "tell", "s2", "Прогони тесты и пришли итог", "прогони тесты"), "id поручения — не метка меню"
+    assert run(o.confirm("да, передай")) is None and len(calls) == 2
+
+
+def test_later_tell_danger_needs_its_word_typed_goes_at_once():
+    o, calls = _later_orders()
+    o.turn(True, "когда спик закончит, пусть запушит")
+    assert "подтверждаю пуш" in run(o.later_tell(E[1], "Запушь ветку", "запушить"))
+    assert run(o.confirm("да, передай")) == "Не расслышала. Скажи: подтверждаю пуш."
+    assert run(o.confirm("подтверждаю пуш")) == "Передам проекту agent-speak, когда закончит: запушить."
+    o, calls = _later_orders()
+    o.turn(False, "когда спик закончит, пусть запушит")
+    r = run(o.later_tell(E[1], "Запушь ветку", "запушить"))
+    assert calls[-1] == ("later", "tell", "s2", "Запушь ветку", "запушить") and "Поставлено" in r and "later-3" not in r
+
+
+def test_later_tell_refused_before_asking_free_agent_or_second_order():
+    o, calls = _later_orders()
+    o.turn(True, "когда почта закончит, передай привет")
+    assert "передай сейчас через tell" in run(o.later_tell(E[0], "Привет", "привет")) and not calls and o.pending is None
+    o, calls = _later_orders('[{"id": "later-1", "kind": "tell", "agent": "s2", "who": "agent-speak", "gist": "прогони тесты"}]')
+    o.turn(True, "когда спик закончит, передай: глянь логи")
+    r = run(o.later_tell(E[1], "Глянь логи", "глянь логи"))
+    assert "уже есть отложенное «прогони тесты»" in r and o.pending is None and calls == [("later", "list")]
+
+
+def test_later_tool_checks_list_and_cancel_go_without_confirmation():
+    o, calls = _later_orders('[{"id": "later-1", "kind": "tell", "agent": "s2", "who": "agent-speak", "text": "Прогони тесты", "gist": "тесты"},'
+                             ' {"id": "later-2", "kind": "checks", "agent": "", "who": "mail", "pr": 12}]')
+    o.turn(True, "скажи, когда пройдут проверки пиар двенадцать в почте")
+    tool = _tool("later", E, o)
+    r = run(tool.handler({"do": "checks", "agent": "почтов", "pr": 12}))["content"][0]["text"]
+    assert calls[-1] == ("later", "checks", "/p/mail", "12") and "проверки PR 12" in r and o.pending is None
+    run(tool.handler({"do": "checks", "path": "/p/x", "pr": 7}))
+    assert calls[-1] == ("later", "checks", "/p/x", "7")
+    r = run(tool.handler({"do": "list"}))["content"][0]["text"]
+    assert r == "later-1: agent-speak, когда закончит, — передать «Прогони тесты»\nlater-2: mail — проверки PR 12"
+    run(tool.handler({"do": "cancel", "id": "later-2"}))
+    assert calls[-1] == ("later", "cancel", "later-2")
+    r = run(tool.handler({"do": "tell", "agent": "s2", "text": "Ещё", "gist": "ещё"}))["content"][0]["text"]
+    assert "уже есть" in r
+    from agent_voice import brain
+    assert "mcp__oma__later" in brain.OMA_TOOLS and "mcp__oma__later" in brain.ORDER_TOOLS.split("|") and "later" in brain.OMA_PROMPT
+
+
 PLAN_MENU = "1. Yes, and use auto mode\n2. Yes, manually approve edits\n3. Tell Claude what to change"
 PUSH_MENU = "Ждёт ответа на AskUserQuestion: Запушить сейчас? Варианты: Запушить — сразу на GitHub; Нет — потом"
 
@@ -2589,7 +2656,7 @@ def test_order_question_ends_brain_turn_right_after_the_tool(monkeypatch, tmp_pa
         b = brain.Brain(asyncio.Queue(), lambda: E, orders=o)
         await b.warm()
         (m,) = made[0].opts.hooks["PostToolUse"]
-        assert m.matcher == "mcp__oma__tell|mcp__oma__launch"
+        assert m.matcher == "mcp__oma__tell|mcp__oma__launch|mcp__oma__later"
         o.turn(True, "пусть почта проверит тесты")
         assert await m.hooks[0]({}, "toolu_1", {}) == {}, "вопроса не было — ход идёт дальше"
         await o.tell(E[0], "Проверь тесты", "проверить тесты")

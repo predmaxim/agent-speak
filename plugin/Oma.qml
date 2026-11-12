@@ -102,7 +102,8 @@ Item {
     link: link
     covered: omaWindow.shown
     openChat: omaWindow.chatKey
-    bubbles: omaWindow.shown ? [] : Model.withDraft(root.bubbles, root.draft)
+    // permission cards next to the orb, apart from the TTL'd stack: up while the request lives (the window shows them itself)
+    bubbles: omaWindow.shown ? [] : Model.withPerms(Model.withDraft(root.bubbles, root.draft), Model.permBubbles(link.permissions, root.sharing))
     onDismissed: function(key) { root.bubbles = Model.dismiss(root.bubbles, key) }
     onWindowToggled: omaWindow.toggle()
     onChatOpened: function(key) { omaWindow.open(key) }

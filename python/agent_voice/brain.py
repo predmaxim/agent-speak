@@ -27,11 +27,12 @@ FILES_MEMORY = f"Файлы ты только читаешь, и только в
 # Code разрешает её сам (auto memory), а хук PreToolUse (memory.gate) пускает лишь слова пользователя в MEMORY.md
 MEMORY_TOOLS = ["Write", "Edit"]
 OMA_TOOLS = ["mcp__oma__agents", "mcp__oma__agent_feed", "mcp__oma__agent_tail", "mcp__oma__selection",
-             "mcp__oma__presence", "mcp__oma__tell", "mcp__oma__projects", "mcp__oma__launch", "mcp__oma__show"]
+             "mcp__oma__presence", "mcp__oma__tell", "mcp__oma__projects", "mcp__oma__launch", "mcp__oma__show",
+             "mcp__oma__later"]
 STALE_HOURS = 2
-# Ома спросила подтверждение поручения: ход кончается сразу после tell/launch (хук PostToolUse, continue false) —
+# Ома спросила подтверждение поручения: ход кончается сразу после tell/launch/later (хук PostToolUse, continue false) —
 # второй проход модели только повторял бы вопрос; stopReason остаётся в разговоре, мозг увидит его в следующем ходе
-ORDER_TOOLS = "mcp__oma__tell|mcp__oma__launch"
+ORDER_TOOLS = "mcp__oma__tell|mcp__oma__launch|mcp__oma__later"
 ASKED = "Ома спросила пользователя вслух подтверждение поручения; ход окончен, его ответ проверит код."
 OMA_PROMPT = ("Ты — Ома, голосовой заместитель пользователя. Следишь за его ИИ-агентами (Claude Code, Codex) в терминалах "
               "и отвечаешь на его вопросы. О себе говоришь в женском роде («посмотрела», «передала», «не уверена»), к "
@@ -83,6 +84,9 @@ OMA_PROMPT = ("Ты — Ома, голосовой заместитель пол
               "о чём речь, — коротко переспроси. "
               "«Покажи его», «покажи datebook», «к следующему» — show: агент выходит на экран, ему ничего не пишется, "
               "подтверждение не нужно; пустой agent — следующий ждущий. "
+              "«Когда datebook закончит, передай: …» — later с do=tell (только работающему агенту, свободному — tell сразу; "
+              "подтверждение спросит код, как у tell); «скажи, когда пройдут проверки PR 12» — later с do=checks; что "
+              "отложено — do=list; отменить — do=cancel. Передачу и исход проверок Ома скажет вслух сама, когда они будут. "
               "Если пользователь просит сейчас не говорить или отложить («не сейчас», «давай потом», «замолчи» и т. п.) — "
               "вызови presence с busy; говорит, что уходит, — away; просит новости или говорит, что вернулся, — here. "
               "После presence ответь одним-двумя словами или ничего. "
@@ -292,7 +296,38 @@ def oma_tools(snapshot, send, orders=None) -> list:
         ok, out = await orders.run("show", target)
         return _text(f"Показала: {out}." if ok else f"Не показала: {out}. Скажи пользователю коротко.")
 
-    return [agents, agent_feed, agent_tail, sel, presence, tell, projects, launch, show]
+    @tool("later", "Отложенные поручения. do: tell — передать агенту, когда он закончит ход (agent; text — полное задание "
+                   "от лица пользователя; gist — смысл в нескольких словах); checks — сказать, когда пройдут или упадут "
+                   "проверки PR (pr — номер; agent — в чьей папке, или path — папка из projects); list — что отложено; "
+                   "cancel — отменить (id из list).",
+          {"type": "object", "properties": {"do": {"type": "string", "enum": ["tell", "checks", "list", "cancel"]},
+                                            "agent": {"type": "string"}, "text": {"type": "string"},
+                                            "gist": {"type": "string"}, "path": {"type": "string"},
+                                            "pr": {"type": "integer"}, "id": {"type": "string"}},
+           "required": ["do"]})
+    async def later(args):
+        do = args.get("do")
+        if do == "list":
+            listed, err = await orders.later_list()
+            if listed is None:
+                return _text(f"Список недоступен: {err}.")
+            return _text("\n".join(f'{o["id"]}: {o["who"]}, когда закончит, — передать «{o.get("text", "")}»' if o["kind"] == "tell"
+                                   else f'{o["id"]}: {o["who"]} — проверки PR {o.get("pr")}' for o in listed) or "Отложенных поручений нет.")
+        if do == "cancel":
+            return _text(await orders.later_cancel(args.get("id", "")))
+        if do not in ("tell", "checks"):
+            return _text("do: tell | checks | list | cancel")
+        path = args.get("path", "") if do == "checks" else ""
+        e = None
+        if not path:
+            e, why = pick_agent(snapshot(), args.get("agent", ""))
+            if not e:
+                return _text(why)
+        if do == "tell":
+            return _text(await orders.later_tell(e, args.get("text", ""), args.get("gist", "")))
+        return _text(await orders.later_checks(path or e["cwd"], int(args.get("pr") or 0)))
+
+    return [agents, agent_feed, agent_tail, sel, presence, tell, projects, launch, show, later]
 
 
 class Brain:

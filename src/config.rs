@@ -54,6 +54,8 @@ pub struct Config {
     pub intonation: bool,
     /// факты git в итогах Claude: «Закоммичено.», «Не закоммичены 3 файла.» — кодом, из git папки агента
     pub done_facts: bool,
+    /// кнопки «Разрешить / Отклонить» у запроса разрешения агента (хук PermissionRequest): в окне и пузыре орба
+    pub permission_buttons: bool,
     /// агенты пишут Оме (`agent-speak note`): «нужно» агента звучит сразу, видно в окне и на орбе; строка хука SessionStart
     pub agent_inbox: bool,
 }
@@ -64,7 +66,7 @@ impl Default for Config {
             orb_satellites: true, orb_moods: true, orb_idle_motion: true,
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: true, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
             orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95, screencast_privacy: true, hush_summary: true, music_pause: true,
-            limit_warn: true, limit_warn_at: 90, memory: true, news_every: 10, earcons: true, intonation: true, done_facts: true, agent_inbox: true }
+            limit_warn: true, limit_warn_at: 90, memory: true, news_every: 10, earcons: true, intonation: true, done_facts: true, permission_buttons: true, agent_inbox: true }
     }
 }
 
@@ -147,6 +149,7 @@ impl Config {
             "earcons" if value.is_boolean() => self.earcons = value.as_bool().unwrap(),
             "intonation" if value.is_boolean() => self.intonation = value.as_bool().unwrap(),
             "done_facts" if value.is_boolean() => self.done_facts = value.as_bool().unwrap(),
+            "permission_buttons" if value.is_boolean() => self.permission_buttons = value.as_bool().unwrap(),
             "agent_inbox" if value.is_boolean() => self.agent_inbox = value.as_bool().unwrap(),
             _ => return false,
         }
@@ -371,5 +374,14 @@ mod tests {
         let mut c = Config::default();
         assert!(c.agent_inbox);
         assert!(c.set("agent_inbox", &serde_json::json!(false)) && !c.agent_inbox && !c.set("agent_inbox", &serde_json::json!("on")));
+    }
+
+    #[test]
+    fn permission_buttons_on_by_default_and_set() {
+        use serde_json::json;
+        let mut c = Config::default();
+        assert!(c.permission_buttons && parse("speaker = \"baya\"").unwrap().permission_buttons, "старый файл без ключа — кнопки есть");
+        assert!(c.set("permission_buttons", &json!(false)) && !c.permission_buttons);
+        assert!(!c.set("permission_buttons", &json!("false")) && !c.set("permission_hold", &json!(30)), "удержания нет: хук держит до своего timeout");
     }
 }

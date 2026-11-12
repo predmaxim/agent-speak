@@ -55,6 +55,31 @@ pub enum Msg {
     /// `agent-speak note`: агент пишет Оме, что ему нужно от пользователя. Сессия — из CLAUDE_CODE_SESSION_ID; нет её
     /// (или не агент из реестра) — агент, чей процесс — предок pid CLI. Запрос с ответом `{"ok": …}` или `{"err": …}`.
     Note { #[serde(default)] session: String, #[serde(default)] pid: u32, text: String },
+    /// Хук PermissionRequest (`agent-speak hook permission-request`): соединение открыто, пока запрос жив; служба отвечает
+    /// одной строкой `{"decision": "allow" | "deny" | ""}` ("" — без решения). EOF хука (его убил Claude Code: «No» или
+    /// Esc в терминале) снимает карточку.
+    Permission { payload: serde_json::Value },
+    /// Кнопка карточки разрешения в окне или пузыре: решение — хуку запроса id. Клик равен набранному: без подтверждения.
+    Permit { id: String, allow: bool },
+    /// Отложенное поручение: do = tell (session, text, gist — передать агенту, когда закончит ход) | checks (path, pr —
+    /// сказать исход проверок PR) | cancel (id) | list. Запрос с ответом `{"ok": …}` или `{"err": …}` (`agent-speak
+    /// later …`; голосом tell ставит только код Омы после «да, передай»); с подписанного соединения (окно) — без ответа.
+    Later {
+        #[serde(rename = "do")]
+        act: String,
+        #[serde(default)]
+        session: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        gist: String,
+        #[serde(default)]
+        path: String,
+        #[serde(default)]
+        pr: u64,
+        #[serde(default)]
+        id: String,
+    },
 }
 
 pub fn socket_path() -> PathBuf {
@@ -122,6 +147,14 @@ mod tests {
         let note = serde_json::from_str::<Msg>("{\"cmd\":\"note\",\"session\":\"s\",\"pid\":42,\"text\":\"нужен токен\"}").unwrap();
         assert!(matches!(note, Msg::Note { ref session, pid: 42, ref text } if session == "s" && text == "нужен токен"));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"note\",\"text\":\"т\"}").unwrap(), Msg::Note { pid: 0, .. }), "без сессии — по pid");
+        let perm = serde_json::from_str::<Msg>("{\"cmd\":\"permission\",\"payload\":{\"tool_name\":\"Bash\"}}").unwrap();
+        assert!(matches!(perm, Msg::Permission { ref payload } if payload["tool_name"] == "Bash"));
+        let permit = serde_json::from_str::<Msg>("{\"cmd\":\"permit\",\"id\":\"perm-7\",\"allow\":true}").unwrap();
+        assert!(matches!(permit, Msg::Permit { ref id, allow: true } if id == "perm-7"));
+        let later = serde_json::from_str::<Msg>("{\"cmd\":\"later\",\"do\":\"checks\",\"path\":\"/p\",\"pr\":12}").unwrap();
+        assert!(matches!(later, Msg::Later { ref act, ref path, pr: 12, ref id, .. } if act == "checks" && path == "/p" && id.is_empty()));
+        let s = serde_json::to_string(&Msg::Later { act: "cancel".into(), session: String::new(), text: String::new(), gist: String::new(), path: String::new(), pr: 0, id: "later-3".into() }).unwrap();
+        assert!(s.contains("\"do\":\"cancel\"") && s.contains("\"id\":\"later-3\""), "{s}");
     }
 
     #[test]

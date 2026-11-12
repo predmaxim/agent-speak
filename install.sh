@@ -45,28 +45,32 @@ ST=$DATA/smart-turn-v3.2-cpu.onnx
     echo "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f  $ST.tmp" | sha256sum -c --quiet && mv "$ST.tmp" "$ST"
 } || { rm -f "$ST.tmp"; echo "Smart Turn не скачался — Ома будет ждать паузу" >&2; }
 
-# Хуки Claude Code, которые install.sh ставит сам (README, «Хуки»): PostToolUseFailure — «вызов инструмента не отработал»,
-# орб «поник»; SessionStart — строка агенту, как писать Оме (`agent-speak note`). Каждый дописывается один раз: есть
-# команда, что кончается на «agent-speak hook <вид>» (и вписанная руками без пути), — файл не трогается: второй хук считал
-# бы каждый сбой дважды и дважды печатал бы строку; чужие хуки и прочие настройки остаются. Работающие сессии подхватывают их сами.
+# Хуки Claude Code, которые install.sh ставит сам (README, «Хуки»): «вызов инструмента не отработал» — орб «поник»;
+# «запрос разрешения» — карточка с кнопками в окне и пузыре Омы (хук держит запрос, пока он жив, до timeout);
+# SessionStart — строка агенту, как писать Оме (`agent-speak note`). Каждый дописывается один раз: есть команда этого
+# события, что кончается на «agent-speak hook <вид>» (и вписанная руками без пути), — файл не трогается: второй такой хук
+# срабатывал бы дважды (сбой считался бы дважды, строка печаталась бы дважды); чужие хуки и прочие настройки остаются.
+# Работающие сессии подхватывают их сами.
 CS=$(realpath -m ~/.claude/settings.json)
-if [[ -d ${CS%/*} ]]; then
+claude_hook() { # <событие> <вид> [timeout, с]
+  local event=$1 kind=$2 timeout=${3:-null} rc=0
+  [[ -d ${CS%/*} ]] || return 0
   [[ -s $CS ]] || echo '{}' >"$CS"
-  for h in PostToolUseFailure:post-tool-use-failure SessionStart:session-start; do
-    ev=${h%%:*} kind=${h#*:}
-    # jq -e: 0 — такой хук уже есть, 1 — нет, иное — файл не читается (его правят руками)
-    rc=0
-    jq -e --arg e "$ev" --arg k "agent-speak hook $kind\\s*\$" '[.hooks[$e][]?.hooks[]?.command // empty | select(test($k))] | length > 0' "$CS" >/dev/null || rc=$?
-    if ((rc == 1)); then
-      # права прежние ещё до записи (в settings.json бывают токены в env): новый файл иначе получил бы права по umask
-      install -m "$(stat -c %a "$CS")" /dev/null "$CS.agent-speak.tmp"
-      jq --arg e "$ev" --arg c "$HOME/.local/bin/agent-speak hook $kind" '.hooks[$e] += [{"hooks": [{"type": "command", "command": $c}]}]' "$CS" >"$CS.agent-speak.tmp"
-      mv "$CS.agent-speak.tmp" "$CS"
-    elif ((rc != 0)); then
-      echo "$CS не читается — хук $kind не добавлен, впиши его сам (README, «Хуки»)" >&2
-    fi
-  done
-fi
+  # jq -e: 0 — такой хук уже есть, 1 — нет, иное — файл не читается (его правят руками)
+  jq -e --arg e "$event" --arg k "$kind" '[.hooks[$e][]?.hooks[]?.command // empty | select(test("agent-speak hook \($k)\\s*$"))] | length > 0' "$CS" >/dev/null || rc=$?
+  if ((rc == 1)); then
+    # права прежние ещё до записи (в settings.json бывают токены в env): новый файл иначе получил бы права по umask
+    install -m "$(stat -c %a "$CS")" /dev/null "$CS.agent-speak.tmp"
+    jq --arg e "$event" --arg c "$HOME/.local/bin/agent-speak hook $kind" --argjson t "$timeout" \
+      '.hooks[$e] += [{"hooks": [{"type": "command", "command": $c} + (if $t then {"timeout": $t} else {} end)]}]' "$CS" >"$CS.agent-speak.tmp"
+    mv "$CS.agent-speak.tmp" "$CS"
+  elif ((rc != 0)); then
+    echo "$CS не читается — хук $kind не добавлен, впиши его сам (README, «Хуки»)" >&2
+  fi
+}
+claude_hook PostToolUseFailure post-tool-use-failure
+claude_hook PermissionRequest permission-request 3600
+claude_hook SessionStart session-start
 
 systemctl --user daemon-reload
 systemctl --user enable --now agent-speakd.service agent-speak-memory.timer

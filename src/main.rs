@@ -7,6 +7,7 @@ mod digest;
 mod focus;
 mod gitfacts;
 mod ipc;
+mod later;
 mod learn;
 mod limits;
 mod memory;
@@ -14,6 +15,7 @@ mod news;
 mod mux;
 mod notice;
 mod orders;
+mod perm;
 mod phrases;
 mod presence;
 mod queue;
@@ -53,6 +55,15 @@ fn main() {
             let quiet = std::env::var_os("AGENT_SPEAK").is_some();
             return done(ipc::request(&Msg::Show { agent, quiet }).map(|name| println!("{name}")));
         }
+        // отложенное поручение: tell — передать агенту, когда закончит ход (голосом его ставит Ома только после «да,
+        // передай» — проверка кода в orders.py), checks — сказать исход проверок PR; stdout — id или список словами
+        Some("later") => match later_msg(&args[1..]) {
+            Some(m) => return done(ipc::request(&m).map(|ok| println!("{ok}"))),
+            None => {
+                eprintln!("agent-speak later tell <session> <текст> [смысл] | checks <папка> <PR> | cancel <id> | list");
+                std::process::exit(2);
+            }
+        },
         // пункты меню агента с экрана — только чтение, без службы: Ома называет пункт в вопросе подтверждения до tell
         Some("menu") if args.len() == 2 => {
             return done(orders::menu_of(&args[1]).map(|items| items.iter().enumerate().for_each(|(i, t)| println!("{}. {t}", i + 1))));
@@ -83,10 +94,25 @@ fn main() {
                 return;
             }
             if kind == "post-tool-use" {
-                // в демон не идёт: срабатывает на каждый вызов инструмента, ответ нужен сразу
+                // ответ нужен сразу и службу не ждёт: срабатывает на каждый вызов инструмента
                 let mut raw = String::new();
                 let _ = std::io::stdin().read_to_string(&mut raw);
                 if let Some(out) = post_tool_use(&raw, &limits::hints_dir()) {
+                    println!("{out}");
+                }
+                // службе — только то, по чему узнать вызов: карточка разрешения, одобренного в терминале, снимается, когда
+                // вызов отработал (у PermissionRequest нет tool_use_id); вывод инструмента ей не нужен
+                if let Ok(p) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let keep = ["session_id", "prompt_id", "tool_name", "tool_input", "hook_event_name"];
+                    let payload = keep.iter().map(|k| (k.to_string(), p[*k].clone())).collect();
+                    ipc::send(&Msg::Hook { kind, payload: serde_json::Value::Object(payload) });
+                }
+                return;
+            }
+            if kind == "permission-request" {
+                let mut raw = String::new();
+                let _ = std::io::stdin().read_to_string(&mut raw);
+                if let Some(out) = permission_request(&raw, &ipc::socket_path()) {
                     println!("{out}");
                 }
                 return;
@@ -102,7 +128,7 @@ fn main() {
             Msg::Hook { kind, payload: serde_json::from_str(&raw).unwrap_or_default() }
         }
         _ => {
-            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | set <ключ> <значение> | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | menu <session> | show [<session>|next] | launch <path> <text> [orca|herdr] | projects [orca|herdr] | note <text>");
+            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | set <ключ> <значение> | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | menu <session> | show [<session>|next] | launch <path> <text> [orca|herdr] | projects [orca|herdr] | note <text> | later tell|checks|cancel|list …");
             std::process::exit(2);
         }
     };
@@ -120,6 +146,21 @@ const INBOX_HINT: &str = "Ома — голосовой помощник пол�
 /// Значение `set` из командной строки: true, false, числа — как JSON, остальное — строка.
 fn set_value(v: &str) -> serde_json::Value {
     serde_json::from_str(v).unwrap_or_else(|_| serde_json::json!(v))
+}
+
+/// `later …` из командной строки → сообщение службе; неверные аргументы — None.
+fn later_msg(a: &[String]) -> Option<Msg> {
+    let arg = |i: usize| a.get(i).cloned().unwrap_or_default();
+    let (act, n) = (a.first()?.as_str(), a.len());
+    let ok = matches!((act, n), ("tell", 3 | 4) | ("checks", 3) | ("cancel", 2) | ("list", 1));
+    let pr = if act == "checks" { arg(2).trim_start_matches('#').parse().ok()? } else { 0 };
+    let (session, text, gist) = if act == "tell" { (arg(1), arg(2), arg(3)) } else { Default::default() };
+    ok.then(|| Msg::Later { act: act.into(), session, text, gist, path: if act == "checks" { absolute(&arg(1)) } else { String::new() }, pr, id: if act == "cancel" { arg(1) } else { String::new() } })
+}
+
+/// Папка от папки вызвавшего, а не службы: `later checks . 12` в проекте — этот проект.
+fn absolute(p: &str) -> String {
+    std::path::absolute(p).map_or_else(|_| p.to_string(), |a| a.to_string_lossy().into_owned())
 }
 
 /// Исход команды Омы: ошибка — одна строка в stderr (её дословно получает мозг), код 1.
@@ -145,6 +186,20 @@ fn post_tool_use(raw: &str, dir: &std::path::Path) -> Option<String> {
     let text = limits::take_hint(dir, p["session_id"].as_str()?, agent)?;
     let event = p["hook_event_name"].as_str().unwrap_or("PostToolUse");
     Some(serde_json::json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}).to_string())
+}
+
+/// Хук PermissionRequest: запрос — службе, соединение держится, пока он жив: до кнопки в окне или пузыре, ответа в
+/// терминале (служба шлёт «без решения») или конца хода. На «No» и Esc Claude Code убивает хук — служба видит EOF и
+/// снимает карточку. Службы нет или без решения — пустой вывод: терминал спрашивает как обычно.
+fn permission_request(raw: &str, sock: &std::path::Path) -> Option<String> {
+    use std::io::{BufRead, Write};
+    let payload = serde_json::from_str(raw).ok()?;
+    let mut s = std::os::unix::net::UnixStream::connect(sock).ok()?;
+    s.write_all(format!("{}\n", serde_json::to_string(&Msg::Permission { payload }).ok()?).as_bytes()).ok()?;
+    let mut line = String::new();
+    std::io::BufReader::new(s).read_line(&mut line).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&line).ok()?;
+    perm::hook_output(v["decision"].as_str()?)
 }
 
 /// Строка статуса Claude Code: проценты лимитов — демону, ввод и вывод — следующей команде (chain), её код выхода.
@@ -224,6 +279,51 @@ mod tests {
         assert!(post_tool_use(r#"{"session_id":"s1","agent_id":"a1"}"#, &dir).is_some(), "сабагент — свой раз");
         assert_eq!(post_tool_use("мусор", &dir), None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn later_args() {
+        let a = |s: &[&str]| later_msg(&s.iter().map(|x| x.to_string()).collect::<Vec<_>>()).map(|m| serde_json::to_value(m).unwrap());
+        let tell = a(&["tell", "s1", "Прогони тесты", "тесты"]).unwrap();
+        assert_eq!((tell["do"].as_str(), tell["session"].as_str(), tell["text"].as_str(), tell["gist"].as_str()), (Some("tell"), Some("s1"), Some("Прогони тесты"), Some("тесты")));
+        assert_eq!(a(&["tell", "s1", "x"]).unwrap()["gist"], "");
+        let here = a(&["checks", ".", "3"]).unwrap();
+        assert_eq!(here["path"].as_str().unwrap(), std::env::current_dir().unwrap().to_string_lossy(), "папка вызвавшего, а не службы");
+        let c = a(&["checks", "/p/x", "#12"]).unwrap();
+        assert_eq!((c["path"].as_str(), c["pr"].as_u64()), (Some("/p/x"), Some(12)));
+        assert_eq!(a(&["cancel", "later-3"]).unwrap()["id"], "later-3");
+        assert_eq!(a(&["list"]).unwrap()["do"], "list");
+        for bad in [&["checks", "/p", "x"][..], &["tell", "s1"], &["cancel"], &["nope"], &[]] {
+            assert!(a(bad).is_none(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn permission_hook_waits_for_the_decision_and_prints_it() {
+        use std::io::{BufRead, Write};
+        let sock = std::env::temp_dir().join(format!("oma-perm-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        assert_eq!(permission_request("{}", &sock), None, "службы нет — терминал спрашивает как обычно");
+        let l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let serve = |decision: &'static str| {
+            let (c, _) = l.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(c.try_clone().unwrap()).read_line(&mut line).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!((v["cmd"].as_str(), v["payload"]["tool_name"].as_str()), (Some("permission"), Some("Bash")));
+            if !decision.is_empty() {
+                (&c).write_all(format!("{{\"decision\":\"{decision}\"}}\n").as_bytes()).unwrap();
+            }
+        };
+        let raw = r#"{"session_id":"s","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+        let t = std::thread::spawn({ let sock = sock.clone(); move || permission_request(raw, &sock) });
+        serve("deny");
+        let out: serde_json::Value = serde_json::from_str(&t.join().unwrap().unwrap()).unwrap();
+        assert_eq!(out["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        let t = std::thread::spawn({ let sock = sock.clone(); move || permission_request(raw, &sock) });
+        serve(""); // служба закрыла соединение без решения (перезапуск)
+        assert_eq!(t.join().unwrap(), None);
+        let _ = std::fs::remove_file(&sock);
     }
 
     #[test]
