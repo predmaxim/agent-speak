@@ -28,6 +28,9 @@ PanelWindow {
   signal windowToggled()
   signal chatOpened(string key)   // a bubble's chat: "agent:<id>", or "" for Oma's current one
 
+  // Fixed status colours (FixedColors.qml, rules.md §9): a theme's red or yellow can be any colour.
+  readonly property QtObject fixedColors: FixedColors {}
+
   readonly property var tr: I18n.translator(I18n.textLanguage(function(name) { return Quickshell.env(name) }))
   readonly property string mode: Model.orbMode(link.speech)
   readonly property var tip: Model.orbTip(link.speech)
