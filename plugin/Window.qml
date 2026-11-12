@@ -1012,6 +1012,27 @@ Item {
                 leftPadding: Style.spacing.rowPaddingX
                 topPadding: Style.space(14)
                 bottomPadding: Style.space(4)
+                text: root.tr("Hearing").toUpperCase()
+                foreground: root.fg
+                fontFamily: root.font
+                fontSize: Style.font.body
+                font.letterSpacing: 1.2
+              }
+
+              SettingRow {
+                key: "music_pause"
+                label: root.tr("Pause music while Oma speaks and listens")
+                ToggleSwitch {
+                  checked: root.speech.music_pause === true
+                  foreground: root.fg
+                  onToggled: root.step("music_pause", 1)
+                }
+              }
+
+              PanelSectionHeader {
+                leftPadding: Style.spacing.rowPaddingX
+                topPadding: Style.space(14)
+                bottomPadding: Style.space(4)
                 text: root.tr("Orb").toUpperCase()
                 foreground: root.fg
                 fontFamily: root.font

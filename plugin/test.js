@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, toPause, toResume")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -200,7 +200,7 @@ assert.strictEqual(M.taken("", { key: "chat:1", role: "me", text: "" }), false)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 8)
+assert.strictEqual(M.SETTINGS_ROWS.length, 9)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "eugene", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
@@ -211,6 +211,8 @@ assert.strictEqual(M.settingStep("quiet_hours", cfg, 1), null)
 assert.deepStrictEqual(M.settingStep("orb_over_fullscreen", Object.assign({}, cfg, { orb_over_fullscreen: true }), 1), { key: "orb_over_fullscreen", value: false, sample: false })
 assert.deepStrictEqual(M.settingStep("progress_digest", cfg, 1), { key: "progress_digest", value: true, sample: false })
 assert.deepStrictEqual(M.settingStep("agents_voice", Object.assign({}, cfg, { agents_voice: true }), 1), { key: "agents_voice", value: false, sample: false })
+assert.deepStrictEqual(M.settingStep("music_pause", Object.assign({}, cfg, { music_pause: true }), 1), { key: "music_pause", value: false, sample: false })
+assert.deepStrictEqual(M.SETTINGS_SECTIONS.find(s => s.title === "Hearing").rows, ["music_pause"])
 // every row steps but the hours (two dropdowns, the window walks them)
 for (const r of M.SETTINGS_ROWS) assert.strictEqual(M.settingStep(r, cfg, 1) === null, r === "quiet_hours", r)
 
@@ -224,6 +226,17 @@ const page = winQml.slice(winQml.indexOf("id: settingsPage"), winQml.indexOf("co
 const drawn = [...page.matchAll(/text: root\.tr\("([^"]+)"\)\.toUpperCase\(\)|\bkey: "(\w+)"/g)].map(m => m[1] ? "#" + m[1] : m[2])
 assert.deepStrictEqual(drawn, [].concat(...M.SETTINGS_SECTIONS.filter(s => s.rows.length).map(s => (s.title ? ["#" + s.title] : []).concat(s.rows))))
 assert.ok(!/\brow:\s*\d|cursor === \d/.test(page), "a settings row by its number")
+
+// Music pause (media_hold): only what plays and can pause; after, only those, if still paused, and nothing if
+// anything plays by then (the user started it). PAUSED is MprisPlaybackState.Paused, passed in by MediaHold.qml.
+const PAUSED = 2
+const pl = (dbusName, isPlaying, extra) => Object.assign({ dbusName, isPlaying, canPause: true, canPlay: true, playbackState: isPlaying ? 1 : PAUSED }, extra)
+assert.deepStrictEqual(M.toPause([pl("a", true), pl("b", false), pl("c", true, { canPause: false })]).map(p => p.dbusName), ["a"])
+assert.deepStrictEqual(M.toPause([]), [])
+assert.deepStrictEqual(M.toResume([pl("a", false), pl("b", false), pl("c", false, { canPlay: false })], ["a", "c", "gone"], PAUSED).map(p => p.dbusName), ["a"])
+assert.deepStrictEqual(M.toResume([pl("a", false, { playbackState: 0 })], ["a"], PAUSED), [], "stopped by the user: not played again")
+assert.deepStrictEqual(M.toResume([pl("a", false), pl("x", true)], ["a"], PAUSED), [], "something plays already: nothing resumes")
+assert.deepStrictEqual(M.toResume([pl("a", true)], ["a"], PAUSED), [], "the user resumed it himself")
 
 // Russian plural forms
 assert.deepStrictEqual([1, 2, 5, 11, 12, 21, 22, 25, 111, 0].map(n => ru("%1 agents", n)),
