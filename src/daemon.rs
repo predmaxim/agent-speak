@@ -2290,7 +2290,7 @@ impl State {
             }
             "checks" => self.later.checks(&path, pr, now),
             "cancel" => self.later.take(&id).map(|o| o.id).ok_or_else(|| "такого поручения нет".to_string()),
-            "list" => return Ok(self.later.words()),
+            "list" => return Ok(self.later.json()),
             _ => return Err("later: tell | checks | cancel | list".into()),
         };
         if r.is_ok() {
@@ -4346,7 +4346,7 @@ mod tests {
         assert_eq!(laters(&drain(&mut r)).unwrap(), serde_json::json!([]));
         assert_eq!(board_line(&mut st, 2000).unwrap(), "a закрылся — поручение не передала");
         assert_eq!(st.later_cmd(later_msg("cancel", "", "")), Err("такого поручения нет".into()));
-        assert_eq!(st.later_cmd(later_msg("list", "", "")), Ok("Отложенных поручений нет.".into()));
+        assert_eq!(st.later_cmd(later_msg("list", "", "")), Ok("[]".into()));
     }
 
     #[test]

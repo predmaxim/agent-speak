@@ -136,20 +136,15 @@ impl Later {
         }
     }
 
-    /// Строка подписчикам: `{"later":[{id, kind, agent, who, text, gist, pr, since}]}`.
+    /// Строка подписчикам: `{"later":[{id, kind, agent, who, text, gist, path, pr, since}]}`.
     pub fn line(&self) -> String {
         format!("{}\n", serde_json::json!({"later": self.list}))
     }
 
-    /// Список словами — мозгу Омы (`agent-speak later list`).
-    pub fn words(&self) -> String {
-        if self.list.is_empty() {
-            return "Отложенных поручений нет.".into();
-        }
-        self.list.iter().map(|o| match o.kind.as_str() {
-            "tell" => format!("{}: {}, когда закончит, — передать «{}»", o.id, o.who, o.text),
-            _ => format!("{}: {} — сказать, когда пройдут проверки PR {}", o.id, o.who, o.pr),
-        }).collect::<Vec<_>>().join("\n")
+    /// Тот же список JSON-массивом — `agent-speak later list` (Ома проверяет по нему «одно на агента» до вопроса
+    /// подтверждения и пересказывает его мозгу).
+    pub fn json(&self) -> String {
+        serde_json::to_string(&self.list).unwrap()
     }
 }
 
@@ -241,7 +236,7 @@ mod tests {
         assert!(l.tell("s2", "x", " ", "", 1).is_err());
         let line: serde_json::Value = serde_json::from_str(&l.line()).unwrap();
         assert_eq!(line["later"][0], serde_json::json!({"id": "later-1", "kind": "tell", "agent": "s1", "who": "datebook", "text": "Прогони тесты и пришли итог", "gist": "прогони тесты", "path": "", "pr": 0, "since": 100}));
-        assert_eq!(l.words(), "later-1: datebook, когда закончит, — передать «Прогони тесты и пришли итог»");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&l.json()).unwrap(), line["later"]);
         // перезапуск службы: поручение на месте, номера не повторяются
         let mut again = Later::load(file.clone(), mpsc::channel().0, no_gh);
         assert_eq!(again.list.len(), 1);
@@ -251,7 +246,7 @@ mod tests {
         assert!(again.take("later-1").is_none());
         assert_eq!(Later::load(file.clone(), mpsc::channel().0, no_gh).list.len(), 1);
         let _ = std::fs::remove_file(&file);
-        assert_eq!(Later::load(PathBuf::new(), mpsc::channel().0, no_gh).words(), "Отложенных поручений нет.");
+        assert_eq!(Later::load(PathBuf::new(), mpsc::channel().0, no_gh).json(), "[]");
     }
 
     #[test]
