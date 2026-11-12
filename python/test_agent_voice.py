@@ -2251,6 +2251,11 @@ def test_brain_knows_its_own_sound():
     assert "в динамиках" in run(ask("где звук"))
     run(oma.event(("out", "headphones")))
     assert "в наушниках" in run(ask("а теперь"))
+    run(oma.event(("quiet", True)))
+    run(oma.event(("quiet_why", "screencast")))
+    assert "Твой голос: выключен (показ экрана)" in run(ask("почему молчишь"))
+    run(oma.event(("quiet_why", "")))
+    assert "выключен (тихий режим)" in run(ask("а теперь"))
 
 
 def test_brain_warms_once_and_send_reuses_it():
@@ -2804,12 +2809,15 @@ def test_status_line_events_only_on_change_and_her_sound_by_voiced():
     last = {}
     line = lambda speaking, voiced, played=0.0, out="speakers", quiet=False: {
         "running": True, "speaking": speaking, "voiced": voiced, "played_at": played, "out": out, "quiet": quiet}
-    assert status_events(line(False, 0), last) == [("audio", False, 0.0, 0, False), ("quiet", False), ("out", "speakers")]
+    assert status_events(line(False, 0), last) == [("audio", False, 0.0, 0, False), ("quiet", False), ("quiet_why", ""), ("out", "speakers")]
     assert status_events(line(False, 0), last) == [], "повтор «не говорит» — не событие"
     assert status_events(line(True, 0), last) == [("audio", True, 0.0, 0, False)]
     assert status_events(line(True, 0, 0.0, "headphones"), last) == [("out", "headphones")]
     assert status_events(line(False, 1, 12.5, "headphones"), last) == [("audio", False, 12.5, 1, False)]
     assert status_events(line(False, 2, 12.5, "headphones"), last) == [("audio", False, 12.5, 2, False)], "реплика без звука в хвосте"
+    # тишина по причине (показ экрана) — для разговора тоже тишина; причина — мозгу, чтобы не выдумал другую
+    assert status_events(dict(line(False, 2, 12.5, "headphones"), quiet_why="screencast"), last) == [("quiet", True), ("quiet_why", "screencast")]
+    assert status_events(dict(line(False, 2, 12.5, "headphones", True), quiet_why=""), last) == [("quiet_why", "")], "свой тихий режим остался"
     assert status_events({"running": True, "speaking": False}, {})[0] == ("audio", False, None, None, False), \
         "played_at нет — None (конец звука — сейчас), а не 0.0"
 
