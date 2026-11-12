@@ -124,6 +124,8 @@ def switched(on):
     off = os.path.join(DIR, "off")
     with open(os.path.join(DIR, "switch.lock"), "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        cur = enabled()  # под замком решает настройка сейчас, а не значение из события: потоки и таймер приходят в любом порядке
+        on = on if cur is None else cur
         if not on:
             os.close(os.open(off, os.O_WRONLY | os.O_CREAT, 0o600))
         elif os.path.exists(off):

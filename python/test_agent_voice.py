@@ -3532,10 +3532,13 @@ def test_memory_switched_on_marks_chats_said_while_off(monkeypatch, tmp_path):
         for ev in evs:
             await oma.event(ev)
             await asyncio.gather(*oma.tasks)
+    open(memory.CONFIG, "w").write("memory = true\n")
     run(go(("memory", True)))
     assert not os.path.exists(os.path.join(memory.DIR, "seen.json")), "включена и метки off нет — отмечать нечего"
+    open(memory.CONFIG, "w").write("memory = false\n")
     run(go(("memory", False)))
     assert os.path.exists(os.path.join(memory.DIR, "off")), "выключена — метка на диске (переживает перезапуск Омы)"
+    open(memory.CONFIG, "w").write("memory = true\n")
     run(go(("memory", True)))
     assert json.load(open(os.path.join(memory.DIR, "seen.json"))) == {"p": 2}
     assert not os.path.exists(os.path.join(memory.DIR, "off"))
@@ -3713,9 +3716,11 @@ def test_memory_switched_on_while_oma_was_down_marks_on_first_line(monkeypatch, 
     m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
     d10 = _local(2026, 11, 10, 20)
     memory, _ = _compress_env(monkeypatch, tmp_path, [info("p", mod=int(d10 * 1000))], {"p": [m("user", "личное"), m("assistant", "Поняла.")]})
+    open(memory.CONFIG, "w").write("memory = false\n")
     memory.switched(False)
     from agent_voice.__main__ import status_events
     assert ("memory", True) in status_events({"memory": True}, {}), "первая строка новой Омы"
+    open(memory.CONFIG, "w").write("memory = true\n")
     memory.switched(True)
     assert json.load(open(os.path.join(memory.DIR, "seen.json"))) == {"p": 2}
     assert not os.path.exists(os.path.join(memory.DIR, "off"))
@@ -3726,6 +3731,7 @@ def test_memory_timer_before_oma_honours_off_marker(monkeypatch, tmp_path):
     m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
     d10, d11 = _local(2026, 11, 10, 20), _local(2026, 11, 11, 20)
     memory, _ = _compress_env(monkeypatch, tmp_path, [info("p", mod=int(d10 * 1000))], {"p": [m("user", "личное"), m("assistant", "Поняла.")]})
+    open(memory.CONFIG, "w").write("memory = false\n")
     memory.switched(False)
     open(memory.CONFIG, "w").write("memory = true\n")
     asked = []
@@ -3743,7 +3749,9 @@ def test_memory_quick_on_off_keeps_the_marker(monkeypatch, tmp_path):
     import threading
     m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
     memory, _ = _compress_env(monkeypatch, tmp_path, [info("p", mod=int(_local(2026, 11, 10, 20) * 1000))], {"p": [m("user", "x")]})
+    open(memory.CONFIG, "w").write("memory = false\n")
     memory.switched(False)
+    open(memory.CONFIG, "w").write("memory = true\n")
     real, entered = memory.mark_seen, threading.Event()
 
     def slow():
@@ -3754,7 +3762,21 @@ def test_memory_quick_on_off_keeps_the_marker(monkeypatch, tmp_path):
     on = threading.Thread(target=memory.switched, args=(True,))
     on.start()
     entered.wait(2)
+    open(memory.CONFIG, "w").write("memory = false\n")  # выключили посреди отметки
     off = threading.Thread(target=memory.switched, args=(False,))
     off.start()
     on.join(); off.join()
     assert os.path.exists(os.path.join(memory.DIR, "off")), "последним было «выкл» — метка на месте"
+
+
+def test_memory_switch_follows_the_config_not_the_event_order(monkeypatch, tmp_path):
+    # «выкл» взял замок первым, «вкл» (уже устаревшее) — вторым: решает настройка в файле, метка остаётся
+    m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
+    memory, _ = _compress_env(monkeypatch, tmp_path, [info("p", mod=int(_local(2026, 11, 10, 20) * 1000))], {"p": [m("user", "x")]})
+    open(memory.CONFIG, "w").write("memory = false\n")
+    memory.switched(False)
+    memory.switched(True)  # устаревшее событие
+    assert os.path.exists(os.path.join(memory.DIR, "off")), "в файле выключена — метка на месте"
+    open(memory.CONFIG, "w").write("memory = true\n")
+    memory.switched(False)  # устаревшее событие
+    assert not os.path.exists(os.path.join(memory.DIR, "off")), "в файле включена — метку не ставить, сказанное отмечено"
