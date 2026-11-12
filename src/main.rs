@@ -32,6 +32,8 @@ fn main() {
         Some("stop") => Msg::Stop,
         Some("pause") => Msg::Pause,
         Some("voice") => Msg::Oma { action: serde_json::json!({"do": "talk"}) },
+        // то же, что страница настроек: служба проверяет значение и сохраняет config.toml
+        Some("set") if args.len() == 3 => Msg::Set { key: args[1].clone(), value: set_value(&args[2]) },
         Some("statusline") => return statusline(&args[1..]),
         // Ома передаёт агенту ответ: через очередь действий службы (с действиями сторожа не вперемешку), исход — сразу;
         // stdout — метка нажатого пункта меню с экрана (одобрение плана включает и auto mode — Ома её зачитывает)
@@ -75,14 +77,19 @@ fn main() {
             Msg::Hook { kind, payload: serde_json::from_str(&raw).unwrap_or_default() }
         }
         _ => {
-            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | menu <session> | launch <path> <text> [orca|herdr] | projects [orca|herdr]");
+            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | set <ключ> <значение> | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | menu <session> | launch <path> <text> [orca|herdr] | projects [orca|herdr]");
             std::process::exit(2);
         }
     };
-    let read = matches!(msg, Msg::Read);
+    let read = matches!(msg, Msg::Read | Msg::Set { .. });
     if !ipc::send(&msg) && read {
         eprintln!("agent-speak: сервис озвучки не запущен (systemctl --user start agent-speakd)");
     }
+}
+
+/// Значение `set` из командной строки: true, false, числа — как JSON, остальное — строка.
+fn set_value(v: &str) -> serde_json::Value {
+    serde_json::from_str(v).unwrap_or_else(|_| serde_json::json!(v))
 }
 
 /// Исход команды Омы: ошибка — одна строка в stderr (её дословно получает мозг), код 1.
@@ -160,6 +167,13 @@ fn user_statusline(settings: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_value_is_json_or_text() {
+        assert_eq!(set_value("kseniya"), serde_json::json!("kseniya"));
+        assert_eq!(set_value("23:00"), serde_json::json!("23:00"));
+        assert_eq!((set_value("false"), set_value("30")), (serde_json::json!(false), serde_json::json!(30)));
+    }
 
     #[test]
     fn post_tool_use_gives_hint_once_in_hook_format() {
