@@ -185,6 +185,7 @@ struct Status<'a> {
     wake_word: bool,          // настройка: отзываться на «Ома»
     memory: bool,             // настройка: помнить прошлые дни
     headset_button: bool,     // настройка: кнопка наушников (MPRIS-плеер Омы, пока она говорит или спросила «Ты тут?»)
+    gender: &'a str,          // род Омы по голосу (config::gender): "f" | "m" — её фразы и мозг говорят о ней в этом роде
 }
 
 /// Процесс Омы (python -m agent_voice): команды — строками в stdin, события — через сокет.
@@ -961,6 +962,11 @@ impl State {
         self.cfg.wake_word && !self.muted() && !self.presence.locked((self.now_secs)())
     }
 
+    /// Род Омы по голосу: её фразы — шаблоны phrases::gendered в этом роде.
+    fn gender(&self) -> &'static str {
+        crate::config::gender(&self.cfg.speaker)
+    }
+
     /// Побудка для строки состояния: выключена, тихо — от службы; иначе — что сказала Ома (on или почему нет).
     fn wake(&self) -> &str {
         if !self.cfg.wake_word {
@@ -1154,6 +1160,8 @@ impl State {
             memory: self.cfg.memory,
             // волна 5: кнопка наушников
             headset_button: self.cfg.headset_button,
+            // род Омы по голосу
+            gender: self.gender(),
         };
         format!("{}\n", serde_json::to_string(&st).unwrap())
     }
@@ -3205,8 +3213,18 @@ mod tests {
                 "wake", "wake_word",                                            // слово-побудка: волна 5
                 "memory",                                                       // память между днями
                 "headset_button",                                               // кнопка наушников: волна 5
+                "gender",                                                       // род Омы по голосу
             ]
         );
+    }
+
+    #[test]
+    fn status_line_carries_gender_of_the_voice() {
+        let v = |st: &State| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap();
+        let mut st = test_state();
+        assert_eq!(v(&st)["gender"], "f", "kseniya — женский род, как раньше");
+        st.cfg.speaker = "aidar".into();
+        assert_eq!(v(&st)["gender"], "m");
     }
 
     #[test]

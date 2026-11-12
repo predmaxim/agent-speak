@@ -15,6 +15,25 @@ impl Rotor {
     }
 }
 
+/// Род Омы — по голосу (config::gender): шаблон `{м|ж}` → форма её рода, "m" — мужская, иначе женская («Понял{|а}»,
+/// «пош{ёл|ла}»). Подстановки без «|» («{n}», «{что}») не трогаются: шаблон разрешают до подстановки, чужой текст — никогда.
+/// Тот же синтаксис — gendered в python/agent_voice/conversation.py.
+pub fn gendered(t: &str, g: &str) -> String {
+    let mut out = String::with_capacity(t.len());
+    let mut rest = t;
+    while let Some(i) = rest.find('{') {
+        let Some(j) = rest[i..].find('}').map(|j| i + j) else { break };
+        let (head, inner) = rest[..j].rsplit_once('{').unwrap(); // ближайшая к «}» «{»: внутри шаблона скобок нет
+        out.push_str(head);
+        match inner.split_once('|') {
+            Some((m, f)) if !f.contains('|') => out.push_str(if g == "m" { m } else { f }),
+            _ => out.push_str(&rest[head.len()..=j]),
+        }
+        rest = &rest[j + 1..];
+    }
+    out + rest
+}
+
 /// «Ты тут?»: «Эй» — с ним Silero читает «ты тут» вопросом (первый вариант пользователь выбрал из десяти). Ответ на любой
 /// вариант должен пройти is_answer Омы («да», «тут», «давай»…); слов и основ ответа (ANSWER_WORDS, ANSWER_STEMS в conversation.py)
 /// в вопросе не должно быть, кроме «тут»: ответ, начатый под эхо вопроса, иначе срезается как эхо (тест Python
@@ -72,6 +91,15 @@ pub fn canon(said: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gendered_picks_the_form_of_the_voice() {
+        assert_eq!(gendered("Понял{|а}, пош{ёл|ла}.", "m"), "Понял, пошёл.");
+        assert_eq!(gendered("Понял{|а}, пош{ёл|ла}.", "f"), "Поняла, пошла.");
+        assert_eq!(gendered("сам{|а} — {что}, ещё {n}", "m"), "сам — {что}, ещё {n}", "подстановки без «|» не трогаются");
+        assert_eq!(gendered("без шаблона {", "f"), "без шаблона {");
+        assert_eq!(gendered("{x{a|b}}", "m"), "{xa}", "шаблон — ближайшие скобки, как регулярка в Python");
+    }
 
     #[test]
     fn rotor_goes_round_in_order_per_table() {
