@@ -183,8 +183,8 @@ class Oma:
             key = cmd.get("key")  # удержание спутника орба — разговор с этим агентом, в его чате
             leave = not key and c.state == "idle" and self.brain.key.startswith("agent:")  # с Омой-помощником — в общем чате
             # слух — сразу: смена чата и выход прежнего claude начало фразы не задерживают; удержание, пока она слушает,
-            # разговор не кончает (клик кончил бы), а переводит в чат агента
-            await self.act([] if key and c.state in ("listening", "paused") else c.talk())
+            # разговор не кончает (клик кончил бы), а переводит в чат агента — и окно ответа делает обычным разговором
+            await self.act(c.converse() if key and c.state in ("listening", "paused") else c.talk())
             await self.follow(await self.general() if leave else (key if key != self.brain.key else None))
             if c.active:
                 self.to_brain(self.brain.warm)  # claude поднимается, пока пользователь говорит
@@ -249,10 +249,11 @@ class Oma:
             self.emit({"chat": {"key": self.brain.key, "was": "*", "messages": self.history}})
 
     async def switch(self, key, was=None):
-        """Перейти в чат key; was — ключ, на который окно ждёт ответа ("*" — любой)."""
+        """Перейти в чат key; was — ключ, на который окно ждёт ответа ("*" — любой). Идёт разговор — всегда "*": голос
+        теперь уходит туда, и орб по такой строке переносит обводку спутника (окно её тоже примет)."""
         if self.conv.turn:  # ход прошлого чата обрываем, пока его клиент жив
             await self.act(self.conv.cancel())
-        self.to_brain(self._open, key, was)
+        self.to_brain(self._open, key, "*" if self.conv.active else was)
 
     async def _open(self, key, was):
         self.history = []  # open упал — чужая история не останется под новым ключом

@@ -146,6 +146,9 @@ Item {
     field.insert(field.cursorPosition, t)
   }
 
+  // A drop on the orb or a satellite: at the cursor, apart from the word before it (the field keeps an unfinished message).
+  function attach(t) { typeIn(Model.attachText(field.text.slice(0, field.cursorPosition), t)) }
+
   function choose(key, value, sample) {
     if (!root.link) return
     root.link.send(Model.set(key, value))

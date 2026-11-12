@@ -237,6 +237,14 @@ class Conversation:
             acts.append(("ear", True))
         return acts + self._to(self._rest())
 
+    def converse(self):
+        """Удержание спутника, пока она слушает: разговор не кончается, а окно ответа (новость, «Ты тут?», вопрос агента)
+        становится обычным разговором — реплика без контекста той новости, после ответа слух открыт, конец — по тишине."""
+        self.window = None
+        if self.active and self.state in ("listening", "paused"):
+            self.quiet_at = self._silence_until()
+        return []
+
     def _window_send(self, text):
         """Реплика в разговоре из окна ответа: «ок»/«да» без отправки, пометка для мозга."""
         w = self.window

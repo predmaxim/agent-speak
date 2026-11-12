@@ -196,6 +196,12 @@ function dropText(urls, text) {
   return parts.length ? parts.join(" ") : String(text || "").trim()
 }
 
+// A drop into the chat's field at the cursor: `before` is the field's text before the cursor; a word there gets a space
+// apart, so a path is not glued to an unfinished message.
+function attachText(before, t) {
+  return before !== "" && !/\s$/.test(before) ? " " + t : t
+}
+
 var BUBBLES_MAX = 3
 var BUBBLE_TTL = 10000
 

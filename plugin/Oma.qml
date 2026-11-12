@@ -110,7 +110,7 @@ Item {
     // A drop: the chat with it in the field — the user sends it with Enter, a typed message, no confirmation.
     onAttached: function(key, text) {
       omaWindow.open(key)
-      omaWindow.typeIn(text)
+      omaWindow.attach(text)
     }
   }
 

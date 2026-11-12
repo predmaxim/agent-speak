@@ -1787,6 +1787,58 @@ def test_talk_with_key_talks_to_that_agent():
     assert oma.brain.texts[-1] == "скажи ему да" and oma.orders.voiced is True
 
 
+def test_hold_during_answer_window_turns_it_into_conversation(monkeypatch):
+    # ревью волны 4 (проба): удержание спутника, пока открыто окно ответа после новости, окно не превращало в разговор —
+    # чужая новость уходила контекстом «Ома только что сказала» в чат другого агента, слух закрывался после одного
+    # ответа, конец — по сроку окна, а не по тишине разговора
+    import agent_voice.__main__ as m
+    monkeypatch.setattr(m, "locked", lambda: False)
+    monkeypatch.setattr(m, "mic_outputs", lambda: [])
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    clk.t = 1.0
+
+    async def go():
+        await oma.command({"do": "listen", "secs": 5, "key": "agent:b", "said": "Агент Б закончил."})
+        await settle(oma)
+        await oma.command({"do": "talk", "key": "agent:a"})
+        await settle(oma)
+        assert oma.brain.key == "agent:a" and oma.conv.window is None
+        assert oma.conv.quiet_at == clk.t + SILENCE_END, "тишина — как у разговора, а не срок окна"
+    run(go())
+    _voice(oma, clk, "что ты делаешь сейчас", 1)
+    assert oma.brain.texts[-1] == "что ты делаешь сейчас", "без контекста чужой новости"
+
+    async def answered():
+        await oma.event(("done", None, oma.conv.turn_no))
+        await settle(oma)
+    run(answered())
+    assert oma.ear.open and oma.conv.state == "listening", "после ответа слух открыт: это разговор, а не окно"
+    assert oma.conv.quiet_at == clk.t + SILENCE_END
+
+
+def test_brain_switch_during_conversation_moves_the_orb_outline():
+    # ревью волны 4 (проба): после удержания A реплика, набранная в другой чат, переключала мозг строкой chat без was
+    # "*" — орб держал обводку A, а сказанное голосом уходило в chat:x. Идёт разговор — переход мозга с was "*"
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    chats = lambda: [(e["line"]["chat"]["key"], e["line"]["chat"].get("was")) for e in emitted if "chat" in e["line"]]
+
+    async def go():
+        await oma.command({"do": "talk", "key": "agent:a"})
+        await settle(oma)
+        await oma.command({"do": "ask", "key": "chat:x", "text": "привет", "id": "q1"})
+        await settle(oma)
+    run(go())
+    assert oma.conv.active and oma.brain.key == "chat:x"
+    assert chats()[:2] == [("agent:a", "*"), ("chat:x", "*")], chats()
+    oma.conv.end()
+    n = len(chats())
+    run(oma.command({"do": "ask", "key": "chat:y", "text": "ещё", "id": "q2"}))
+    run(settle(oma))
+    assert chats()[n] == ("chat:y", None), "без разговора — как раньше: голоса нет, обводке некуда идти"
+
+
 def test_oma_confirmation_skips_brain():
     sent, emitted = [], []
     clk, oma = _oma(sent, emitted)

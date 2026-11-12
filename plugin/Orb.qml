@@ -442,21 +442,16 @@ PanelWindow {
       }
 
       // Left: the agent's chat in Oma's window; «more» — the window with them all. Held (0,45 s): talk to this agent
-      // without naming it — Oma listens in its chat; a voiced order there still waits for «да, передай»; the release
-      // after a hold is no click.
+      // without naming it — Oma listens in its chat; a voiced order there still waits for «да, передай». The release
+      // after a hold is no click: with onPressAndHold connected the stock MouseArea sends no clicked (on «more» too).
       MouseArea {
         id: satArea
         anchors.fill: parent
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
         pressAndHoldInterval: 450
-        property bool held: false
-        onPressed: held = false
-        onPressAndHold: if (!sat.more) {
-          held = true
-          win.link.send(Model.omaCmd({ do: "talk", key: "agent:" + sat.sid }))
-        }
-        onClicked: if (!held) sat.more ? win.windowToggled() : win.chatOpened("agent:" + sat.sid)
+        onPressAndHold: if (!sat.more) win.link.send(Model.omaCmd({ do: "talk", key: "agent:" + sat.sid }))
+        onClicked: sat.more ? win.windowToggled() : win.chatOpened("agent:" + sat.sid)
       }
 
       // A file, a screenshot or text dropped on the dot: its chat in Oma's window with that in the field.
