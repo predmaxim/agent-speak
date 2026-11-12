@@ -180,9 +180,12 @@ class Oma:
         do, c = cmd.get("do"), self.conv
         if do == "talk":
             self.ear.speakers = None  # разговор по клику — вход по тому, куда она говорит
-            leave = c.state == "idle" and self.brain.key.startswith("agent:")  # с Омой-помощником — в общем чате
-            await self.act(c.talk())  # слух — сразу: смена чата и выход прежнего claude начало фразы не задерживают
-            await self.follow(await self.general() if leave else None)
+            key = cmd.get("key")  # удержание спутника орба — разговор с этим агентом, в его чате
+            leave = not key and c.state == "idle" and self.brain.key.startswith("agent:")  # с Омой-помощником — в общем чате
+            # слух — сразу: смена чата и выход прежнего claude начало фразы не задерживают; удержание, пока она слушает,
+            # разговор не кончает (клик кончил бы), а переводит в чат агента
+            await self.act([] if key and c.state in ("listening", "paused") else c.talk())
+            await self.follow(await self.general() if leave else (key if key != self.brain.key else None))
             if c.active:
                 self.to_brain(self.brain.warm)  # claude поднимается, пока пользователь говорит
         elif do == "cancel":
