@@ -133,17 +133,45 @@ fn resubscribe_after(fails: u32) -> Duration {
     Duration::from_secs((1u64 << fails.saturating_sub(1).min(5)).min(30))
 }
 
-/// Щелчок «услышала»: 90 мс, 880 Гц, края сглажены — без треска. s16 48 кГц моно, как у Player.
-fn chime_pcm() -> Vec<u8> {
-    let n = 48000 * 90 / 1000;
+/// Нота hz Гц длиной ms мс, края сглажены — без треска; громкость 0,25. s16 48 кГц моно, как у Player.
+fn tone(hz: f32, ms: usize) -> Vec<u8> {
+    let n = 48000 * ms / 1000;
     (0..n)
         .map(|i| {
             let t = i as f32 / 48000.0;
             let fade = (std::f32::consts::PI * i as f32 / n as f32).sin(); // 0 → 1 → 0
-            ((2.0 * std::f32::consts::PI * 880.0 * t).sin() * fade * 0.25 * i16::MAX as f32) as i16
+            ((2.0 * std::f32::consts::PI * hz * t).sin() * fade * 0.25 * i16::MAX as f32) as i16
         })
         .flat_map(i16::to_le_bytes)
         .collect()
+}
+
+fn silence(ms: usize) -> Vec<u8> {
+    vec![0; 48000 * ms / 1000 * 2]
+}
+
+/// Щелчок «услышала»: 90 мс, 880 Гц.
+fn chime_pcm() -> Vec<u8> {
+    tone(880.0, 90)
+}
+
+/// Звуковой знак перед новостью: вопрос (агенту нужен ответ), итог, нужна помощь.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Cue {
+    Ask,
+    Done,
+    Help,
+}
+
+/// Знак — две ноты кодом (файлов и лицензий нет): 80 мс, 40 мс тишины, 110 мс, затем 150 мс тишины до речи. Вопрос — вверх,
+/// итог — вниз, помощь — две низкие. Приклеивается перед звуком фразы в том же pw-cat: выход и порядок те же, стоп обрывает и его.
+pub fn cue_pcm(c: Cue) -> Vec<u8> {
+    let (a, b) = match c {
+        Cue::Ask => (660.0, 880.0),
+        Cue::Done => (880.0, 660.0),
+        Cue::Help => (440.0, 440.0),
+    };
+    [tone(a, 80), silence(40), tone(b, 110), silence(150)].concat()
 }
 
 /// Сыграть щелчок отдельным pw-cat в выход sink (пусто — по умолчанию), не задерживая вызывающего.
@@ -179,6 +207,28 @@ mod tests {
         let s = |i: usize| i16::from_le_bytes([pcm[2 * i], pcm[2 * i + 1]]).unsigned_abs();
         assert!(s(0) < 50 && s(pcm.len() / 2 - 1) < 50, "края тихие — без щелчка-треска");
         assert!((0..pcm.len() / 2).map(s).max().unwrap() > 5000);
+    }
+
+    #[test]
+    fn cues_are_short_fade_and_differ() {
+        let samples = |pcm: &[u8]| pcm.chunks(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect::<Vec<i16>>();
+        // частота ноты — по переходам через ноль: (from..to) мс знака
+        let hz = |s: &[i16], from: usize, to: usize| {
+            let w = &s[48 * from..48 * to];
+            w.windows(2).filter(|p| (p[0] < 0) != (p[1] < 0)).count() as f32 / 2.0 / ((to - from) as f32 / 1000.0)
+        };
+        for c in [Cue::Ask, Cue::Done, Cue::Help] {
+            let s = samples(&cue_pcm(c));
+            assert!(s.len() <= 48 * 450, "{c:?}: не длиннее 450 мс");
+            assert!(s[0].unsigned_abs() < 50 && s[48 * 80 - 1].unsigned_abs() < 50, "{c:?}: края ноты тихие — без треска");
+            assert!(s[s.len() - 48 * 150..].iter().all(|&v| v == 0), "{c:?}: перед речью — тишина");
+            assert!(s.iter().map(|v| v.unsigned_abs()).max().unwrap() > 5000);
+        }
+        let ask = samples(&cue_pcm(Cue::Ask));
+        let done = samples(&cue_pcm(Cue::Done));
+        assert!(hz(&ask, 5, 75) < hz(&ask, 125, 225), "вопрос — вверх");
+        assert!(hz(&done, 5, 75) > hz(&done, 125, 225), "итог — вниз");
+        assert_ne!(cue_pcm(Cue::Help), cue_pcm(Cue::Ask));
     }
 
     #[test]

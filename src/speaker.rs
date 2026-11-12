@@ -41,7 +41,8 @@ pub enum Play {
 
 /// Синтезатор и приёмник звука — трейты только ради тестов с подделками.
 pub trait Synth {
-    fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Result<Vec<u8>, Failed>;
+    /// tone и lead — интонация новости и проект перед паузой (см. python/silero_tts.py `ssml`); "" — как обычный текст.
+    fn synth(&mut self, text: &str, speaker: &str, rate: &str, tone: &str, lead: &str) -> Result<Vec<u8>, Failed>;
 }
 pub trait Sink {
     fn write(&mut self, pcm: &[u8]) -> bool;
@@ -51,8 +52,8 @@ pub trait Sink {
     fn left(&self) -> Duration;
 }
 impl Synth for Tts {
-    fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Result<Vec<u8>, Failed> {
-        Tts::synth(self, text, speaker, rate)
+    fn synth(&mut self, text: &str, speaker: &str, rate: &str, tone: &str, lead: &str) -> Result<Vec<u8>, Failed> {
+        Tts::synth(self, text, speaker, rate, tone, lead)
     }
 }
 impl Sink for Player {
@@ -173,12 +174,12 @@ const TAIL: Duration = Duration::from_millis(1000); // ~0,7 с ещё играе
 const RETRY: Duration = Duration::from_secs(10);
 
 /// Вернуть фразу в голову очереди (после паузы — с начала предложения), если её не отменили (стоп, перебив) — пауза
-/// не отменяет. false — фраза ушла.
-fn requeue(shared: &Shared, q: &mut Queue, item: &Item, my_gen: u64) -> bool {
+/// не отменяет. false — фраза ушла. sounded — её звук уже начал писаться: знак второй раз не звучит.
+fn requeue(shared: &Shared, q: &mut Queue, item: &Item, my_gen: u64, sounded: bool) -> bool {
     // образец не возвращается: на паузе pop отдал бы его снова
     let back = item.kind != Kind::Preview && (shared.generation.load(Ordering::SeqCst) == my_gen || q.paused());
     if back {
-        q.push_front(item.clone());
+        q.push_front(Item { cue: item.cue.filter(|_| !sounded), ..item.clone() });
     }
     back
 }
@@ -206,7 +207,7 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                         if changed {
                             player.reset();
                             if q.paused() && it.kind != Kind::Preview {
-                                q.push_front(it); // после паузы — с начала предложения
+                                q.push_front(Item { cue: None, ..it }); // после паузы — с начала предложения, знак уже звучал
                             }
                         } else {
                             player.close(); // хвост доигран, новой фразы нет
@@ -228,8 +229,12 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
         };
         shared.set_busy(Some(&item.session));
         let (speaker, rate) = shared.voice.lock().unwrap().clone();
-        let pcm = match tts.synth(&item.text, &speaker, &rate) {
-            Ok(pcm) => pcm,
+        let pcm = match tts.synth(&item.text, &speaker, &rate, item.tone, &item.lead) {
+            // знак — перед звуком фразы, в том же pw-cat; читать нечего — и знака нет
+            Ok(pcm) => match item.cue {
+                Some(c) if !pcm.is_empty() => [crate::audio::cue_pcm(c), pcm].concat(),
+                _ => pcm,
+            },
             Err(Failed::Text) => {
                 // модель не берёт этот текст (причина — в журнале от silero_tts): повтор не поможет, очередь не держим;
                 // пустой звук, а не close: pw-cat доигрывает прежнюю фразу, следующая — в него же, а не в новый поверх
@@ -241,7 +246,7 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                 let left = player.left();
                 player.close();
                 let mut q = shared.queue.lock().unwrap();
-                if !requeue(&shared, &mut q, &item, my_gen) {
+                if !requeue(&shared, &mut q, &item, my_gen, false) {
                     shared.signal(Play::Dropped(item.session));
                 }
                 shared.idle(|| left);
@@ -260,7 +265,7 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
         for (i, chunk) in pcm.chunks(CHUNK).enumerate() {
             if shared.generation.load(Ordering::SeqCst) != my_gen {
                 player.reset();
-                kept = requeue(&shared, &mut shared.queue.lock().unwrap(), &item, my_gen);
+                kept = requeue(&shared, &mut shared.queue.lock().unwrap(), &item, my_gen, sounded);
                 done = false;
                 break;
             }
@@ -268,7 +273,7 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                 // не потерять молча, но только один раз подряд для той же фразы
                 if write_failed.as_deref() != Some(&item.text) {
                     write_failed = Some(item.text.clone());
-                    kept = requeue(&shared, &mut shared.queue.lock().unwrap(), &item, my_gen);
+                    kept = requeue(&shared, &mut shared.queue.lock().unwrap(), &item, my_gen, sounded);
                 }
                 done = false;
                 break;
@@ -292,9 +297,10 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
 mod tests {
     use super::*;
 
-    struct FakeSynth(Arc<Mutex<u32>>, Failed); // сколько первых вызовов провалить и как
+    struct FakeSynth(Arc<Mutex<u32>>, Failed, Arc<Mutex<Vec<(String, String)>>>); // сколько первых вызовов провалить и как; (tone, lead) вызовов
     impl Synth for FakeSynth {
-        fn synth(&mut self, _: &str, _: &str, _: &str) -> Result<Vec<u8>, Failed> {
+        fn synth(&mut self, _: &str, _: &str, _: &str, tone: &str, lead: &str) -> Result<Vec<u8>, Failed> {
+            self.2.lock().unwrap().push((tone.into(), lead.into()));
             let mut n = self.0.lock().unwrap();
             if *n > 0 {
                 *n -= 1;
@@ -336,14 +342,25 @@ mod tests {
         let ev: Events = Default::default();
         let (s, e) = (shared.clone(), ev.clone());
         std::thread::spawn(move || {
-            run_with(s, FakeSynth(fails, how), FakeSink(e, Arc::new(Mutex::new(write_fails))))
+            run_with(s, FakeSynth(fails, how, Default::default()), FakeSink(e, Arc::new(Mutex::new(write_fails))))
         });
         (shared, ev)
     }
 
+    fn item(text: &str, kind: Kind) -> Item {
+        Item { session: "s".into(), text: text.into(), kind, voice: 0, cue: None, tone: "", lead: String::new() }
+    }
+
     fn say(shared: &Shared) {
         let mut q = shared.queue.lock().unwrap();
-        q.push(Item { session: "s".into(), text: "фраза".into(), kind: Kind::Read, voice: 0 });
+        q.push(item("фраза", Kind::Read));
+        shared.cv.notify_all();
+    }
+
+    /// Новость со знаком «итог»: знак (380 мс) и звук фразы (0,2 с) — 6 кусков по 0,1 с.
+    fn say_cued(shared: &Shared) {
+        let mut q = shared.queue.lock().unwrap();
+        q.push(Item { cue: Some(crate::audio::Cue::Done), tone: "done", lead: "плуг".into(), ..item("фраза", Kind::News) });
         shared.cv.notify_all();
     }
 
@@ -409,13 +426,46 @@ mod tests {
         // реплика Омы (voice — её номер) не отработана, пока её фраза в очереди или у потока воспроизведения
         let (shared, ev) = start(0, 0);
         shared.pause();
-        shared.queue.lock().unwrap().push(Item { session: "voice".into(), text: "ответ".into(), kind: Kind::Voice, voice: 1 });
+        shared.queue.lock().unwrap().push(Item { session: "voice".into(), voice: 1, ..item("ответ", Kind::Voice) });
         assert_eq!(shared.voices_left(0), 1, "в очереди");
         assert_eq!(shared.voices_left(1), 0, "номер не новее after — реплика прежней Омы — не считается");
         shared.resume();
         wait(|| count(&ev, "write") == 2 && !shared.busy.load(Ordering::SeqCst));
         // busy гаснет после того, как поток отпустил реплику: строка с speaking false её уже считает
         assert_eq!(shared.voices_left(0), 0);
+    }
+
+    #[test]
+    fn cue_is_glued_before_the_sound_and_tone_reaches_synth() {
+        let calls: Arc<Mutex<Vec<(String, String)>>> = Default::default();
+        let shared = Arc::new(Shared::new(Queue::new(), "x".into(), "m".into()));
+        let ev: Events = Default::default();
+        let (s, e, c) = (shared.clone(), ev.clone(), calls.clone());
+        std::thread::spawn(move || run_with(s, FakeSynth(Arc::new(Mutex::new(0)), Failed::Down, c), FakeSink(e, Arc::new(Mutex::new(0)))));
+        say_cued(&shared);
+        wait(|| count(&ev, "write") == 6 && !shared.busy.load(Ordering::SeqCst));
+        assert_eq!(*calls.lock().unwrap(), [("done".to_string(), "плуг".to_string())]);
+        say(&shared);
+        wait(|| count(&ev, "write") == 8);
+    }
+
+    #[test]
+    fn cue_not_replayed_after_pause_but_kept_when_synth_was_down() {
+        let (shared, ev) = start(0, 0);
+        say_cued(&shared);
+        wait(|| count(&ev, "write") == 6);
+        shared.pause(); // фраза доиграна и в хвосте: после паузы — с начала, но знак уже прозвучал
+        wait(|| count(&ev, "reset") == 1);
+        shared.resume();
+        wait(|| count(&ev, "write") == 8);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(count(&ev, "write"), 8, "повтор — без знака");
+        let fails = Arc::new(Mutex::new(1));
+        let (shared, ev) = start_with(fails.clone(), Failed::Down, 0);
+        say_cued(&shared);
+        wait(|| *fails.lock().unwrap() == 0 && !shared.busy.load(Ordering::SeqCst) && !shared.queue.lock().unwrap().is_empty());
+        shared.interrupt();
+        wait(|| count(&ev, "write") == 6); // синтез лежал — звука не было, знак звучит с фразой
     }
 
     #[test]
@@ -494,7 +544,7 @@ mod tests {
     #[test]
     fn preview_not_replayed_after_pause() {
         let (shared, ev) = start(0, 0);
-        shared.queue.lock().unwrap().push(Item { session: "s".into(), text: "образец".into(), kind: Kind::Preview, voice: 0 });
+        shared.queue.lock().unwrap().push(item("образец", Kind::Preview));
         shared.cv.notify_all();
         wait(|| count(&ev, "write") == 2);
         shared.pause();
@@ -538,7 +588,7 @@ mod tests {
     /// Синтез, который идёт 0,5 с: за это время успеть оборвать фразу.
     struct SlowSynth;
     impl Synth for SlowSynth {
-        fn synth(&mut self, _: &str, _: &str, _: &str) -> Result<Vec<u8>, Failed> {
+        fn synth(&mut self, _: &str, _: &str, _: &str, _: &str, _: &str) -> Result<Vec<u8>, Failed> {
             std::thread::sleep(Duration::from_millis(500));
             Ok(vec![0; CHUNK * 2])
         }
@@ -584,10 +634,10 @@ mod tests {
             data.join(crate::tts::MODEL),
             sock.clone(),
         );
-        tts.synth("Проверка связи.", "xenia", "medium").unwrap(); // модель загружена и прогрета
+        tts.synth("Проверка связи.", "xenia", "medium", "", "").unwrap(); // модель загружена и прогрета
         for s in SAY {
             let t = Instant::now();
-            let n = tts.synth(s, "xenia", "medium").unwrap().len();
+            let n = tts.synth(s, "xenia", "medium", "", "").unwrap().len();
             eprintln!("синтез {:>4} мс, звук {:>4} мс: {s}", t.elapsed().as_millis(), n * 1000 / 96000);
         }
         struct PipeSink(Option<std::io::PipeWriter>);
@@ -636,7 +686,7 @@ mod tests {
         });
         let shared = Arc::new(Shared::new(Queue::new(), "xenia".into(), "medium".into()));
         for s in SAY {
-            shared.queue.lock().unwrap().push(Item { session: "s".into(), text: s.into(), kind: Kind::Read, voice: 0 });
+            shared.queue.lock().unwrap().push(Item { session: "s".into(), text: s.into(), kind: Kind::Read, voice: 0, cue: None, tone: "", lead: String::new() });
         }
         let s = shared.clone();
         std::thread::spawn(move || run_with(s, tts, PipeSink(Some(w))));

@@ -53,18 +53,19 @@ impl Tts {
         false
     }
 
-    fn request(&self, text: &str, speaker: &str, rate: &str) -> std::io::Result<Option<Vec<u8>>> {
+    /// tone и lead — смысл, разметку SSML строит адаптер (python/silero_tts.py `ssml`); прежний сервер их не читает.
+    fn request(&self, text: &str, speaker: &str, rate: &str, tone: &str, lead: &str) -> std::io::Result<Option<Vec<u8>>> {
         let mut s = UnixStream::connect(&self.sock)?;
         s.set_read_timeout(Some(Duration::from_secs(60)))?;
-        let req = serde_json::json!({"text": text, "speaker": speaker, "rate": rate});
+        let req = serde_json::json!({"text": text, "speaker": speaker, "rate": rate, "tone": tone, "lead": lead});
         s.write_all(format!("{req}\n").as_bytes())?;
         read_reply(&mut s)
     }
 
-    pub fn synth(&mut self, text: &str, speaker: &str, rate: &str) -> Result<Vec<u8>, Failed> {
+    pub fn synth(&mut self, text: &str, speaker: &str, rate: &str, tone: &str, lead: &str) -> Result<Vec<u8>, Failed> {
         for _ in 0..3 {
             if self.ensure() {
-                match self.request(text, speaker, rate) {
+                match self.request(text, speaker, rate, tone, lead) {
                     Ok(Some(pcm)) => {
                         self.failures = 0;
                         return Ok(pcm);
@@ -139,9 +140,10 @@ mod tests {
             data.join(MODEL),
             sock,
         );
-        assert!(t.synth("Проверка связи.", "xenia", "medium").unwrap().len() > 48000);
-        assert!(matches!(t.synth("Привет.", "nobody", "medium"), Err(Failed::Text)));
+        assert!(t.synth("Проверка связи.", "xenia", "medium", "", "").unwrap().len() > 48000);
+        assert!(matches!(t.synth("Привет.", "nobody", "medium", "", ""), Err(Failed::Text)));
         t.kill();
-        assert!(t.synth("Снова работает.", "xenia", "medium").unwrap().len() > 48000);
+        assert!(t.synth("Снова работает.", "xenia", "medium", "", "").unwrap().len() > 48000);
+        assert!(t.synth("куда пушить?", "kseniya", "medium", "ask", "агент спик").unwrap().len() > 48000, "интонация и проект");
     }
 }
