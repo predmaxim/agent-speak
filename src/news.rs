@@ -132,7 +132,7 @@ impl Board {
         self.drop_asks(session, &[Class::Question, Class::Now]);
     }
 
-    fn drop_asks(&mut self, session: &str, classes: &[Class]) {
+    pub fn drop_asks(&mut self, session: &str, classes: &[Class]) {
         if self.asked.as_ref().is_some_and(|(q, _)| q.session == session) {
             self.asked = None;
         }

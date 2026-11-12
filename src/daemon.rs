@@ -1023,6 +1023,13 @@ impl State {
             limits::clear_hints(&self.hints, |_| false); // не следим — и подсказок агентам нет
             self.limits_bad = false;
         }
+        if !self.cfg.agent_inbox {
+            // заметки агентов выключили — уже пришедшие гаснут сразу, а не с промптом пользователя
+            for id in self.registry.clear_notes() {
+                self.board.drop_asks(&id, &[Class::Now]);
+            }
+            self.push_agents();
+        }
         self.sync_quiet_why(); // могла включиться приватность при показе экрана
         self.warn_limits((self.now_secs)()); // предупреждение выключили — гаснет сразу, а не со сторожем
         self.purge(); // могла включиться тишина
@@ -4535,6 +4542,17 @@ mod tests {
         assert_eq!(v(&st), true);
         st.cfg.agent_inbox = false;
         assert_eq!(v(&st), false);
+    }
+
+    #[test]
+    fn turning_agent_inbox_off_drops_the_notes_already_there() {
+        let mut st = test_state();
+        with_agents(&mut st, &["s", "t"]);
+        st.inbox("s", 0, "нужен токен").unwrap();
+        assert_eq!((st.registry.waiting(), st.board.has("s", Class::Now)), (1, true));
+        st.on_msg(Msg::Set { key: "agent_inbox".into(), value: false.into() });
+        assert_eq!(st.registry.get("s").unwrap().note, "", "пометка у агента гаснет сразу, а не с промптом пользователя");
+        assert_eq!((st.registry.waiting(), st.board.has("s", Class::Now)), (0, false), "и не звучит после выключения");
     }
 
     #[test]
