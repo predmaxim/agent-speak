@@ -2047,7 +2047,7 @@ impl State {
         let now = (self.now_secs)();
         // журнал: смена фактов и перерыв в снимках — по ним видно, почему Ома решила «он тут»
         // момент простоя сдвигает каждый ввод — смена фактов без него, в журнале он есть
-        let rest = format!("блок {}, микрофон {}, камера {}, видео {}, наушники {:?}", f.locked, f.mic, f.camera, f.video, f.buds);
+        let rest = format!("блок {}, микрофон {}, видео {}, наушники {:?}", f.locked, f.mic, f.video, f.buds);
         let facts = format!("{}, {rest}", if f.idle_since == 0 { "ввод сейчас" } else { "ввода нет" });
         let gap = f.at.saturating_sub(self.presence_at);
         if self.presence_at != 0 && gap > 45 {
@@ -2849,7 +2849,7 @@ mod tests {
     #[test]
     fn urgent_speaks_while_busy_not_while_away() {
         let mut st = test_state();
-        snap(&mut st, serde_json::json!({"at": 1000, "camera": true}));
+        snap(&mut st, serde_json::json!({"at": 1000, "mic": true}));
         st.board.push(nw("f", Class::Final, "Фича готова.", 1));
         st.board.push(nw("u", Class::Urgent, "Агент завис, посмотри сам.", 2));
         st.speak_news();

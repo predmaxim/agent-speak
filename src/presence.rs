@@ -8,7 +8,7 @@ pub const AWAY_AFTER: u64 = 600;
 pub const BACK_AFTER: u64 = 180; // отсутствие не короче — приветствие и повтор
 pub const BUSY_FOR: u64 = 900;
 pub const AWAY_GRACE: u64 = 60;
-/// Микрофон, камера или видео заняты не дольше этого — не звонок и не видео: их конец не значит «он тут».
+/// Микрофон или видео заняты не дольше этого — не звонок и не видео: их конец не значит «он тут».
 pub const CALL_MIN: u64 = 10;
 pub const STALE_AFTER: u64 = 90; // сервис пишет снимок раз в 30 с; старше — фактов нет
 pub const FILE: &str = "predmaxim-presence.json"; // в $XDG_RUNTIME_DIR
@@ -44,7 +44,6 @@ pub struct Facts {
     pub idle_since: u64,
     pub locked: bool,
     pub mic: bool,
-    pub camera: bool,
     pub video: bool,
     #[serde(deserialize_with = "buds_from")]
     pub buds: Buds,
@@ -63,7 +62,7 @@ pub struct Presence {
     busy_until: u64,
     away: Option<u64>,       // «я отойду» / «Ты тут?» без ответа — до ввода позже этого срока
     buds_dropped: bool,      // наушники вынуты — «не уверена» до ввода
-    busy_from: u64,          // с какого снимка микрофон, камера или видео заняты; 0 — свободны
+    busy_from: u64,          // с какого снимка микрофон или видео заняты; 0 — свободны
 }
 
 impl Presence {
@@ -76,7 +75,7 @@ impl Presence {
         if f.locked || self.away.is_some() {
             return Mode::Away;
         }
-        if f.mic || f.camera || f.video || self.busy_until > now {
+        if f.mic || f.video || self.busy_until > now {
             return Mode::Busy;
         }
         if self.buds_dropped {
@@ -113,7 +112,7 @@ impl Presence {
             // голос двигает last_input вперёд, простой клавиатуры его не откатывает
             self.last_input = self.last_input.max(f.idle_since);
         }
-        let busy = f.video || f.mic || f.camera;
+        let busy = f.video || f.mic;
         if busy && self.busy_from == 0 {
             self.busy_from = now;
         }
@@ -256,13 +255,18 @@ mod tests {
         f.locked = true;
         p.apply(f, 1700);
         assert_eq!(p.mode(1700), Mode::Away);
-        for (mic, camera) in [(true, false), (false, true)] {
-            let mut f = facts(1700, 1000);
-            f.mic = mic;
-            f.camera = camera;
-            p.apply(f, 1700);
-            assert_eq!(p.mode(1700), Mode::Busy);
-        }
+        let mut f = facts(1700, 1000);
+        f.mic = true;
+        p.apply(f, 1700);
+        assert_eq!(p.mode(1700), Mode::Busy);
+    }
+
+    #[test]
+    fn camera_is_not_a_call() {
+        // звонок — микрофон; «camera» из снимка старого сервиса присутствия ничего не значит
+        let mut p = Presence::default();
+        p.apply(parse_facts(r#"{"at":1000,"idle_since":0,"camera":true}"#).unwrap(), 1000);
+        assert_eq!(p.mode(1000), Mode::Here);
     }
 
     #[test]
