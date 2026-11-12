@@ -11,11 +11,12 @@ import sys
 import time
 import traceback
 
-from . import link, memory
-from .context import foreign_capture, locked, mic_outputs, muted, on_ac
+from . import link, memory, wake
+from .context import MIC_WATCH, foreign_capture, locked, mic_outputs, muted, on_ac
 from .conversation import Conversation
 from .orders import Orders
 from .turn import SmartTurn
+from .wake import strip_wake
 
 
 def cuda_env():
@@ -71,11 +72,13 @@ def kill_children():
 
 
 async def mic_poll(oma, events, busy):
-    """Один опрос микрофона: чужой захват или mute — слух не слушает, разговор на паузе. Событие — при смене и когда флаг
-    слуха разошёлся с фактом: Ear.start сам ставит paused при mute, и mute, снятый раньше опроса, иначе оставил бы её глухой."""
+    """Одна проверка микрофона (по событию MicWatch): чужой захват или mute — слух не слушает, разговор на паузе. Событие —
+    при смене и когда флаг слуха разошёлся с фактом: Ear.start сам ставит paused при mute, и mute, снятый раньше проверки,
+    иначе оставил бы её глухой. Причина — в oma.mic_why: побудка называет её в строке состояния."""
     pid = oma.ear.pid  # до await: слух мог переоткрыться, а снимок pactl — со старым pw-record
-    now = pid is not None and (foreign_capture(await asyncio.to_thread(mic_outputs), {pid})
-                               or await asyncio.to_thread(muted, oma.ear.target))
+    foreign = pid is not None and foreign_capture(await asyncio.to_thread(mic_outputs), {pid})
+    mute = pid is not None and not foreign and await asyncio.to_thread(muted, oma.ear.target)
+    oma.mic_why, now = "busy" if foreign else "muted" if mute else "", foreign or mute
     if now != busy or oma.ear.paused != now:
         events.put_nowait(("mic", now))
     return now
@@ -107,7 +110,13 @@ class Oma:
         self.limit = ""    # фраза службы «лимит почти кончился» (limit); "" — окна у порога нет
         self.notified = (None, 0.0)  # последнее уведомление: текст, время
         self.ask_id = None  # id набранной реплики из окна, пока команда ask идёт: её строка в чате вернётся с ним
-        self.ear_sent = ("", None)  # (вход, quiet_at) последней строки ear службе: как у неё до первой строки
+        self.ear_sent = ("", None, "off")  # (вход, quiet_at, побудка) последней строки ear службе: как у неё до первой строки
+        self.wake_on = False  # служба разрешила слово-побудку ({"do": "wake"}): настройка, не тихо, экран не заблокирован
+        self.ac = None        # от сети (power, раз в 30 с); побудка — только от сети
+        self.has_model = None  # модель Vosk и колесо стоят (wake.available) — узнаётся при первой побудке
+        self.no_mic = False   # для побудки нет встроенного микрофона
+        self.mic_why = ""     # микрофон: "" | busy (пишет другой) | muted — по последней проверке MicWatch
+        self.mic_now = False  # последняя проверка: слух не слушает
 
     def _show(self, text):
         self.emit({"bubble": {"id": f"oma-{os.getpid()}-{self.n}", "who": "Ома", "text": text, "kind": "oma", "append": True}})
@@ -189,6 +198,12 @@ class Oma:
             await self.act(c.cancel())
         elif do == "warm":  # демон прогревает слух до окна ответа: whisper не грузится при открытом микрофоне
             self.warm()
+        elif do == "wake":  # служба: побудку можно (настройка, не тихо, экран не заблокирован) или нельзя
+            self.wake_on = bool(cmd.get("on"))
+            await self._wake_sync()
+        elif do == "rewire":  # наушники вставили или вынули: в динамиках её голос побудкой не слушается — пересчитать
+            if getattr(self.ear, "waking", False):
+                await self._wake_open()
         elif do == "listen":
             answered = False
             try:
@@ -330,6 +345,15 @@ class Oma:
         elif kind == "mic":
             self.ear.paused = ev[1]  # микрофон пишет другой (voxtype и т. п.) — кадры не слушаем
             await self.act(c.mic_busy(ev[1]))
+        elif kind == "mic_check":  # MicWatch: событие pactl — проверить захват и mute
+            self.ear.mic_pending = False
+            self.mic_now = await mic_poll(self, self.events, self.mic_now)
+            self._ear_line()
+        elif kind == "ac":  # power, раз в 30 с: от сети ли — побудка открывает или закрывает слух
+            self.ac = ev[1]
+            await self._wake_sync()
+        elif kind == "wake":
+            await self._woke(ev[1], ev[2])
         elif kind == "opened":
             self.emit({"chat": {"key": ev[1], "was": ev[2], "messages": self.history}})
         elif kind == "error":
@@ -370,7 +394,8 @@ class Oma:
         if len(parts) < 2 or None in parts:  # None — фраза с её голосом в начале: целиком эхо вернулось бы
             return text
         try:
-            whole = (await (pre[1] if pre and pre[0] == len(parts) else self.hear(b"".join(parts)))).strip()
+            # целиком — снова с обращением: разговор с побудки начинается с «Ома, …»
+            whole = strip_wake(await (pre[1] if pre and pre[0] == len(parts) else self.hear(b"".join(parts))))
         except Exception as e:
             print(f"agent_voice: реплика целиком: {e!r}", file=sys.stderr, flush=True)
             return text
@@ -418,12 +443,66 @@ class Oma:
         """Орбу — её вход и сколько она ещё слушает: строка ear службе при смене входа или срока тишины (quiet_at).
         Длина окна — от сейчас до срока: строка уходит сразу после действия, которое его взвело."""
         q = self.conv.quiet_at
-        target = getattr(self.ear, "target", "")
-        if (target, q) == self.ear_sent:
+        target, woke = getattr(self.ear, "target", ""), self._wake_state()
+        if (target, q, woke) == self.ear_sent:
             return
-        self.ear_sent = (target, q)
+        self.ear_sent = (target, q, woke)
         left = None if q is None else max(0.0, q - self.conv.clock())
-        self.send({"cmd": "ear", "ear_in": target, "until": None if left is None else time.time() + left, "secs": left or 0.0})
+        self.send({"cmd": "ear", "ear_in": target, "until": None if left is None else time.time() + left, "secs": left or 0.0,
+                   "wake": woke})
+
+    def _model(self):
+        if self.has_model is None:  # один раз: модель ставит install.sh, а после него службу перезапускают
+            self.has_model = wake.available()
+        return self.has_model
+
+    def _wake_ready(self):
+        return self.wake_on and self.ac is not False and self._model()
+
+    def _wake_state(self):
+        """Побудка для строки состояния: on или почему нет."""
+        if not self.wake_on:
+            return "off"
+        if not self._model():
+            return "no_model"
+        if self.ac is False:
+            return "battery"
+        return "no_mic" if self.no_mic else self.mic_why or "on"
+
+    async def _wake_open(self):
+        try:
+            self.no_mic = not await self.ear.start(wake=True)
+        except Exception as e:  # модель Vosk не грузится — побудки нет, слух — как раньше
+            self.has_model = False
+            self._warn(f"слово-побудка: {e!r}")
+            await self.ear.stop()
+
+    async def _wake_sync(self):
+        """Слух в покое: открыт на «Ома», если побудка разрешена и можно, иначе закрыт; разговор слух не отдаёт."""
+        if not self.conv.active:
+            if self._wake_ready():
+                if not (self.ear.open and self.ear.waking):  # открыт и слушает имя — pw-record не трогать
+                    await self._wake_open()
+            elif self.ear.open:
+                await self.ear.stop()
+        self._ear_line()
+
+    async def _woke(self, text, at):
+        """Вторая ступень подтвердила «Ома»: «тут», «да» — «я на месте» без разговора; иначе разговор, как по клику, на том
+        же входе — фразу с именем слух распознает заново целиком (take). Безопасность поручений та же: реплика голосовая."""
+        c = self.conv
+        if c.active or not self.ear.waking or not self.wake_on or await asyncio.to_thread(locked):
+            return  # пока думала вторая ступень — клик, окно ответа, тишина или блокировка
+        print("agent_voice: слово-побудка", file=sys.stderr, flush=True)  # текст — нет: в нём бывает чужая речь
+        leave = self.brain.key.startswith("agent:")  # с Омой-помощником — в общем чате, как по клику
+        acts = c.wake(strip_wake(text))
+        if c.active:
+            await self.ear.take(at)
+            c.echo = self.ear.echo
+        await self.act(acts)
+        if c.active:
+            await self.follow(await self.general() if leave else None)
+            self.to_brain(self.brain.warm)
 
     async def act(self, acts):
         try:
@@ -440,6 +519,8 @@ class Oma:
                     self.conv.echo = getattr(self.ear, "echo", False)  # в динамиках её голос просачивается в слух
                     if not self.whisper.ready:  # от батареи: грузится по первому включению слуха
                         self.warm()
+                elif self._wake_ready():  # конец разговора — слух снова слушает имя
+                    await self._wake_open()
                 else:
                     await self.ear.stop()
             elif k == "send":
@@ -451,6 +532,8 @@ class Oma:
                 self.to_brain(self._deliver, a[1], a[2], self.conv.voiced, parts, pre, self._sound(), n, self.ask_id, turn=n)
             elif k == "presence":
                 self.send({"cmd": "presence", "state": a[1]})
+            elif k == "chime":  # побудка услышала имя
+                self.send({"cmd": "chime"})
             elif k == "interrupt":  # после отправки, что ещё в очереди: перебить ход, а не реплику до него
                 self.to_brain(self.brain.interrupt)
             elif k == "stop":  # перебивание: финалы агентов, удержанные за Омой, демон не выбрасывает
@@ -523,7 +606,7 @@ async def main():
         loop = asyncio.get_running_loop()
         whisper = Whisper()
         orders = Orders()  # один на мозг и Ому: ждущее подтверждения опасное видят оба
-        oma = Oma(Conversation(), Ear(events, whisper), Brain(events, lambda: agents, send=link.send, orders=orders, fresh=link.turn), whisper,
+        oma = Oma(Conversation(), Ear(events, whisper, wake=wake.VoskWake(), watch=MIC_WATCH), Brain(events, lambda: agents, send=link.send, orders=orders, fresh=link.turn), whisper,
                   orders=orders, events=events)
 
         def on_agents(lst):
@@ -543,6 +626,7 @@ async def main():
         async def power():
             while True:
                 ac = on_ac()
+                events.put_nowait(("ac", ac))  # побудка от сети; заодно слух на «Ома», упавший сам, поднимется
                 oma.bg(oma.ear.warm())  # VAD тёплый всегда: CPU, дёшево; первый клик не ждёт torch
                 if ac or oma.ear.open:  # от сети — тёплый; слух открыт — модель «используется»
                     oma.warm()
@@ -562,16 +646,10 @@ async def main():
                 if oma.conv.active and await asyncio.to_thread(locked):
                     events.put_nowait(("locked",))
 
-        async def mic():
-            busy = False
-            while True:
-                busy = await mic_poll(oma, events, busy)
-                await asyncio.sleep(1)
-
         reader = asyncio.StreamReader(limit=1 << 22)  # ask со вставленным логом бывает длинным
         await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
         loop.add_signal_handler(signal.SIGTERM, reader.feed_eof)  # voice_stop: как EOF
-        loops = [asyncio.create_task(keep(n, f)) for n, f in (("daemon", daemon), ("power", power), ("mic", mic), ("ticker", ticker), ("lock", lock))]
+        loops = [asyncio.create_task(keep(n, f)) for n, f in (("daemon", daemon), ("power", power), ("ticker", ticker), ("lock", lock))]
         await oma.act([("state", oma.conv.state)])  # демон считает Ому «off», пока она не скажет о себе
         await serve(oma, events, reader)
     finally:  # pw-record и claude не должны остаться сиротами

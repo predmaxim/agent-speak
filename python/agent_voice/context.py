@@ -1,6 +1,7 @@
 """Контекст для Омы: хвост транскрипта агента, выделение, захват микрофона, питание."""
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -104,13 +105,14 @@ def buds_out(snapshot: str, now: float) -> bool:
         return False
 
 
-def pick_mic(source: str, sink: str, sources: str, out: bool) -> tuple:
+def pick_mic(source: str, sink: str, sources: str, out: bool, wake: bool = False) -> tuple:
     """Вход для слуха Омы, есть ли в нём её голос и вход с эхоподавлением на время её речи: (имя, echo, aec). Сырой микрофон ноутбука, как у voxtype: шумодав
     (mic_denoise) под вентиляторами вырезает слова, эхоподавление webrtc (mic_aec) их портит — whisper слышит «Играет
     музыка» вместо речи. Говорит в динамики (наушников нет или вынуты, out) — её голос в микрофоне, echo: эхо отсекает
     разговор по тексту, а пока она говорит, слух берёт mic_aec: её голос там вырезан, и перебив слышно.
-    Гарнитура в ушах — её микрофон: "" — вход по умолчанию."""
-    if source.startswith("bluez_") and not out:
+    Гарнитура в ушах — её микрофон: "" — вход по умолчанию. Слух на «Ома» (wake) — только встроенный: постоянная
+    запись с Bluetooth держала бы наушники в режиме гарнитуры (моно, музыка портится); нет его — ""."""
+    if source.startswith("bluez_") and not out and not wake:
         return "", False, ""
     speakers = out or not sink.startswith("bluez_")
     names = [p[1] for p in (l.split("\t") for l in sources.splitlines()) if len(p) > 1]
@@ -118,9 +120,9 @@ def pick_mic(source: str, sink: str, sources: str, out: bool) -> tuple:
     return next((n for n in names if n.startswith("alsa_input.")), ""), speakers, aec
 
 
-def mic_target(run=subprocess.run, out=None) -> tuple:
+def mic_target(run=subprocess.run, out=None, wake=False) -> tuple:
     """Куда слушать — по тому, куда Ома говорит (pick_mic); out=True — она говорит в динамики («Ты тут?» без ответа
-    в наушники); сбой — вход по умолчанию."""
+    в наушники); wake — слух на «Ома»; сбой — вход по умолчанию (для побудки — никакого)."""
     try:
         if out is None:
             try:
@@ -129,9 +131,15 @@ def mic_target(run=subprocess.run, out=None) -> tuple:
             except OSError:
                 out = False  # сервиса присутствия нет
         q = lambda *a: run(["pactl", *a], capture_output=True, text=True, timeout=2).stdout
-        return pick_mic(q("get-default-source").strip(), q("get-default-sink").strip(), q("list", "short", "sources"), out)
+        return pick_mic(q("get-default-source").strip(), q("get-default-sink").strip(), q("list", "short", "sources"), out, wake)
     except Exception:
         return "", bool(out), ""
+
+
+# MicWatch: pactl subscribe, пока слух открыт, — захват (source-output), mute и вход по умолчанию (source, server)
+# по событиям, а не опросом раз в секунду (слух на «Ома» открыт всегда)
+MIC_WATCH = ["pactl", "subscribe"]
+MIC_EVENT = re.compile(r"'(?:new|remove)' on source-output|'change' on (?:source|server) ")
 
 
 def muted(target: str, run=subprocess.run) -> bool:
