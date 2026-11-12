@@ -28,13 +28,15 @@ pub struct Config {
     pub hung_after: u64,
     /// процент лимита, с которого Ома считает прогноз и подсказывает агентам
     pub limit_threshold: u64,
+    /// пауза музыки (MPRIS), пока Ома говорит и слушает: плагин ставит на паузу игравшее и продолжает его после
+    pub music_pause: bool,
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config { speaker: "xenia".into(), rate: "medium".into(),
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: true, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
-            orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95 }
+            orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95, music_pause: true }
     }
 }
 
@@ -104,6 +106,7 @@ impl Config {
             "watch_every" if in_range(value, 15, 3600) => self.watch_every = value.as_u64().unwrap(),
             "hung_after" if in_range(value, 2, 240) => self.hung_after = value.as_u64().unwrap(),
             "limit_threshold" if in_range(value, 50, 100) => self.limit_threshold = value.as_u64().unwrap(),
+            "music_pause" if value.is_boolean() => self.music_pause = value.as_bool().unwrap(),
             _ => return false,
         }
         true
@@ -212,6 +215,15 @@ mod tests {
         assert!(!c.set("progress_digest", &json!("true")));
         assert!(c.orb_over_fullscreen && c.set("orb_over_fullscreen", &json!(false)) && !c.orb_over_fullscreen);
         assert!(!c.set("orb_corner", &json!("top-left")));
+    }
+
+    #[test]
+    fn music_pause_on_by_default_and_set() {
+        use serde_json::json;
+        let mut c = Config::default();
+        assert!(c.music_pause && parse("speaker = \"baya\"").unwrap().music_pause, "старый файл без ключа — пауза музыки включена");
+        assert!(c.set("music_pause", &json!(false)) && !c.music_pause);
+        assert!(!c.set("music_pause", &json!("false")));
     }
 
     #[test]

@@ -222,6 +222,8 @@ struct State {
     progress: HashMap<String, (String, Instant)>, // сессия → текст хода с прошлого пересказа, время первого предложения
     listen_after: Option<(&'static str, String)>, // звучат новости: по их концу Ома слушает ответ — (kind, сказанное)
     listen_at: Option<Instant>, // новости смолкли: окно ответа — когда доиграет хвост pw-cat
+    listen_sent: bool,          // listen ушёл Оме, её voice_state ещё нет: звук занят (media_hold) и на этом стыке
+    hold_sent: bool,            // media_hold последней разосланной строки состояния
     presence: Presence,         // слушает ли пользователь: снимки сервиса оболочки и его слова
     here_ask: Option<HereAsk>,  // «Ты тут?» спрошен: Ома слушает с начала его звука весь HERE_WAIT
     seen_mode: Option<Mode>,    // режим присутствия прошлого тика — смену пишем в журнал
@@ -416,6 +418,8 @@ pub fn run() {
         progress: HashMap::new(),
         listen_after: None,
         listen_at: None,
+        listen_sent: false,
+        hold_sent: false,
         presence: Presence::default(),
         here_ask: None,
         seen_mode: None,
@@ -873,8 +877,8 @@ impl State {
             // волна 2 (C): спутники
             orb_satellites: false,
             // волна 2 (D): пауза музыки
-            media_hold: false,
-            music_pause: false,
+            media_hold: self.media_hold(),
+            music_pause: self.cfg.music_pause,
             // волна 2 (E): лимиты
             limit: "",
             limit_warn: false,
@@ -932,6 +936,13 @@ impl State {
         }
     }
 
+    /// Звук занят Омой — плагин держит музыку на паузе: она говорит, идёт разговор или окно ответа, окно назначено после
+    /// новостей (listen_at — только при listen_after) или listen ушёл, а её voice_state нет. На паузе пользователя она
+    /// молчит — назначенное окно звук не держит.
+    fn media_hold(&self) -> bool {
+        self.shared.busy.load(Ordering::SeqCst) || self.oma.talking || self.listen_sent || (self.listen_after.is_some() && !self.user_paused())
+    }
+
     /// Состояние всем подписчикам.
     fn trouble(&self) -> usize {
         if self.cfg.agents_voice { self.watch.trouble() } else { 0 }
@@ -942,6 +953,7 @@ impl State {
         self.out_sent = self.out();
         self.waiting_sent = self.registry.waiting();
         self.trouble_sent = self.trouble();
+        self.hold_sent = self.media_hold();
         self.broadcast_line(&line);
     }
 
@@ -1346,7 +1358,9 @@ impl State {
             eprintln!("agent-speak: Ома не запущена, команда пропущена: {action}");
             return;
         };
-        if let Err(e) = w.write_all(format!("{action}\n").as_bytes()) {
+        let written = w.write_all(format!("{action}\n").as_bytes());
+        self.listen_sent |= written.is_ok() && action["do"] == "listen"; // Ома отвечает на каждый listen строкой voice_state
+        if let Err(e) = written {
             eprintln!("agent-speak: Ома не принимает команды: {e}");
             if let Some(c) = &mut self.oma.child {
                 if e.kind() == std::io::ErrorKind::WouldBlock {
@@ -1378,6 +1392,7 @@ impl State {
         }
         self.oma.state = "off".into();
         self.oma.talking = false;
+        self.listen_sent = false; // ответа на listen от упавшей не будет
         self.hold(false);
         self.purge();
         self.oma.retry_at = Some(now + Duration::from_secs(wait));
@@ -1493,6 +1508,10 @@ impl State {
             }
         }
         self.listen_if_due(now);
+        // окно ответа назначено или снято без звука и без её ответа (listen не ушёл) — музыке это слышно сразу
+        if self.media_hold() != self.hold_sent {
+            self.broadcast();
+        }
     }
 
     fn on_msg(&mut self, m: Msg) {
@@ -1525,6 +1544,7 @@ impl State {
                 self.hold(matches!(state.as_str(), "thinking" | "speaking"));
                 self.oma.state = state;
                 self.oma.talking = talking;
+                self.listen_sent = false;
                 self.purge();
             }
             Msg::Oma { action } => self.oma_send(&action),
@@ -1954,6 +1974,8 @@ mod tests {
             progress: HashMap::new(),
             listen_after: None,
             listen_at: None,
+            listen_sent: false,
+            hold_sent: false,
             presence: Presence::default(),
             here_ask: None,
             seen_mode: None,
@@ -3616,6 +3638,64 @@ mod tests {
         st.cfg.quiet_override = "on".into();
         st.apply(); // тишина настала раньше, чем новость зазвучала: она выброшена
         assert!(st.listen_after.is_none() && texts(&st).is_empty());
+    }
+
+    #[test]
+    fn media_hold_from_news_to_end_of_answer_window() {
+        // пауза музыки: звук занят Омой от новости до конца окна ответа — и на стыке, пока listen ушёл, а её voice_state нет
+        let h = TempHome::new("oma-hold");
+        std::fs::create_dir_all(&h.dir).unwrap();
+        let (mut st, env) = env_state();
+        st.cfg.agents_voice = true;
+        with_agents(&mut st, &["s"]);
+        st.voice_cmd = vec!["sh".into(), "-c".into(), "cat > /dev/null".into()];
+        st.oma_spawn();
+        let line = |st: &State| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap();
+        assert_eq!((&line(&st)["media_hold"], &line(&st)["music_pause"]), (&false.into(), &true.into()));
+        let mut r = sub(&mut st);
+        drain(&mut r);
+        let holds = |r: &mut BufReader<UnixStream>| -> Vec<bool> {
+            drain(r).into_iter().filter(|l| l.get("running").is_some()).map(|l| l["media_hold"] == true).collect()
+        };
+        st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
+        st.tick();
+        assert_eq!(holds(&mut r).last(), Some(&true), "новость в очереди — музыка встаёт до её звука");
+        heard(&mut st, &env); // прозвучала, смолкла — окно ответа сразу: listen ушёл Оме
+        assert!(st.listen_after.is_none() && line(&st)["media_hold"] == true, "её ответа на listen ещё нет — музыка не вклинивается");
+        st.on_msg(Msg::VoiceState { state: "listening".into(), talking: true });
+        st.on_msg(Msg::VoiceState { state: "idle".into(), talking: false });
+        assert_eq!(holds(&mut r), [true, false], "окно закрылось — музыка снова играет");
+        st.on_msg(Msg::Set { key: "music_pause".into(), value: false.into() });
+        assert_eq!(line(&st)["music_pause"], false);
+    }
+
+    #[test]
+    fn media_hold_released_when_listen_cannot_reach_oma() {
+        // Омы нет — ответа на listen не будет: флаг не залипает, строка со снятой паузой уходит из того же tick
+        let (mut st, env) = env_state();
+        st.cfg.agents_voice = true;
+        with_agents(&mut st, &["s"]);
+        let mut r = sub(&mut st);
+        drain(&mut r);
+        st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
+        st.tick();
+        heard(&mut st, &env);
+        let last = drain(&mut r).into_iter().filter(|l| l.get("running").is_some()).last().unwrap();
+        assert_eq!(last["media_hold"], false);
+    }
+
+    #[test]
+    fn media_hold_not_while_user_paused() {
+        // пользователь поставил её на паузу: она молчит — новость, вставшая в очередь, музыку не держит
+        let mut st = test_state();
+        st.cfg.agents_voice = true;
+        with_agents(&mut st, &["s"]);
+        st.on_msg(Msg::Pause);
+        st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
+        st.tick();
+        assert!(st.listen_after.is_some() && !st.media_hold());
+        st.on_msg(Msg::Pause);
+        assert!(st.media_hold(), "сняла паузу — новость зазвучит");
     }
 
     /// Разрешение агенту id дали в терминале: хука нет, файл сессии — «работает» и новее уведомления.
