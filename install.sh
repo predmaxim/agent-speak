@@ -45,24 +45,27 @@ ST=$DATA/smart-turn-v3.2-cpu.onnx
     echo "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f  $ST.tmp" | sha256sum -c --quiet && mv "$ST.tmp" "$ST"
 } || { rm -f "$ST.tmp"; echo "Smart Turn не скачался — Ома будет ждать паузу" >&2; }
 
-# Хук Claude Code «вызов инструмента не отработал» — орб «поник» (README, «Хуки»). Дописывается один раз: есть команда,
-# что кончается на «agent-speak hook post-tool-use-failure» (и вписанная руками без пути), — файл не трогается: второй
-# хук считал бы каждый сбой дважды; чужие хуки и прочие настройки остаются. Работающие сессии подхватывают его сами.
+# Хуки Claude Code, которые install.sh ставит сам (README, «Хуки»): PostToolUseFailure — «вызов инструмента не отработал»,
+# орб «поник»; SessionStart — строка агенту, как писать Оме (`agent-speak note`). Каждый дописывается один раз: есть
+# команда, что кончается на «agent-speak hook <вид>» (и вписанная руками без пути), — файл не трогается: второй хук считал
+# бы каждый сбой дважды и дважды печатал бы строку; чужие хуки и прочие настройки остаются. Работающие сессии подхватывают их сами.
 CS=$(realpath -m ~/.claude/settings.json)
-HOOK="$HOME/.local/bin/agent-speak hook post-tool-use-failure"
 if [[ -d ${CS%/*} ]]; then
   [[ -s $CS ]] || echo '{}' >"$CS"
-  # jq -e: 0 — такой хук уже есть, 1 — нет, иное — файл не читается (его правят руками)
-  rc=0
-  jq -e '[.hooks.PostToolUseFailure[]?.hooks[]?.command // empty | select(test("agent-speak hook post-tool-use-failure\\s*$"))] | length > 0' "$CS" >/dev/null || rc=$?
-  if ((rc == 1)); then
-    # права прежние ещё до записи (в settings.json бывают токены в env): новый файл иначе получил бы права по umask
-    install -m "$(stat -c %a "$CS")" /dev/null "$CS.agent-speak.tmp"
-    jq --arg c "$HOOK" '.hooks.PostToolUseFailure += [{"hooks": [{"type": "command", "command": $c}]}]' "$CS" >"$CS.agent-speak.tmp"
-    mv "$CS.agent-speak.tmp" "$CS"
-  elif ((rc != 0)); then
-    echo "$CS не читается — хук post-tool-use-failure не добавлен, впиши его сам (README, «Хуки»)" >&2
-  fi
+  for h in PostToolUseFailure:post-tool-use-failure SessionStart:session-start; do
+    ev=${h%%:*} kind=${h#*:}
+    # jq -e: 0 — такой хук уже есть, 1 — нет, иное — файл не читается (его правят руками)
+    rc=0
+    jq -e --arg e "$ev" --arg k "agent-speak hook $kind\\s*\$" '[.hooks[$e][]?.hooks[]?.command // empty | select(test($k))] | length > 0' "$CS" >/dev/null || rc=$?
+    if ((rc == 1)); then
+      # права прежние ещё до записи (в settings.json бывают токены в env): новый файл иначе получил бы права по umask
+      install -m "$(stat -c %a "$CS")" /dev/null "$CS.agent-speak.tmp"
+      jq --arg e "$ev" --arg c "$HOME/.local/bin/agent-speak hook $kind" '.hooks[$e] += [{"hooks": [{"type": "command", "command": $c}]}]' "$CS" >"$CS.agent-speak.tmp"
+      mv "$CS.agent-speak.tmp" "$CS"
+    elif ((rc != 0)); then
+      echo "$CS не читается — хук $kind не добавлен, впиши его сам (README, «Хуки»)" >&2
+    fi
+  done
 fi
 
 systemctl --user daemon-reload
