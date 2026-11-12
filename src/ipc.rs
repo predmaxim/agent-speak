@@ -42,6 +42,9 @@ pub enum Msg {
     /// Ответ агенту от Омы (`agent-speak tell`): запрос с ответом `{"ok": метка нажатого пункта}` или `{"err": …}`;
     /// идёт в очередь потока действий, той же, что у сторожа. expect — метка варианта, пусто — не сверять.
     Tell { session: String, option: usize, text: String, #[serde(default)] expect: String },
+    /// Черновик агенту от Омы (`agent-speak draft`): текст в поле ввода без Enter — отправит пользователь. Свой вариант,
+    /// а не флаг Tell: служба старше него не разберёт строку и не отправит черновик как задание с Enter. Ответ — как у Tell.
+    Draft { session: String, text: String },
     /// Средний клик по орбу: сводка агентов одной фразой (вслух и пузырём Омы); что-то звучит — стоп, как `read`.
     Summary,
     /// `agent-speak show`: агента (session; пусто — следующий ждущий) — на экран, в терминал ничего не пишется. Запрос с
@@ -137,6 +140,8 @@ mod tests {
         assert!(matches!(presence, Msg::Presence { ref state } if state == "busy"));
         let tell = serde_json::from_str::<Msg>("{\"cmd\":\"tell\",\"session\":\"s\",\"option\":1,\"text\":\"\"}").unwrap();
         assert!(matches!(tell, Msg::Tell { ref session, option: 1, ref expect, .. } if session == "s" && expect.is_empty()), "метка — по желанию");
+        let draft = serde_json::from_str::<Msg>("{\"cmd\":\"draft\",\"session\":\"s\",\"text\":\"т\"}").unwrap();
+        assert!(matches!(draft, Msg::Draft { ref session, ref text } if session == "s" && text == "т"));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"summary\"}").unwrap(), Msg::Summary));
         let show = serde_json::from_str::<Msg>("{\"cmd\":\"show\",\"agent\":\"s\"}").unwrap();
         assert!(matches!(show, Msg::Show { ref agent, quiet: false } if agent == "s"));

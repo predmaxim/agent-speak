@@ -830,6 +830,21 @@ pub(crate) fn answer(conn: &UnixStream, line: &str) -> bool {
     w.write_all(line.as_bytes()).is_ok()
 }
 
+/// Запись в терминал агента от Омы (tell, draft) — в очередь потока действий: ждёт исхода и пишет его клиенту;
+/// false — клиент ушёл.
+fn queued(tx: &Sender<Event>, conn: &UnixStream, act: impl FnOnce() -> Result<String, String> + Send + 'static) -> bool {
+    let (rtx, rrx) = mpsc::channel();
+    let work = move || {
+        let _ = rtx.send(act());
+    };
+    let reply = match tx.send(Event::Tell(Box::new(work))).ok().and_then(|()| rrx.recv().ok()) {
+        Some(Ok(chosen)) => serde_json::json!({"ok": chosen}),
+        Some(Err(e)) => serde_json::json!({"err": e}),
+        None => serde_json::json!({"err": "служба не передала: поток действий не работает"}),
+    };
+    answer(conn, &format!("{reply}\n"))
+}
+
 /// Одно соединение: команды построчно до закрытия (CLI и хуки — одна строка).
 /// subscribe — копия потока уходит в основной цикл подписчиком, чтение команд продолжается.
 // ponytail: поток на соединение без лимита — клиенты только свои (CLI, хуки, плагин)
@@ -845,24 +860,19 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
         match serde_json::from_str::<Msg>(&line) {
             // ответ лёг бы между строками рассылки, а его таймаут записи (общий у клонов сокета) — на подписчика:
             // запрос не исполняется, отказ пишется с таймаутом подписки
-            Ok(Msg::Tell { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. }) if subscribed => {
+            Ok(Msg::Tell { .. } | Msg::Draft { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. }) if subscribed => {
                 let err = serde_json::json!({"err": "запрос — отдельным соединением: это подписано на рассылку"});
                 if (&conn).write_all(format!("{err}\n").as_bytes()).is_err() {
                     break;
                 }
             }
             Ok(Msg::Tell { session, option, text, expect }) => {
-                // ответ агенту — в очередь потока действий; эта строка ждёт исхода и пишет его клиенту
-                let (rtx, rrx) = mpsc::channel();
-                let work = move || {
-                    let _ = rtx.send(crate::orders::tell(&session, option, &text, &expect));
-                };
-                let reply = match tx.send(Event::Tell(Box::new(work))).ok().and_then(|()| rrx.recv().ok()) {
-                    Some(Ok(chosen)) => serde_json::json!({"ok": chosen}),
-                    Some(Err(e)) => serde_json::json!({"err": e}),
-                    None => serde_json::json!({"err": "служба не передала: поток действий не работает"}),
-                };
-                if !answer(&conn, &format!("{reply}\n")) {
+                if !queued(&tx, &conn, move || crate::orders::tell(&session, option, &text, &expect)) {
+                    break;
+                }
+            }
+            Ok(Msg::Draft { session, text }) => {
+                if !queued(&tx, &conn, move || crate::orders::draft(&session, &text).map(|()| String::new())) {
                     break;
                 }
             }
@@ -2090,8 +2100,8 @@ impl State {
                     eprintln!("agent-speak: later: {e}");
                 }
             }
-            // приходят как Event::Subscribe, Tell, Turn, Show, Note и Permission (с подписанного соединения запрос не держится)
-            Msg::Subscribe | Msg::Tell { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. } | Msg::Permission { .. } => {}
+            // приходят как Event::Subscribe, Tell (и Draft), Turn, Show, Note и Permission (с подписанного соединения запрос не держится)
+            Msg::Subscribe | Msg::Tell { .. } | Msg::Draft { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. } | Msg::Permission { .. } => {}
         }
         if changes {
             self.broadcast();
@@ -3170,8 +3180,13 @@ mod tests {
         w.write_all(b"{\"cmd\":\"tell\",\"session\":\"no-such-session\",\"option\":0,\"text\":\"hi\"}\n").unwrap();
         let Ok(Event::Tell(work)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("tell не дошёл до цикла") };
         work(); // так его исполнит поток действий
-        let reply = next(&mut reader(client));
-        assert_eq!(reply["err"], "агента нет среди живых");
+        let mut r = reader(client);
+        assert_eq!(next(&mut r)["err"], "агента нет среди живых");
+        // черновик — та же очередь, свой исход
+        w.write_all("{\"cmd\":\"draft\",\"session\":\"no-such-session\",\"text\":\"hi\"}\n".as_bytes()).unwrap();
+        let Ok(Event::Tell(work)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("draft не дошёл до цикла") };
+        work();
+        assert_eq!(next(&mut r)["err"], "агента нет среди живых");
     }
 
     #[test]

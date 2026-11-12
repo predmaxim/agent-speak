@@ -1,7 +1,8 @@
 """Задания и ответы агентам от Омы: голосом ничего не уходит без подтверждения отдельной репликой — обычное после
 «да, передай», опасное после «подтверждаю …». Совпадение проверяет код по распознанному тексту, не модель: модель
 могла бы «услышать» подтверждение в ослышке или принять за него «продолжай» (так и было 2026-10-29).
-Передаёт CLI `agent-speak tell | launch | projects | later` — исход мозгу нужен сразу."""
+Передаёт CLI `agent-speak tell | launch | projects | later` — исход мозгу нужен сразу. Черновик (`agent-speak draft`:
+текст в поле ввода агента без Enter) подтверждения не ждёт — агенту ничего не уходит, отправляет пользователь."""
 import asyncio
 import json
 import os
@@ -163,10 +164,12 @@ class Orders:
             return f"Не передано: {out}. Скажи пользователю коротко, что не вышло."
         return ok_reply + (f" Нажат пункт «{out}» — назови его пользователю." if out and args[0] == "tell" else "")  # tell: метка с экрана
 
-    async def tell(self, entry, text, gist, option=0):
+    async def tell(self, entry, text, gist, option=0, draft=False):
         n, p, ask = self.n, entry["project"], asked(entry)
         if entry.get("chat"):  # чат Orca: CLI Orca пишет только в терминалы — спрашивать «да, передай» не о чем
             return f"Не передано: {p} — {CHAT}. Скажи пользователю коротко."
+        if draft:
+            return await self._draft(entry, text, option, n)
         d = self.gate(text, ask, option)  # до чтения экрана: по реплике хода, в котором мозг вызвал tell
         item, question, also = chosen(ask, option), f"Передать проекту {p}: {gist}?", ""
         expect = item.split(" — ")[0]  # метка варианта, как её видел мозг: tell жмёт, только если в вызове агента та же
@@ -186,6 +189,21 @@ class Orders:
                                  f"Передано проекту {p}. Скажи пользователю одной фразой, кому и что: "
                                  f"«{told} проекту {p}: …» — смысл, не текст задания.",
                                  question, "передай", shown)
+
+    async def _draft(self, entry, text, option, n):
+        """Черновик: текст в поле ввода агента без Enter — агенту ничего не уходит, отправит пользователь сам, поэтому без
+        «да, передай». Пункт меню черновиком не бывает: цифра — уже выбор."""
+        p = entry["project"]
+        if option:
+            return "Не вставлено: черновик — только текст, вариант меню — уже выбор: его передают без draft."
+        if n != self.n:  # прерванный ход ничего не пишет
+            return "Не вставлено: ход прерван новой репликой пользователя."
+        ok, out = await self.run("draft", entry["id"], text)
+        if not ok:
+            return f"Не вставлено: {out}. Скажи пользователю коротко, что не вышло."
+        wrote = gendered("Написал{|а}", self.gender)
+        return (f"Вставлено в поле ввода {p}, не отправлено: Enter нажмёт пользователь. Скажи одной фразой: "
+                f"«{wrote} {p}, отправишь сам» — без текста черновика.")
 
     async def launch(self, path, task, gist, where="orca"):
         name, started = _name(path), gendered("Запустил{|а}", self.gender)
