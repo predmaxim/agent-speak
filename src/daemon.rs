@@ -795,6 +795,10 @@ impl State {
             }
             // новости выброшены — окно ответа по чужой речи не откроется, невыпущенный «Ты тут?» не прозвучит
             (self.listen_after, self.listen_at) = (None, None);
+            // тишина выбросила часть «Ты тут?» — вопрос снят целиком: дозвучавший остаток не откроет микрофон в тишине
+            if here > 0 && matches!(self.here_ask, Some(HereAsk::Queued(_))) {
+                self.here_ask = None;
+            }
         } else if !self.cfg.agents_voice {
             self.board.retain_classes(&[]); // за агентами не следим — о них ни слова
         }
@@ -4118,14 +4122,15 @@ mod tests {
         st.on_dropped("here");
         st.on_dropped("here");
         assert_eq!(st.here_ask, None);
-        // первое у потока ещё не прозвучало, второе выбросила тишина — первое прозвучит: ждать его
+        // первое у потока ещё не прозвучало, второе выбросила тишина — вопрос снят целиком, как на main:
+        // дозвучавшее первое не открывает микрофон в тишине
         let (mut st, _env, _now) = asked_are_you_there_kept();
         st.shared.queue.lock().unwrap().pop();
         st.cfg.quiet_override = "on".into();
         st.apply();
-        assert!(matches!(st.here_ask, Some(HereAsk::Queued(_))), "первое у потока: {:?}", st.here_ask);
-        st.on_dropped("here");
-        assert_eq!(st.here_ask, None, "и первое ушло без звука — весь вопрос выброшен");
+        assert_eq!(st.here_ask, None, "тишина выбросила часть вопроса — ответа не ждём");
+        st.on_sound("here");
+        assert_eq!(st.here_ask, None, "дозвучавший остаток окна ответа не открывает");
     }
 
     #[test]
