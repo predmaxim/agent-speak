@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -211,6 +211,19 @@ assert.strictEqual(M.settingStep("quiet_hours", cfg, 1), null)
 assert.deepStrictEqual(M.settingStep("orb_over_fullscreen", Object.assign({}, cfg, { orb_over_fullscreen: true }), 1), { key: "orb_over_fullscreen", value: false, sample: false })
 assert.deepStrictEqual(M.settingStep("progress_digest", cfg, 1), { key: "progress_digest", value: true, sample: false })
 assert.deepStrictEqual(M.settingStep("agents_voice", Object.assign({}, cfg, { agents_voice: true }), 1), { key: "agents_voice", value: false, sample: false })
+// every row steps but the hours (two dropdowns, the window walks them)
+for (const r of M.SETTINGS_ROWS) assert.strictEqual(M.settingStep(r, cfg, 1) === null, r === "quiet_hours", r)
+
+// The settings page: one fixed order of sections (the Jarvis wave's design); SETTINGS_ROWS are their rows in it
+assert.deepStrictEqual(M.SETTINGS_SECTIONS.map(s => s.title), ["", "Quiet mode", "Hearing", "Orb", "Agents"])
+assert.deepStrictEqual(M.SETTINGS_ROWS, [].concat(...M.SETTINGS_SECTIONS.map(s => s.rows)))
+// Window.qml draws them in that order: a header per section with rows (the first has none: its rows are captions),
+// a SettingRow per key, and no row numbers by hand — a row is SETTINGS_ROWS.indexOf(key)
+const winQml = fs.readFileSync(__dirname + "/Window.qml", "utf8")
+const page = winQml.slice(winQml.indexOf("id: settingsPage"), winQml.indexOf("component ChatLine"))
+const drawn = [...page.matchAll(/text: root\.tr\("([^"]+)"\)\.toUpperCase\(\)|\bkey: "(\w+)"/g)].map(m => m[1] ? "#" + m[1] : m[2])
+assert.deepStrictEqual(drawn, [].concat(...M.SETTINGS_SECTIONS.filter(s => s.rows.length).map(s => (s.title ? ["#" + s.title] : []).concat(s.rows))))
+assert.ok(!/\brow:\s*\d|cursor === \d/.test(page), "a settings row by its number")
 
 // Russian plural forms
 assert.deepStrictEqual([1, 2, 5, 11, 12, 21, 22, 25, 111, 0].map(n => ru("%1 agents", n)),

@@ -902,7 +902,7 @@ Item {
             font.pixelSize: Style.font.heading
           }
 
-          // ---- Settings page: rows in Model.SETTINGS_ROWS order. The
+          // ---- Settings page: sections and rows in Model.SETTINGS_SECTIONS order. The
           //      controls are the value's picture and the mouse's target;
           //      the keys stay with the catcher (rules.md §9).
           // The rows outgrow the card: they scroll, and the key cursor keeps its row in view.
@@ -920,7 +920,7 @@ Item {
               spacing: Style.spacing.xs
 
               SettingRow {
-                row: 0
+                key: "speaker"
                 label: root.settingsSecs[0].caption
                 caps: true
                 Dropdown {
@@ -936,7 +936,7 @@ Item {
               }
 
               SettingRow {
-                row: 1
+                key: "rate"
                 label: root.settingsSecs[1].caption
                 caps: true
                 Dropdown {
@@ -962,7 +962,7 @@ Item {
               }
 
               SettingRow {
-                row: 2
+                key: "quiet_now"
                 label: root.tr("Quiet now")
                 ToggleSwitch {
                   checked: root.speech.quiet === true
@@ -972,7 +972,7 @@ Item {
               }
 
               SettingRow {
-                row: 3
+                key: "quiet_schedule"
                 label: root.tr("On schedule")
                 ToggleSwitch {
                   checked: root.speech.quiet_schedule === true
@@ -982,14 +982,14 @@ Item {
               }
 
               SettingRow {
-                row: 4
+                key: "quiet_hours"
                 label: root.tr("From / to")
                 Dropdown {
                   id: fromBox
                   width: Style.space(100)
                   options: Model.HOURS
                   value: root.speech.quiet_from
-                  hasCursor: !root.onHead && root.cursor === 4 && root.hoursCol === 0
+                  hasCursor: !root.onHead && root.cursor === Model.SETTINGS_ROWS.indexOf("quiet_hours") && root.hoursCol === 0
                   foreground: root.fg
                   fontFamily: root.font
                   onChanged: function(v) { root.choose("quiet_from", v, false); value = Qt.binding(function() { return root.speech.quiet_from }) }
@@ -1000,7 +1000,7 @@ Item {
                   width: Style.space(100)
                   options: Model.HOURS
                   value: root.speech.quiet_to
-                  hasCursor: !root.onHead && root.cursor === 4 && root.hoursCol === 1
+                  hasCursor: !root.onHead && root.cursor === Model.SETTINGS_ROWS.indexOf("quiet_hours") && root.hoursCol === 1
                   foreground: root.fg
                   fontFamily: root.font
                   onChanged: function(v) { root.choose("quiet_to", v, false); value = Qt.binding(function() { return root.speech.quiet_to }) }
@@ -1020,7 +1020,7 @@ Item {
               }
 
               SettingRow {
-                row: 5
+                key: "orb_over_fullscreen"
                 label: root.tr("Over fullscreen windows")
                 ToggleSwitch {
                   checked: root.speech.orb_over_fullscreen === true
@@ -1041,7 +1041,7 @@ Item {
               }
 
               SettingRow {
-                row: 6
+                key: "agents_voice"
                 label: root.tr("Watch agents")
                 ToggleSwitch {
                   checked: root.speech.agents_voice === true
@@ -1051,7 +1051,7 @@ Item {
               }
 
               SettingRow {
-                row: 7
+                key: "progress_digest"
                 label: root.tr("Retell progress")
                 ToggleSwitch {
                   checked: root.speech.progress_digest === true
@@ -1214,15 +1214,18 @@ Item {
     }
   }
 
-  // A settings row: its label at the left, its control (the children) at the right.
+  // A settings row: its label at the left (a note, why it is so now, under it), its control (the children) at the right.
+  // Its place for the key cursor is its key's in Model.SETTINGS_ROWS.
   component SettingRow: CursorSurface {
     id: settingRow
-    property int row: 0
+    property string key: ""
+    readonly property int row: Model.SETTINGS_ROWS.indexOf(key)
     property string label: ""
+    property string note: ""    // a second line, dim; "" — none
     property bool caps: false   // a section caption (bold caps) rather than a row's text
     default property alias control: slot.data
     width: settingsPage.width
-    implicitHeight: Math.max(Style.space(50), slot.implicitHeight + Style.spacing.xs * 2)
+    implicitHeight: Math.max(Style.space(50), Math.max(slot.implicitHeight, texts.implicitHeight) + Style.spacing.xs * 2)
     foreground: root.fg
     hasCursor: !root.onHead && root.cursor === row
 
@@ -1236,20 +1239,36 @@ Item {
       onClicked: { root.onHead = false; root.setCursor(settingRow.row); root.activate() }
     }
 
-    Text {
+    Column {
+      id: texts
       anchors.left: parent.left
       anchors.leftMargin: Style.spacing.rowPaddingX
       anchors.right: slot.left
       anchors.rightMargin: Style.space(8)
       anchors.verticalCenter: parent.verticalCenter
-      textFormat: Text.PlainText
-      text: settingRow.label
-      color: settingRow.caps ? root.dim : root.fg
-      font.family: root.font
-      font.pixelSize: settingRow.caps ? Style.font.body : Style.font.title
-      font.bold: settingRow.caps
-      font.letterSpacing: settingRow.caps ? 1.2 : 0
-      elide: Text.ElideRight
+
+      Text {
+        width: parent.width
+        textFormat: Text.PlainText
+        text: settingRow.label
+        color: settingRow.caps ? root.dim : root.fg
+        font.family: root.font
+        font.pixelSize: settingRow.caps ? Style.font.body : Style.font.title
+        font.bold: settingRow.caps
+        font.letterSpacing: settingRow.caps ? 1.2 : 0
+        elide: Text.ElideRight
+      }
+
+      Text {
+        visible: settingRow.note !== ""
+        width: parent.width
+        textFormat: Text.PlainText
+        text: settingRow.note
+        color: root.dim
+        font.family: root.font
+        font.pixelSize: Style.font.body
+        elide: Text.ElideRight
+      }
     }
 
     Row {

@@ -248,8 +248,20 @@ function sections(tr) {
   ]
 }
 
-// The settings page's rows, top to bottom: the two sections, quiet mode, the orb, agents.
-var SETTINGS_ROWS = ["speaker", "rate", "quiet_now", "quiet_schedule", "quiet_hours", "orb_over_fullscreen", "agents_voice", "progress_digest"]
+// The settings page, top to bottom: one fixed order of sections — the voice, quiet mode, hearing, the orb,
+// agents (the Jarvis wave's design). The voice has no header: its first rows are captions themselves.
+// A new setting goes into its section's rows and into Window.qml at the same place (test.js checks);
+// a section's header is drawn once it has rows.
+var SETTINGS_SECTIONS = [
+  { title: "", rows: ["speaker", "rate"] },
+  { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours"] },
+  { title: "Hearing", rows: [] },
+  { title: "Orb", rows: ["orb_over_fullscreen"] },
+  { title: "Agents", rows: ["agents_voice", "progress_digest"] }
+]
+
+// The rows in that order: a row's place on the page (the key cursor) is its index here.
+var SETTINGS_ROWS = [].concat.apply([], SETTINGS_SECTIONS.map(function(s) { return s.rows }))
 
 // ←/→ (dx) or Enter (dx 1) on a settings row: the `set` to send ({key,
 // value, sample}) or null. Choices go round, switches flip; the hours row
