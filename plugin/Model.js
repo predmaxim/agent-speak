@@ -13,7 +13,8 @@ var OFFLINE = { running: false, speaking: false, paused: false, speaker: "", rat
   quiet_why: "", dnd_quiet: false, hush_summary: false, screencast_privacy: false, orb_satellites: false,
   media_hold: false, music_pause: false, limit: "", limit_warn: false, ear_in: "", listen_until: null, listen_secs: 0,
   struggling: 0, orb_moods: false, orb_idle_motion: false, rate_now: "", news_every: 0, earcons: false, intonation: false,
-  done_facts: false, permission_buttons: false, agent_inbox: false, wake: "off", wake_word: false, memory: false }
+  done_facts: false, permission_buttons: false, agent_inbox: false, wake: "off", wake_word: false, memory: false,
+  headset_button: false }
 
 // One socket line -> {type, value}, or null for anything else (a broken line must not blank the state).
 function parseLine(line) {
@@ -438,7 +439,7 @@ function sections(tr) {
 var SETTINGS_SECTIONS = [
   { title: "", rows: ["speaker", "rate", "intonation", "earcons"] },
   { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours", "screencast_privacy", "hush_summary"] },
-  { title: "Hearing", rows: ["music_pause"] },
+  { title: "Hearing", rows: ["music_pause", "headset_button"] },
   { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites", "orb_moods", "orb_idle_motion"] },
   { title: "Agents", rows: ["agents_voice", "progress_digest", "news_every", "done_facts", "permission_buttons", "memory", "memory_page", "agent_inbox", "limit_warn"] }
 ]
@@ -465,7 +466,7 @@ function settingStep(row, st, dx) {
   if (row === "progress_digest") return { key: row, value: !st.progress_digest, sample: false }
   if (row === "agents_voice") return { key: row, value: !st.agents_voice, sample: false }
   if (row === "screencast_privacy" || row === "hush_summary") return { key: row, value: !st[row], sample: false }
-  if (row === "music_pause") return { key: row, value: !st.music_pause, sample: false }
+  if (row === "music_pause" || row === "headset_button") return { key: row, value: !st[row], sample: false }
   if (row === "limit_warn" || row === "agent_inbox") return { key: row, value: !st[row], sample: false }
   if (row === "memory") return { key: row, value: !st.memory, sample: false }
   if (row === "intonation" || row === "earcons" || row === "permission_buttons") return { key: row, value: !st[row], sample: false }
@@ -492,14 +493,21 @@ function memoryRows(mem) {
     .concat([{ kind: "all", id: "", text: "" }])
 }
 
+// Oma's own MPRIS player (the daemon's, for the headset button): it «plays» only while she speaks or asks — not music.
+var OWN_PLAYER = "org.mpris.MediaPlayer2.oma"
+
+function music(players) {
+  return players.filter(function(p) { return p.dbusName !== OWN_PLAYER })
+}
+
 // Music pause: Oma took the sound (the daemon's media_hold) — the MPRIS players to pause: playing ones that can pause.
 function toPause(players) {
-  return players.filter(function(p) { return p.isPlaying && p.canPause })
+  return music(players).filter(function(p) { return p.isPlaying && p.canPause })
 }
 
 // Oma let the sound go — the players to play again: the ones paused for her (their dbusName in `held`), still paused
 // (pausedState is MprisPlaybackState.Paused) and able to play. Anything playing by then (the user started it) — none.
 function toResume(players, held, pausedState) {
-  if (players.some(function(p) { return p.isPlaying })) return []
+  if (music(players).some(function(p) { return p.isPlaying })) return []
   return players.filter(function(p) { return held.indexOf(p.dbusName) >= 0 && p.playbackState === pausedState && p.canPlay })
 }

@@ -1617,6 +1617,17 @@ Item {
                 }
               }
 
+              SettingRow {
+                key: "headset_button"
+                label: root.tr("Headset button")
+                note: root.tr("Play — «I'm here» or «hush», next — the summary")
+                ToggleSwitch {
+                  checked: root.speech.headset_button === true
+                  foreground: root.fg
+                  onToggled: root.step("headset_button", 1)
+                }
+              }
+
               PanelSectionHeader {
                 leftPadding: Style.spacing.rowPaddingX
                 topPadding: Style.space(14)

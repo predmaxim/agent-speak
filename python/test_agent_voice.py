@@ -289,6 +289,29 @@ def test_are_you_there_yes_closes():
     assert ("presence", "here") in acts and ("ear", False) in acts and not any(a[0] == "send" for a in acts)
 
 
+def test_are_you_there_answered_by_headset_button_closes_the_window_only():
+    # кнопка наушников — «я тут» у службы: Оме только закрыть окно вопроса; звук решает служба (её сводка не обрывается),
+    # мозгу — ни слова: кнопка никогда не «да, передай»
+    clk, cv = _conv()
+    cv.listen(20, "here", "Эй, ты тут?")
+    cv.audio(True)  # вопрос ещё звучит
+    cv.speech_start(1)
+    acts = cv.answered()
+    assert acts[-2:] == [("ear", False), ("state", "idle")] and not cv.active
+    assert not any(a[0] in ("stop", "send", "presence", "interrupt") for a in acts)
+    assert cv.answered() == [], "окна уже нет"
+
+
+def test_answered_leaves_other_windows_and_a_started_reply():
+    clk, cv = _conv()
+    cv.listen(5, "news", "плуг: готово")
+    assert cv.answered() == [] and cv.active, "окно после новостей — не вопрос «Ты тут?»"
+    clk, cv = _conv()
+    cv.listen(20, "here", "Ты тут?")
+    _say(clk, cv, "через минуту")  # ответил словами — дальше разговор, не окно вопроса
+    assert cv.answered() == [] and cv.active
+
+
 def test_are_you_there_other_goes_to_brain():
     clk, cv = _conv()
     cv.listen(5, "here", "Ты тут?")
@@ -969,6 +992,24 @@ def test_oma_listen_command_opens_window_unless_locked(monkeypatch):
         clk.t += 5.1
         await oma.event(("tick",))
         assert not oma.ear.open and sent[-1]["talking"] is False
+
+    asyncio.run(run())
+
+
+def test_oma_here_command_closes_the_question_window_without_hush(monkeypatch):
+    import agent_voice.__main__ as m
+    monkeypatch.setattr(m, "locked", lambda: False)
+    monkeypatch.setattr(m, "mic_outputs", lambda: [])
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+
+    async def run():
+        await oma.command({"do": "listen", "secs": 20, "kind": "here", "said": "Эй, ты тут?"})
+        oma.conv.audio(True)
+        sent.clear()
+        await oma.command({"do": "here"})
+        assert not oma.ear.open and sent == [{"cmd": "voice_state", "state": "idle", "talking": False}]
+        assert oma.brain.texts == []
 
     asyncio.run(run())
 

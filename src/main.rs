@@ -12,6 +12,7 @@ mod learn;
 mod limits;
 mod memory;
 mod news;
+mod mpris;
 mod mux;
 mod notice;
 mod orders;

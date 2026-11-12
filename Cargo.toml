@@ -10,6 +10,9 @@ toml = "0.8"
 notify = "6"
 base64 = "0.22"
 libc = "0.2"
+# кнопка наушников: MPRIS-плеер Омы на сессионной шине (libdbus системы; MIT/Apache-2.0, src/mpris.rs)
+dbus = "=0.9.12"
+dbus-crossroads = "=0.5.3"
 
 [profile.release]
 # паника любого потока завершает службу, и systemd поднимает её (Restart=on-failure): немой демон с мёртвым потоком хуже
