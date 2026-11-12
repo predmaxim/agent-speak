@@ -11,7 +11,7 @@ import sys
 import time
 import traceback
 
-from . import link
+from . import link, memory
 from .context import foreign_capture, locked, mic_outputs, on_ac
 from .conversation import Conversation
 from .orders import Orders
@@ -51,6 +51,10 @@ def status_events(d, last):
     limit = d.get("limit") or ""  # фраза «лимит почти кончился»; нет поля (старая служба) — как пустая
     if last.get("limit", "") != limit:
         evs.append(("limit", limit))
+    remember = d.get("memory") is not False
+    if last.get("memory") is False and remember:  # включили память — не первая строка
+        evs.append(("memory_on",))
+    last["memory"] = remember
     last.update(speaking=speaking, voiced=voiced, user_paused=user_paused, limit=limit)
     return evs
 
@@ -304,6 +308,8 @@ class Oma:
             self.why = ev[1]
         elif kind == "limit":
             self.limit = ev[1]
+        elif kind == "memory_on":  # сказанное при выключенной памяти в заметки дней не попадёт
+            self.bg(asyncio.to_thread(memory.mark_seen))
         elif kind == "mic":
             self.ear.paused = ev[1]  # микрофон пишет другой (voxtype и т. п.) — кадры не слушаем
             await self.act(c.mic_busy(ev[1]))

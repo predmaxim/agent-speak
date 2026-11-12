@@ -2,7 +2,8 @@
 Description=agent-speak: Ома сжимает прошлые дни в память
 
 [Service]
-# каждый ещё не сжатый день до вчерашнего — заметка Haiku (python/agent_voice/memory.py); память выкл — выходит сразу
+# каждый ещё не сжатый день до вчерашнего — заметка Haiku (python/agent_voice/memory.py); память выкл — прошлые дни
+# только отмечаются, без модели; config.toml не прочесть — ничего не трогает, повтор при следующем запуске
 Type=oneshot
 WorkingDirectory=%h/.local/share/agent-speak
 ExecStart=%h/.local/share/agent-speak/voice-venv/bin/python -m agent_voice.memory

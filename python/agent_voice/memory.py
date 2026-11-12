@@ -75,15 +75,39 @@ def day_of(ts):
 
 
 def enabled():
-    """Настройка memory из config.toml службы; нет файла — по умолчанию вкл; не читается — не собираем."""
+    """Настройка memory из config.toml службы: True или False; нет файла — по умолчанию вкл; не читается — None (не вкл
+    и не выкл: служба при опечатке держит прежнюю настройку)."""
     try:
         with open(CONFIG, "rb") as f:
             return tomllib.load(f).get("memory", True) is not False
     except FileNotFoundError:
         return True
     except (OSError, tomllib.TOMLDecodeError) as e:
-        log(f"настройки не прочесть ({e}), память не собираю")
-        return False
+        log(f"настройки не прочесть ({e})")
+        return None
+
+
+def _seen():
+    try:
+        with open(os.path.join(DIR, "seen.json")) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def mark_seen(marks=None, sids=None):
+    """seen.json — сколько сообщений каждого чата Омы уже сжато или отмечено: compress их не возьмёт. marks — {чат:
+    сообщений}, sids — все чаты (ушедших в файле не остаётся); без них — все чаты до конца: память включили, сказанное
+    при выключенной в заметки дней не попадёт. Смещение только растёт: файл пишут и Ома, и таймер."""
+    from . import brain  # SDK — тяжёлый импорт, только задаче
+    seen = _seen()
+    if marks is None:
+        sids = {i.session_id for i in brain.list_sessions(brain.OMA_DIR)}
+        marks = {s: seen.get(s, 0) + len(brain.get_session_messages(s, directory=brain.OMA_DIR, offset=seen.get(s, 0)))
+                 for s in sids}
+    seen.update({s: max(n, seen.get(s, 0)) for s, n in marks.items()})
+    ensure()
+    _write(os.path.join(DIR, "seen.json"), json.dumps({s: n for s, n in seen.items() if s in sids}))
 
 
 def prompt(on):
@@ -206,8 +230,11 @@ async def compress(now=None, ask=None):
     """Каждый ещё не сжатый день до вчерашнего: заметка в days/<день>.md, затем — смещения чатов и удаление пересказов.
     Сбой модели — ничего не сдвигается, повтор при следующем запуске. Память выключена или день старше KEEP_DAYS (в
     промпт он не попадёт) — модель не зовётся: только смещения и удаление пересказов, чтобы включённая потом память
-    этих дней не сжала. Старое — удаляется."""
+    этих дней не сжала. Настройку не прочесть — ничего не трогается, повтор при следующем запуске. Старое — удаляется."""
     on = enabled()
+    if on is None:
+        log("не сжимаю: настройку не прочесть, повтор при следующем запуске")
+        return
     if not on:
         log("выключена: прошлые дни только отмечены, не сжимаются")
     from . import brain  # SDK — тяжёлый импорт, только задаче
@@ -217,12 +244,7 @@ async def compress(now=None, ask=None):
     ensure()
     for d in ("days", "news"):
         os.makedirs(os.path.join(DIR, d), mode=0o700, exist_ok=True)
-    seen_path = os.path.join(DIR, "seen.json")
-    try:
-        with open(seen_path) as f:
-            seen = json.load(f)
-    except (OSError, ValueError):
-        seen = {}
+    seen = _seen()
     work, sids = {}, set()
     for i in brain.list_sessions(brain.OMA_DIR):
         sids.add(i.session_id)
@@ -250,9 +272,7 @@ async def compress(now=None, ask=None):
             if note and note != "-":
                 _write(os.path.join(DIR, "days", d + ".md"), note)
             log(f"{d}: заметка {len(note)} знаков" if note and note != "-" else f"{d}: помнить нечего")
-        for sid, msgs in w["chats"].items():
-            seen[sid] = seen.get(sid, 0) + len(msgs)
-        _write(seen_path, json.dumps({k: v for k, v in seen.items() if k in sids}))
+        mark_seen({sid: seen.get(sid, 0) + len(msgs) for sid, msgs in w["chats"].items()}, sids)
         if w["news"]:
             os.remove(w["news"])
     _drop_old(today)

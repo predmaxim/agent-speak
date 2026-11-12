@@ -3377,7 +3377,7 @@ def test_memory_enabled_by_config(monkeypatch, tmp_path):
     open(memory.CONFIG, "w").write("memory = false\n")
     assert not memory.enabled()
     open(memory.CONFIG, "w").write("memory = \n")
-    assert not memory.enabled(), "битый файл — не собираем: настройку не прочесть"
+    assert memory.enabled() is None, "битый файл — не вкл и не выкл: настройку не прочесть"
 
 
 def test_memory_clip_note_at_line_boundary():
@@ -3484,6 +3484,61 @@ def test_memory_off_days_are_never_compressed_later(monkeypatch, tmp_path):
     os.remove(os.path.join(memory.DIR, "seen.json"))
     run(memory.compress(now=d12, ask=ask))
     assert len(asked) == 1 and "личный разговор" in asked[0] and "давний" not in asked[0], "старше KEEP_DAYS — без модели"
+
+
+def test_memory_unreadable_config_touches_nothing(monkeypatch, tmp_path):
+    # опечатка в config.toml — не «выкл»: ничего не сдвигается и не удаляется, день сожмётся, когда файл поправят
+    m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
+    d10, d11 = _local(2026, 11, 10, 20), _local(2026, 11, 11, 20)
+    memory, _ = _compress_env(monkeypatch, tmp_path, [info("p", mod=int(d10 * 1000))], {"p": [m("user", "что с site")]})
+    news = os.path.join(memory.DIR, "news")
+    os.makedirs(news)
+    open(os.path.join(news, "2026-11-10.jsonl"), "w").write(json.dumps({"t": d10, "project": "site", "ask": "Final", "say": "x"}) + "\n")
+    asked = []
+
+    async def ask(prompt):
+        asked.append(prompt)
+        return "Разговоры: site."
+    open(memory.CONFIG, "w").write("memory = tru\n")
+    run(memory.compress(now=d11, ask=ask))
+    assert asked == [] and not os.path.exists(os.path.join(memory.DIR, "seen.json")), "настройку не прочесть — смещения стоят"
+    assert os.path.exists(os.path.join(news, "2026-11-10.jsonl")), "и пересказы целы"
+    open(memory.CONFIG, "w").write("memory = true\n")
+    run(memory.compress(now=d11, ask=ask))
+    assert len(asked) == 1 and "что с site" in asked[0], "поправили — день сжимается"
+
+
+def test_memory_switched_on_marks_chats_said_while_off(monkeypatch, tmp_path):
+    # выключил память, поговорил, включил до 05:00 — ночное сжатие этот чат не берёт; сказанное после включения — берёт
+    from agent_voice.__main__ import status_events
+    m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
+    d10, d11 = _local(2026, 11, 10, 20), _local(2026, 11, 11, 20)
+    msgs = {"p": [m("user", "личный разговор"), m("assistant", "Поняла.")]}
+    memory, _ = _compress_env(monkeypatch, tmp_path, [info("p", mod=int(d10 * 1000))], msgs)
+    last = {}
+    assert ("memory_on",) not in status_events({"memory": True}, last), "первая строка — не включение"
+    assert ("memory_on",) not in status_events({"memory": False}, last)
+    assert ("memory_on",) not in status_events({"memory": False}, last)
+    assert ("memory_on",) in status_events({"memory": True}, last), "выкл → вкл"
+    assert ("memory_on",) not in status_events({"memory": True}, last), "только смена"
+    sent, emitted = [], []
+    _, oma = _oma(sent, emitted)
+
+    async def go():
+        await oma.event(("memory_on",))
+        await asyncio.gather(*oma.tasks)
+    run(go())
+    assert json.load(open(os.path.join(memory.DIR, "seen.json"))) == {"p": 2}
+    asked = []
+
+    async def ask(prompt):
+        asked.append(prompt)
+        return "Разговоры: что-то."
+    run(memory.compress(now=d11, ask=ask))
+    assert asked == [] and "личное" not in memory.block(), "чат при выключенной памяти в заметку не попал"
+    msgs["p"].append(m("user", "запомни про site"))
+    run(memory.compress(now=d11, ask=ask))
+    assert len(asked) == 1 and "запомни про site" in asked[0] and "личный разговор" not in asked[0]
 
 
 def _fake_api(script):
