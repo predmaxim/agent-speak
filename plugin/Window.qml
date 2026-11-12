@@ -23,6 +23,7 @@ Item {
   property var draft: null           // Oma's draft bubble, shown at the chat's end
   property bool shown: false
   property string viewing: ""   // a screenshot open over the window
+  property string jumpErr: ""   // why `agent-speak show` from this window did not show the agent (its bubble's text)
   function toggle() {
     if (shown) shown = false
     else open("")
@@ -156,12 +157,13 @@ Item {
   }
 
   // Ctrl+Enter or a double click on an agent: its Orca tab or herdr pane and
-  // window come to the front (`agent-speak show`; an error is Oma's bubble),
-  // and this window closes, or it would cover them. Not an agent: false.
+  // window come to the front (`agent-speak show`). Shown — the service's
+  // `shown` line closes this window (Oma.qml); not shown — its error stays by
+  // the field. Not an agent: false.
   function jump(key) {
     if (key.indexOf("agent:") !== 0) return false
+    root.jumpErr = ""
     Quickshell.execDetached([Quickshell.env("HOME") + "/.local/bin/agent-speak", "show", key.slice(6)])
-    root.shown = false
     return true
   }
 
@@ -348,6 +350,7 @@ Item {
   // Hidden: no dropdown stays open into the next time.
   onShownChanged: {
     viewing = ""
+    jumpErr = ""
     tellView()
     if (!shown) {
       speakerBox.close()
@@ -379,6 +382,8 @@ Item {
       if (d.key === root.chatKey) root.setMessages(Model.chatApply(root.messages, d))
     }
     function onChats(list) { root.chatList = list }
+    // The orb's bubbles wait while the window is open: the show error is said by the field.
+    function onBubble(b) { if (b.id === "show" && root.shown) root.jumpErr = b.text }
     function onMemory(m) { root.memView = m }
   }
 
@@ -899,7 +904,7 @@ Item {
               font.family: root.font
               font.pixelSize: Style.font.heading
               cursorDelegate: Item {}
-              onTextEdited: { root.setCursor(-1); root.onHead = false }
+              onTextEdited: { root.setCursor(-1); root.onHead = false; root.jumpErr = "" }
               Keys.onUpPressed: root.move(0, -1)
               Keys.onDownPressed: root.move(0, 1)
               Keys.onLeftPressed: function(event) { event.accepted = root.onHead && root.move(-1, 0) }
@@ -910,13 +915,14 @@ Item {
             }
 
             // Oma is down (the service runs): a question waits in the field, Enter sends it when she is back.
+            // A show from here failed: why, until the next typing or show.
             Text {
               id: omaNote
-              visible: !root.omaUp
+              visible: !root.omaUp || root.jumpErr !== ""
               anchors.right: parent.right
               anchors.verticalCenter: field.verticalCenter
               textFormat: Text.PlainText
-              text: root.tr("Oma is not running")
+              text: root.jumpErr !== "" ? root.jumpErr : root.tr("Oma is not running")
               color: root.dim
               font.family: root.font
               font.pixelSize: Style.font.body

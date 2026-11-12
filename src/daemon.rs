@@ -794,10 +794,15 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
                 let (rtx, rrx) = mpsc::channel();
                 let shown = tx.send(Event::Show(agent, rtx)).ok().and_then(|()| rrx.recv().ok());
                 let shown = shown.unwrap_or_else(|| Err("служба не показала: поток действий не работает".into()));
-                if let (Err(e), false) = (&shown, quiet) {
-                    // клавиша и двойной клик ответа не видят: окно Омы уже закрылось
-                    let b = serde_json::json!({"bubble": {"id": "show", "agent": "", "who": "Ома", "text": e, "kind": "oma", "append": false, "drop": false}});
-                    let _ = tx.send(Event::Msg(Msg::Emit { line: b }));
+                match (&shown, quiet) {
+                    // окно Омы — модалка поверх показанного: строка shown его закрывает (мозг зовёт show и при открытом окне)
+                    (Ok(name), _) => drop(tx.send(Event::Msg(Msg::Emit { line: serde_json::json!({"shown": name}) }))),
+                    // клавиша и двойной клик ответа не видят: ошибка — пузырём (окно Омы, если открыто, пишет её у поля)
+                    (Err(e), false) => {
+                        let b = serde_json::json!({"bubble": {"id": "show", "agent": "", "who": "Ома", "text": e, "kind": "oma", "append": false, "drop": false}});
+                        let _ = tx.send(Event::Msg(Msg::Emit { line: b }));
+                    }
+                    (Err(_), true) => {}
                 }
                 let reply = match shown {
                     Ok(name) => serde_json::json!({"ok": name}),
@@ -2694,7 +2699,16 @@ mod tests {
         let Ok(Event::Show(_, reply)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("пузыря у quiet нет — сразу следующий show") };
         reply.send(Ok("datebook".into())).unwrap();
         assert_eq!(next(&mut r)["ok"], "datebook");
-        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "показала — пузыря нет");
+        // показала — пузыря нет, а строка `shown` закрывает окно Омы: оно модалка поверх вкладки, и мозг (quiet) зовёт show при открытом окне
+        let Ok(Event::Msg(Msg::Emit { line })) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("показала — строка shown") };
+        assert_eq!(line, serde_json::json!({"shown": "datebook"}));
+        w.write_all(b"{\"cmd\":\"show\",\"quiet\":true}\n").unwrap();
+        let Ok(Event::Show(_, reply)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("show не дошёл до цикла") };
+        reply.send(Ok("plug".into())).unwrap();
+        assert_eq!(next(&mut r)["ok"], "plug");
+        let Ok(Event::Msg(Msg::Emit { line })) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("и у quiet — строка shown") };
+        assert_eq!(line["shown"], "plug");
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "больше ничего");
     }
 
     #[test]

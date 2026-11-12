@@ -29,6 +29,8 @@ Item {
     }
     // Oma (or the daemon) gone: nobody is left to drop her draft.
     onSpeechChanged: if (link.speech.oma === "off") root.draft = null
+    // An agent came to the front (a double click, Ctrl+Enter, the key or Oma's brain): the window, a modal, would cover it.
+    onAgentShown: omaWindow.shown = false
   }
 
   // The stack goes as a whole BUBBLE_TTL after its newest bubble; quiet mode keeps it, unless the screen is shared.

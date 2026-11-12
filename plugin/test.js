@@ -18,6 +18,8 @@ assert.deepStrictEqual(M.parseLine('{"agents":null}').value, [])
 assert.deepStrictEqual(M.parseLine('{"chats":{}}').value, [])
 // The Jarvis wave's lines: a ripple on the orb, the permission cards, the deferred orders (lists, like agents)
 assert.deepStrictEqual(M.parseLine('{"ripple":{"tone":"final"}}'), { type: "ripple", value: { tone: "final" } })
+// an agent came to the front (`agent-speak show`): Oma's window, a modal over it, closes
+assert.deepStrictEqual(M.parseLine('{"shown":"datebook"}'), { type: "shown", value: "datebook" })
 assert.deepStrictEqual(M.parseLine('{"permissions":[{"id":"perm-7"}]}'), { type: "permissions", value: [{ id: "perm-7" }] })
 assert.deepStrictEqual(M.parseLine('{"later":[]}'), { type: "later", value: [] })
 assert.deepStrictEqual(M.parseLine('{"permissions":null}').value, [])
