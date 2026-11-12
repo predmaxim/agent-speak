@@ -58,6 +58,25 @@ pub enum Msg {
     Permission { payload: serde_json::Value },
     /// Кнопка карточки разрешения в окне или пузыре: решение — хуку запроса id. Клик равен набранному: без подтверждения.
     Permit { id: String, allow: bool },
+    /// Отложенное поручение: do = tell (session, text, gist — передать агенту, когда закончит ход) | checks (path, pr —
+    /// сказать исход проверок PR) | cancel (id) | list. Запрос с ответом `{"ok": …}` или `{"err": …}` (`agent-speak
+    /// later …`; голосом tell ставит только код Омы после «да, передай»); с подписанного соединения (окно) — без ответа.
+    Later {
+        #[serde(rename = "do")]
+        act: String,
+        #[serde(default)]
+        session: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        gist: String,
+        #[serde(default)]
+        path: String,
+        #[serde(default)]
+        pr: u64,
+        #[serde(default)]
+        id: String,
+    },
 }
 
 pub fn socket_path() -> PathBuf {
@@ -126,6 +145,10 @@ mod tests {
         assert!(matches!(perm, Msg::Permission { ref payload } if payload["tool_name"] == "Bash"));
         let permit = serde_json::from_str::<Msg>("{\"cmd\":\"permit\",\"id\":\"perm-7\",\"allow\":true}").unwrap();
         assert!(matches!(permit, Msg::Permit { ref id, allow: true } if id == "perm-7"));
+        let later = serde_json::from_str::<Msg>("{\"cmd\":\"later\",\"do\":\"checks\",\"path\":\"/p\",\"pr\":12}").unwrap();
+        assert!(matches!(later, Msg::Later { ref act, ref path, pr: 12, ref id, .. } if act == "checks" && path == "/p" && id.is_empty()));
+        let s = serde_json::to_string(&Msg::Later { act: "cancel".into(), session: String::new(), text: String::new(), gist: String::new(), path: String::new(), pr: 0, id: "later-3".into() }).unwrap();
+        assert!(s.contains("\"do\":\"cancel\"") && s.contains("\"id\":\"later-3\""), "{s}");
     }
 
     #[test]

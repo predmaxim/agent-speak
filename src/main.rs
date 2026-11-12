@@ -6,6 +6,7 @@ mod daemon;
 mod digest;
 mod focus;
 mod ipc;
+mod later;
 mod learn;
 mod limits;
 mod memory;
@@ -53,6 +54,15 @@ fn main() {
             let quiet = std::env::var_os("AGENT_SPEAK").is_some();
             return done(ipc::request(&Msg::Show { agent, quiet }).map(|name| println!("{name}")));
         }
+        // отложенное поручение: tell — передать агенту, когда закончит ход (голосом его ставит Ома только после «да,
+        // передай» — проверка кода в orders.py), checks — сказать исход проверок PR; stdout — id или список словами
+        Some("later") => match later_msg(&args[1..]) {
+            Some(m) => return done(ipc::request(&m).map(|ok| println!("{ok}"))),
+            None => {
+                eprintln!("agent-speak later tell <session> <текст> [смысл] | checks <папка> <PR> | cancel <id> | list");
+                std::process::exit(2);
+            }
+        },
         // пункты меню агента с экрана — только чтение, без службы: Ома называет пункт в вопросе подтверждения до tell
         Some("menu") if args.len() == 2 => {
             return done(orders::menu_of(&args[1]).map(|items| items.iter().enumerate().for_each(|(i, t)| println!("{}. {t}", i + 1))));
@@ -102,7 +112,7 @@ fn main() {
             Msg::Hook { kind, payload: serde_json::from_str(&raw).unwrap_or_default() }
         }
         _ => {
-            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | set <ключ> <значение> | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | menu <session> | show [<session>|next] | launch <path> <text> [orca|herdr] | projects [orca|herdr]");
+            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | set <ключ> <значение> | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | menu <session> | show [<session>|next] | launch <path> <text> [orca|herdr] | projects [orca|herdr] | later tell|checks|cancel|list …");
             std::process::exit(2);
         }
     };
@@ -115,6 +125,16 @@ fn main() {
 /// Значение `set` из командной строки: true, false, числа — как JSON, остальное — строка.
 fn set_value(v: &str) -> serde_json::Value {
     serde_json::from_str(v).unwrap_or_else(|_| serde_json::json!(v))
+}
+
+/// `later …` из командной строки → сообщение службе; неверные аргументы — None.
+fn later_msg(a: &[String]) -> Option<Msg> {
+    let arg = |i: usize| a.get(i).cloned().unwrap_or_default();
+    let (act, n) = (a.first()?.as_str(), a.len());
+    let ok = matches!((act, n), ("tell", 3 | 4) | ("checks", 3) | ("cancel", 2) | ("list", 1));
+    let pr = if act == "checks" { arg(2).trim_start_matches('#').parse().ok()? } else { 0 };
+    let (session, text, gist) = if act == "tell" { (arg(1), arg(2), arg(3)) } else { Default::default() };
+    ok.then(|| Msg::Later { act: act.into(), session, text, gist, path: if act == "checks" { arg(1) } else { String::new() }, pr, id: if act == "cancel" { arg(1) } else { String::new() } })
 }
 
 /// Исход команды Омы: ошибка — одна строка в stderr (её дословно получает мозг), код 1.
@@ -226,6 +246,21 @@ mod tests {
         assert!(post_tool_use(r#"{"session_id":"s1","agent_id":"a1"}"#, &dir).is_some(), "сабагент — свой раз");
         assert_eq!(post_tool_use("мусор", &dir), None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn later_args() {
+        let a = |s: &[&str]| later_msg(&s.iter().map(|x| x.to_string()).collect::<Vec<_>>()).map(|m| serde_json::to_value(m).unwrap());
+        let tell = a(&["tell", "s1", "Прогони тесты", "тесты"]).unwrap();
+        assert_eq!((tell["do"].as_str(), tell["session"].as_str(), tell["text"].as_str(), tell["gist"].as_str()), (Some("tell"), Some("s1"), Some("Прогони тесты"), Some("тесты")));
+        assert_eq!(a(&["tell", "s1", "x"]).unwrap()["gist"], "");
+        let c = a(&["checks", "/p/x", "#12"]).unwrap();
+        assert_eq!((c["path"].as_str(), c["pr"].as_u64()), (Some("/p/x"), Some(12)));
+        assert_eq!(a(&["cancel", "later-3"]).unwrap()["id"], "later-3");
+        assert_eq!(a(&["list"]).unwrap()["do"], "list");
+        for bad in [&["checks", "/p", "x"][..], &["tell", "s1"], &["cancel"], &["nope"], &[]] {
+            assert!(a(bad).is_none(), "{bad:?}");
+        }
     }
 
     #[test]
