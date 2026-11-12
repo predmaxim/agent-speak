@@ -131,6 +131,7 @@ def switched(on):
         elif os.path.exists(off):
             mark_seen()
             os.remove(off)
+    return on  # решённое под замком — им и пользоваться дальше
 
 
 def prompt(on):
@@ -264,7 +265,7 @@ async def compress(now=None, ask=None):
         return
     if not on:
         log("выключена: прошлые дни только отмечены, не сжимаются")
-    switched(on)  # включили, пока Омы не было, и таймер пришёл первым: сказанное при выключенной уже отмечено
+    on = switched(on)  # включили, пока Омы не было, и таймер пришёл первым: сказанное при выключенной уже отмечено
     from . import brain  # SDK — тяжёлый импорт, только задаче
     now, ask = time.time() if now is None else now, ask or haiku
     today = day_of(now)
