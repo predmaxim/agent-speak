@@ -108,17 +108,20 @@ function clip(s, n) {
 }
 
 var PEEK_MAX = 8
+var FAILS_DROOP = 3   // as agents::FAILS_DROOP
 
 // The orb's hover card: {rows, more} — up to PEEK_MAX agents, the most urgent first, and how many more. A row: its
 // dot, name, time in its state (a tr key, at `now`) and a second line up to 60 chars — the question's first line for
-// a waiting one, the watch's word, else the status.
+// a waiting one, the watch's word, else the status (or the count of failed calls, `fails`).
 function peekRows(agents, now) {
   var all = byUrgency(agents)
   return { more: Math.max(0, all.length - PEEK_MAX), rows: all.slice(0, PEEK_MAX).map(function(a) {
     var dot = dotKind(a)
     var ask = String(a.ask || "").split("\n").filter(function(l) { return l.trim() !== "" })[0]
     var text = dot === "waiting" ? ask || a.status : dot === "health" ? a.health : a.status
-    return { id: a.id, dot: dot, name: a.title || a.project || "", ago: ago(a.since, now), text: clip(text, 60) }
+    // fails: tool calls that could not run this turn (the daemon's FAILS_DROOP and up) — a working row counts them instead
+    return { id: a.id, dot: dot, name: a.title || a.project || "", ago: ago(a.since, now), text: clip(text, 60),
+      fails: dot === "working" && a.fails >= FAILS_DROOP ? a.fails : 0 }
   }) }
 }
 

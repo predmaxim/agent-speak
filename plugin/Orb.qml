@@ -252,7 +252,7 @@ PanelWindow {
             id: peekRow
             required property var modelData
             width: win.peekWidth
-            height: peekName.implicitHeight + (peekRow.modelData.text ? peekLine.implicitHeight : 0)
+            height: peekName.implicitHeight + (peekLine.text ? peekLine.implicitHeight : 0)
 
             Rectangle {
               y: (peekName.implicitHeight - height) / 2
@@ -291,7 +291,7 @@ PanelWindow {
               y: peekName.implicitHeight
               width: parent.width - x
               textFormat: Text.PlainText
-              text: peekRow.modelData.text
+              text: peekRow.modelData.fails ? win.tr("%1 failed calls this turn", peekRow.modelData.fails) : peekRow.modelData.text
               color: Qt.darker(Color.tooltip.text, 1.4)
               font.family: Style.font.family
               font.pixelSize: Style.font.body

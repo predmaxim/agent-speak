@@ -282,6 +282,9 @@ assert.deepStrictEqual(peek.rows.map(r => [r.id, r.dot, r.name, r.text]), [
   ["w2", "working", "Astral.Edo", "s-w2"], ["w1", "working", "p-w1", "s-w1"], ["d1", "done", "p-d1", "s-d1"], ["i", "idle", "p-i", "s-i"]])
 assert.deepStrictEqual(peek.rows[0].ago, ["%1 min", 15])
 assert.strictEqual(M.peekRows([ag("x", "working", 0, { status: "я".repeat(80) })], 0).rows[0].text.length, 60)
+// a drooping agent (3+ tool calls failed this turn, the daemon's fails): its card row counts them instead of the status
+assert.deepStrictEqual(M.peekRows([ag("x", "working", 0, { fails: 3 }), ag("y", "working", 0, { fails: 2 }), ag("q", "waiting", 0, { fails: 5 })], 0).rows.map(r => r.fails), [0, 3, 0], "a question stays its line")
+assert.strictEqual(ru("%1 failed calls this turn", 4), "ошибок за ход: 4")
 const many = Array.from({ length: 11 }, (_, i) => ag("a" + i, "working", i))
 assert.deepStrictEqual([M.peekRows(many, 0).rows.length, M.peekRows(many, 0).more], [M.PEEK_MAX, 3])
 assert.deepStrictEqual(M.peekRows([], 0), { rows: [], more: 0 })

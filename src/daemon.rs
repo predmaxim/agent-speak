@@ -300,6 +300,7 @@ struct State {
     voices: u64,     // реплик Омы (`voice`) с запуска службы — номер последней
     voice_base: u64, // столько их было до запуска нынешней Омы: voiced считается от него
     rate_now: Option<String>, // темп этого ответа с колеса над орбом; None — из настроек
+    struggling_sent: usize,   // struggling последней разосланной строки состояния
 }
 
 fn home() -> PathBuf {
@@ -505,6 +506,7 @@ pub fn run() {
         voices: 0,
         voice_base: 0,
         rate_now: None,
+        struggling_sent: 0,
     };
     {
         let tx = tx.clone();
@@ -979,7 +981,7 @@ impl State {
             listen_until: None,
             listen_secs: 0.0,
             // волна 3 (A): настроение орба
-            struggling: 0,
+            struggling: self.struggling(),
             orb_moods: self.cfg.orb_moods,
             orb_idle_motion: self.cfg.orb_idle_motion,
             // волна 3 (A): колесо над орбом
@@ -1042,11 +1044,17 @@ impl State {
         if self.cfg.agents_voice { self.watch.trouble() } else { 0 }
     }
 
+    /// Агентов, у которых за ход FAILS_DROOP и больше сбоев, — орб «поник»; не следим за агентами — 0.
+    fn struggling(&self) -> usize {
+        if self.cfg.agents_voice { self.registry.struggling() } else { 0 }
+    }
+
     fn broadcast(&mut self) {
         let line = self.status_line();
         self.out_sent = self.out();
         self.waiting_sent = self.registry.waiting();
         self.trouble_sent = self.trouble();
+        self.struggling_sent = self.struggling();
         self.hold_sent = self.media_hold();
         self.broadcast_line(&line);
     }
@@ -1071,7 +1079,7 @@ impl State {
             self.broadcast_line(&line);
             self.agents_sent = line;
         }
-        if self.registry.waiting() != self.waiting_sent || self.trouble() != self.trouble_sent {
+        if self.registry.waiting() != self.waiting_sent || self.trouble() != self.trouble_sent || self.struggling() != self.struggling_sent {
             self.broadcast();
         }
     }
@@ -2012,6 +2020,11 @@ impl State {
                 self.ask(&thread, Ask::Final, last, None);
             }
             "session-end" => self.watch.ended(&session), // вышел сам — исчезновение не падение
+            "post-tool-use-failure" => {
+                if agents::tool_failed(p) {
+                    self.registry.failed(&session);
+                }
+            }
             other => eprintln!("agent-speak: неизвестный хук {other}"),
         }
         self.push_agents();
@@ -2238,6 +2251,7 @@ mod tests {
             voices: 0,
             voice_base: 0,
             rate_now: None,
+            struggling_sent: 0,
         }
     }
 
@@ -3577,6 +3591,38 @@ mod tests {
         let live: Vec<Live> = ids.iter().map(|id| live(id)).collect();
         st.scan = Box::new(move || live.clone());
         st.rescan();
+    }
+
+    #[test]
+    fn tool_failures_droop_the_orb_and_reach_the_card() {
+        let mut st = test_state();
+        with_agents(&mut st, &["s", "t"]);
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut r = reader(ours);
+        st.subscribe(theirs);
+        hello(&mut r);
+        let fail = |st: &mut State, err: &str| {
+            st.on_hook("post-tool-use-failure", &serde_json::json!({"session_id": "s", "tool_name": "Edit", "error": err, "is_interrupt": false}))
+        };
+        fail(&mut st, "String to replace not found in file.");
+        st.on_hook("post-tool-use-failure", &serde_json::json!({"session_id": "s", "tool_name": "Bash", "error": "Exit code 1", "is_interrupt": false}));
+        fail(&mut st, "File does not exist.");
+        let lines = drain(&mut r);
+        assert!(lines.iter().all(|l| l.get("running").is_none()), "двое — орб ещё не поник: строки состояния нет {lines:?}");
+        assert_eq!(lines.last().unwrap()["agents"][0]["fails"], 2, "ненулевой код Bash не в счёт");
+        fail(&mut st, "File does not exist.");
+        let lines = drain(&mut r);
+        assert_eq!(lines.iter().find(|l| l.get("running").is_some()).expect("строка состояния")["struggling"], 1);
+        // новый ход — с нуля, и орб это узнаёт
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s", "prompt": "ещё раз"}));
+        assert_eq!(drain(&mut r).iter().find(|l| l.get("running").is_some()).expect("строка состояния")["struggling"], 0);
+        // за агентами не следим — орб не никнет
+        for _ in 0..3 {
+            fail(&mut st, "x");
+        }
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["struggling"], 1);
+        st.cfg.agents_voice = false;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["struggling"], 0);
     }
 
     #[test]
