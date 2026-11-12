@@ -4312,7 +4312,7 @@ def test_brain_prompt_in_the_gender_of_the_voice(monkeypatch, tmp_path):
         b.gender = "m"
         await b.warm()
         p = made[0].opts.system_prompt
-        assert "«посмотрел», «передал», «не уверен»" in p and "я бы не стал:" in p and "«всё, свободен»" in p and "«Запомнил.»" in p and "{|" not in p, p
+        assert "в конце реплики, она главнее примеров («посмотрел», «передал», «не уверен»)" in p and "я бы не стал:" in p and "«всё, свободен»" in p and "«Запомнил.»" in p and "{|" not in p, p
         assert p.startswith(gendered(brain.OMA_PROMPT, "m").replace(brain.FILES, brain.FILES_MEMORY)), "шаблоны — до подстановок"
         b.memory = False
         why = await b._remember({"tool_input": {}}, "t", {})
