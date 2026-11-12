@@ -51,6 +51,10 @@ assert.strictEqual(M.OFFLINE.trouble, 0)
 // The tooltip is a list of lines [key, arg]: the orb's tooltip and the window header draw them all (one line today)
 assert.deepStrictEqual(M.orbTip(Object.assign({}, st, { trouble: 1 })), [["%1 need help", 1]])
 assert.deepStrictEqual(M.orbTip(st), [["Oma", ""]])
+// A limit window near its end: the daemon's phrase (already Russian, no tr line) is the tooltip's next line
+assert.deepStrictEqual(M.orbTip(Object.assign({}, st, { waiting: 1, limit: "Лимит Claude почти кончился, сброс в 17:40." })),
+  [["%1 waiting", 1], ["Лимит Claude почти кончился, сброс в 17:40.", ""]])
+assert.strictEqual(ru(...M.orbTip(Object.assign({}, st, { limit: "Лимит Codex почти кончился, сброс в 21:00." }))[1]), "Лимит Codex почти кончился, сброс в 21:00.")
 let s = []
 for (const id of ["a", "b", "c", "d"]) s = M.pushBubble(s, { id, who: "T", text: id, kind: "status" }, 1000)
 assert.deepStrictEqual(s.map(b => b.id), ["b", "c", "d"])
@@ -200,7 +204,7 @@ assert.strictEqual(M.taken("", { key: "chat:1", role: "me", text: "" }), false)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 8)
+assert.strictEqual(M.SETTINGS_ROWS.length, 9)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "eugene", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
@@ -211,6 +215,8 @@ assert.strictEqual(M.settingStep("quiet_hours", cfg, 1), null)
 assert.deepStrictEqual(M.settingStep("orb_over_fullscreen", Object.assign({}, cfg, { orb_over_fullscreen: true }), 1), { key: "orb_over_fullscreen", value: false, sample: false })
 assert.deepStrictEqual(M.settingStep("progress_digest", cfg, 1), { key: "progress_digest", value: true, sample: false })
 assert.deepStrictEqual(M.settingStep("agents_voice", Object.assign({}, cfg, { agents_voice: true }), 1), { key: "agents_voice", value: false, sample: false })
+assert.deepStrictEqual(M.settingStep("limit_warn", Object.assign({}, cfg, { limit_warn: true }), 1), { key: "limit_warn", value: false, sample: false })
+assert.strictEqual(M.SETTINGS_SECTIONS[4].rows[M.SETTINGS_SECTIONS[4].rows.length - 1], "limit_warn", "«Предупреждать о лимите» — последняя в агентах")
 // every row steps but the hours (two dropdowns, the window walks them)
 for (const r of M.SETTINGS_ROWS) assert.strictEqual(M.settingStep(r, cfg, 1) === null, r === "quiet_hours", r)
 

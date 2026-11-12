@@ -55,8 +55,10 @@ function orbTip(st) {
   var mode = orbMode(st)
   var tips = { off: "Oma is not running", loading: "Oma is loading", listening: "Oma is listening", thinking: "Oma is thinking",
     speaking: "Oma is speaking", paused: "Paused", quiet: "Quiet mode", idle: "Oma" }
-  if (mode === "trouble") return [["%1 need help", st.trouble]]
-  return [mode === "waiting" ? ["%1 waiting", st.waiting] : [tips[mode], ""]]
+  var lines = [mode === "trouble" ? ["%1 need help", st.trouble] : mode === "waiting" ? ["%1 waiting", st.waiting] : [tips[mode], ""]]
+  // a limit window near its end: the daemon's phrase, already Russian, so no tr line — it passes tr() as is
+  if (st && st.limit) lines.push([st.limit, ""])
+  return lines
 }
 
 var BUBBLES_MAX = 3
@@ -257,7 +259,7 @@ var SETTINGS_SECTIONS = [
   { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours"] },
   { title: "Hearing", rows: [] },
   { title: "Orb", rows: ["orb_over_fullscreen"] },
-  { title: "Agents", rows: ["agents_voice", "progress_digest"] }
+  { title: "Agents", rows: ["agents_voice", "progress_digest", "limit_warn"] }
 ]
 
 // The rows in that order: a row's place on the page (the key cursor) is its index here.
@@ -272,6 +274,7 @@ function settingStep(row, st, dx) {
   if (row === "orb_over_fullscreen") return { key: row, value: !st.orb_over_fullscreen, sample: false }
   if (row === "progress_digest") return { key: row, value: !st.progress_digest, sample: false }
   if (row === "agents_voice") return { key: row, value: !st.agents_voice, sample: false }
+  if (row === "limit_warn") return { key: row, value: !st.limit_warn, sample: false }
   var sec = sections(function(t) { return t }).filter(function(x) { return x.key === row })[0]
   if (!sec) return null
   var values = sec.options.map(function(o) { return o.value })
