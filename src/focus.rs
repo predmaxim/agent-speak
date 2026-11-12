@@ -60,29 +60,69 @@ pub fn project_of(pid: u32) -> String {
         .unwrap_or_default()
 }
 
-/// Окно в фокусе: его агент на экране и все агенты под окном.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Focus {
-    /// Агент на экране: один под окном — он; несколько (Orca, herdr) — чей терминал виден, говорит мультиплексор.
-    pub agent: Option<SessionRef>,
-    /// Сессии всех агентов под окном (процесс — потомок окна или терминал его мультиплексора): чат Orca под окном Orca
-    /// в фокусе — «занят», какой из чатов на экране, Orca не сообщает.
-    pub under: Vec<String>,
-}
-
-/// Окно в фокусе и его агенты; hyprctl не ответил или стол пуст — пусто.
-pub fn focused() -> Focus {
+/// Агент окна в фокусе; несколько агентов под одним окном (Orca, herdr) — чей терминал виден, говорит мультиплексор.
+pub fn focused() -> Option<SessionRef> {
     // timeout: зависший hyprctl не должен вешать цикл событий
-    let Ok(out) = Command::new("timeout").args(["2", "hyprctl", "activewindow", "-j"]).output() else { return Focus::default() };
+    let out = Command::new("timeout").args(["2", "hyprctl", "activewindow", "-j"]).output().ok()?;
     let Ok(win) = window_pid(&out.stdout) else {
         eprintln!("agent-speak: hyprctl activewindow не ответил ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim());
-        return Focus::default();
+        return None;
     };
-    let Some(w) = win else { return Focus::default() };
+    let w = win?;
     let mut all = claude_under(w);
     all.extend(codex_under(w));
-    let under = all.iter().map(|(_, s)| s.id.clone()).collect();
-    Focus { agent: pick(all, crate::mux::active_among), under }
+    pick(all, crate::mux::active_among)
+}
+
+/// Процесс окна в фокусе: send(pid; None — стол пуст) — при подключении к событиям Hyprland и на каждую смену окна
+/// (событие `activewindowv2` сокета `.socket2.sock`, wiki.hypr.land «IPC»), а не опросом: по нему чаты Orca под окном
+/// в фокусе — «заняты». send вернул false — цикл службы кончился. Сокет закрылся (Hyprland перезапущен) или не открылся —
+/// снова через секунду, при отказах всё реже, до раза в 30 с, одна строка в журнале на серию отказов.
+pub fn watch_window(send: impl Fn(Option<u32>) -> bool + Send + 'static) {
+    watch_window_on(events_socket, active_window, send);
+}
+
+/// Сокет событий Hyprland этого сеанса.
+fn events_socket() -> Option<PathBuf> {
+    let (dir, sig) = (std::env::var_os("XDG_RUNTIME_DIR")?, std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?);
+    Some(PathBuf::from(dir).join("hypr").join(sig).join(".socket2.sock"))
+}
+
+/// pid окна в фокусе: один вопрос hyprctl; не ответил — Err (прежнее окно в силе).
+fn active_window() -> Result<Option<u32>, ()> {
+    let out = crate::mux::run(Command::new("hyprctl").args(["activewindow", "-j"]), HYPRCTL_TIMEOUT).map_err(|_| ())?;
+    window_pid(out.as_bytes())
+}
+
+fn watch_window_on(socket: impl Fn() -> Option<PathBuf> + Send + 'static, query: impl Fn() -> Result<Option<u32>, ()> + Send + 'static,
+                   send: impl Fn(Option<u32>) -> bool + Send + 'static) {
+    use std::io::BufRead;
+    std::thread::spawn(move || {
+        let mut fails = 0;
+        loop {
+            let events = socket()
+                .ok_or_else(|| "нет HYPRLAND_INSTANCE_SIGNATURE".to_string())
+                .and_then(|p| std::os::unix::net::UnixStream::connect(&p).map_err(|e| format!("{}: {e}", p.display())));
+            match events {
+                Ok(events) => {
+                    fails = 0;
+                    let report = || query().map_or(true, &send);
+                    // окно, сменившееся до подключения, событием не придёт — сперва спросить
+                    let lines = std::io::BufReader::new(events).lines();
+                    if !(report() && lines.map_while(Result::ok).filter(|l| l.starts_with("activewindowv2>>")).all(|_| report())) {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    fails += 1;
+                    if fails == 1 {
+                        eprintln!("agent-speak: не слежу за окном в фокусе (события Hyprland: {e}) — пробую снова, всё реже, до раза в 30 с");
+                    }
+                }
+            }
+            std::thread::sleep(crate::audio::resubscribe_after(fails));
+        }
+    });
 }
 
 /// Ответ `hyprctl activewindow -j`: pid окна; пустой стол — `{}` (Hyprland, activeWindowRequest), не ответ — Err.
@@ -250,6 +290,28 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn window_watch_asks_at_connect_and_on_window_change_only_and_reconnects() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("oma-hypr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".socket2.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p = path.clone();
+        watch_window_on(move || Some(p.clone()), || Ok(Some(7)), move |w| tx.send(w).is_ok());
+        let wait = std::time::Duration::from_secs(5);
+        let (mut c, _) = listener.accept().unwrap();
+        assert_eq!(rx.recv_timeout(wait), Ok(Some(7)), "при подключении — один вопрос");
+        c.write_all(b"focusedmon>>DP-1,1\nactivewindowv2>>55d5e0f0e9f0\nactivewindow>>foot,x\n").unwrap();
+        assert_eq!(rx.recv_timeout(wait), Ok(Some(7)));
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "прочие события — не смена окна");
+        drop(c); // Hyprland закрыл сокет
+        let (_c, _) = listener.accept().unwrap();
+        assert_eq!(rx.recv_timeout(wait), Ok(Some(7)), "переподключение — снова один вопрос");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn window_of_the_agent_by_its_address() {

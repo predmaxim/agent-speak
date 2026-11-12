@@ -129,7 +129,7 @@ pub fn watch_outs(send: impl Fn(String, String) -> bool + Send + 'static) {
 }
 
 /// Пауза перед новой подпиской после fails отказов подряд: секунда, затем вдвое дольше, не дольше 30 с.
-fn resubscribe_after(fails: u32) -> Duration {
+pub(crate) fn resubscribe_after(fails: u32) -> Duration {
     Duration::from_secs((1u64 << fails.saturating_sub(1).min(5)).min(30))
 }
 
