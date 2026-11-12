@@ -2236,7 +2236,7 @@ mod tests {
         let st = test_state();
         let line = st.status_line();
         assert!(
-            line.starts_with("{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":true,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0,\"trouble\":0,\"played_at\":0.0,\"out\":\"speakers\",\"voiced\":0,\"user_paused\":false,"),
+            line.starts_with("{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"kseniya\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":true,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0,\"trouble\":0,\"played_at\":0.0,\"out\":\"speakers\",\"voiced\":0,\"user_paused\":false,"),
             "{line}"
         );
         // поля волн «Джарвис» (дизайн 2026-11-12) — заранее и только в конец, в этом порядке; значения проверяют тесты их функций

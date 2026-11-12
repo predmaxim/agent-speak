@@ -102,7 +102,7 @@
 |---|---|---|
 | `agents_voice` | `true` / `false` — следить за агентами: пересказы, пузыри и голос о них; выкл — Ома только помощник | `true` |
 | `progress_digest` | `true` / `false` — пересказывать промежуточное моделью раз в минуту на агента; это три четверти вызовов Haiku | `false` |
-| `speaker` | `xenia`, `baya`, `kseniya`, `aidar`, `eugene` | `xenia` |
+| `speaker` | `kseniya`, `xenia`, `baya`, `aidar`, `eugene` | `kseniya` (термины читает хуже xenia; голос, уже записанный в файле, новое умолчание не меняет — сменить в настройках или `agent-speak set speaker kseniya`; образец голоса в настройках кончается вопросом — слышно, как модель его поднимает) |
 | `rate` | `x-slow` … `x-fast` | `medium` |
 | `quiet_schedule` | `true` / `false` | `true` |
 | `quiet_from`, `quiet_to` | `ЧЧ:ММ` | `23:00`, `08:00` |

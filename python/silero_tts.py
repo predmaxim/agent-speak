@@ -60,7 +60,7 @@ def main():
         with conn:
             try:
                 req = json.loads(conn.makefile("rb").readline())
-                pcm = synth(model, req["text"], req.get("speaker", "xenia"), req.get("rate", "medium"))
+                pcm = synth(model, req["text"], req.get("speaker", "kseniya"), req.get("rate", "medium"))
                 reply = struct.pack("<I", len(pcm)) + pcm
             except Exception as e:  # плохой запрос не должен ронять сервер
                 print(f"silero_tts: {e}", file=sys.stderr, flush=True)
