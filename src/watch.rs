@@ -3,6 +3,7 @@
 
 use crate::agents::State;
 use crate::mux::{Job, Key, Pane, Step};
+use crate::news::Class;
 use crate::phrases::{self, Rotor};
 use crate::source::claude::ApiError;
 use serde_json::Value;
@@ -48,7 +49,9 @@ pub struct Ctx {
 
 #[derive(Debug)]
 pub enum Act {
-    Say { session: String, text: String, urgent: bool },
+    /// Фраза пользователю: класс — её полоса речи (беда, «нужно» — сразу; «починила сама» — пачкой), проект — отдельно
+    /// от текста ("" — без проекта).
+    Say { session: String, class: Class, project: String, text: String },
     Judge { session: String, text: String },
     Run(Job),
 }
@@ -135,8 +138,8 @@ pub struct Watch {
     rotor: Rotor, // фразы пользователю — варианты по кругу
 }
 
-fn say(session: &str, text: String, urgent: bool) -> Vec<Act> {
-    vec![Act::Say { session: session.into(), text, urgent }]
+fn say(session: &str, class: Class, project: &str, text: String) -> Vec<Act> {
+    vec![Act::Say { session: session.into(), class, project: project.into(), text }]
 }
 
 fn run(f: &Facts, pane: &Pane, what: What, steps: Vec<Step>) -> Vec<Act> {
@@ -209,7 +212,7 @@ impl Watch {
         }
         let p = &l.project;
         if ctx.idle < USER_ACTIVE && !ours {
-            return say(&l.id, format!("{p}: агент закрылся посреди хода."), false);
+            return say(&l.id, Class::Restore, p, "агент закрылся посреди хода.".into());
         }
         match (&l.pane, l.shell) {
             (Some(pane), Some(sh)) if shell_idle(sh) => {
@@ -218,7 +221,7 @@ impl Watch {
                 self.tracks.insert(l.id.clone(), t); // для done и возвращения агента
                 run(l, pane, What::Resume, vec![Step::Text(l.resume.clone())])
             }
-            _ => say(&l.id, format!("{p}: агент закрылся посреди хода, а поднять его я не могу — он не в herdr или Orca."), true),
+            _ => say(&l.id, Class::Urgent, p, "агент закрылся посреди хода, а поднять его я не могу — он не в herdr или Orca.".into()),
         }
     }
 
@@ -235,7 +238,7 @@ impl Watch {
         let p = t.project.clone();
         if err.is_some() {
             (t.alarm, t.alarm_at, t.revived) = (true, now, 0);
-            return Some(Act::Say { session: session.into(), text: format!("{p}: сообщение агенту не ушло — {}.", self.rotor.next(phrases::END)), urgent: true });
+            return Some(Act::Say { session: session.into(), class: Class::Urgent, project: p, text: format!("сообщение агенту не ушло — {}.", self.rotor.next(phrases::END)) });
         }
         let text = match what {
             What::Kill => {
@@ -250,7 +253,7 @@ impl Watch {
             What::Continue => phrases::CONTINUED,
             What::Nudge => phrases::NUDGED,
         };
-        Some(Act::Say { session: session.into(), text: format!("{p}: {}", self.rotor.next(text)), urgent: false })
+        Some(Act::Say { session: session.into(), class: Class::Restore, project: p, text: self.rotor.next(text).into() })
     }
 
     /// SessionEnd: агент вышел сам — его исчезновение не падение.
@@ -305,7 +308,7 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, rotor: &mut Rotor, ctx: &C
                     *limit_said = Some(key);
                     let v = rotor.next(phrases::LIMIT);
                     let text = e.resets_at.map_or(v.replace(", сброс в {t}", ""), |r| v.replace("{t}", &clock(r)));
-                    return say("limit", text, false);
+                    return say("limit", Class::Restore, "", text);
                 }
             }
             "server_error" => {
@@ -323,7 +326,7 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, rotor: &mut Rotor, ctx: &C
                     }
                     if !t.net_said {
                         (t.net_said, t.alarm, t.alarm_at) = (true, true, now);
-                        return say(&f.id, format!("{p}: связь с Claude не держится — {}.", rotor.next(phrases::END)), true);
+                        return say(&f.id, Class::Urgent, p, format!("связь с Claude не держится — {}.", rotor.next(phrases::END)));
                     }
                     return vec![];
                 }
@@ -336,7 +339,7 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, rotor: &mut Rotor, ctx: &C
                     "authentication_failed" | "oauth_org_not_allowed" => "нужен вход в Claude",
                     _ => "неизвестная ошибка",
                 };
-                return say(&f.id, format!("{p}: {}", rotor.next(phrases::API).replace("{что}", what)), true);
+                return say(&f.id, Class::Urgent, p, rotor.next(phrases::API).replace("{что}", what));
             }
         }
     }
@@ -345,7 +348,8 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, rotor: &mut Rotor, ctx: &C
         t.health.clear();
         return match &f.pane {
             Some(pane) => run(f, pane, What::Wake, vec![Step::Text(if doc { WAKE_DOC } else { WAKE }.into())]),
-            None => say(&f.id, format!("{p}: лимит сброшен; агент не в herdr и не в Orca — разбуди его, пожалуйста."), false),
+            // агент стоит, пока пользователь его не разбудит, — держит работу: сразу, не пачкой
+            None => say(&f.id, Class::Now, p, "лимит сброшен; агент не в herdr и не в Orca — разбуди его, пожалуйста.".into()),
         };
     }
     let quiet = now.saturating_sub(f.active_at);
@@ -361,7 +365,7 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, rotor: &mut Rotor, ctx: &C
 /// Агент не в herdr и не в Orca: сделать ничего нельзя — только сказать.
 fn outside(t: &mut Track, rotor: &mut Rotor, f: &Facts, now: u64) -> Vec<Act> {
     (t.said, t.alarm, t.alarm_at) = (true, true, now);
-    say(&f.id, format!("{}: агент висит вне herdr и Orca, мне его не достать — {}.", f.project, rotor.next(phrases::END)), true)
+    say(&f.id, Class::Urgent, &f.project, format!("агент висит вне herdr и Orca, мне его не достать — {}.", rotor.next(phrases::END)))
 }
 
 /// Попыток за час не осталось — сказать пользователю один раз; None — пробовать можно. {конец} в what — хвост END.
@@ -376,7 +380,7 @@ fn spent(t: &mut Track, rotor: &mut Rotor, f: &Facts, now: u64, what: &str) -> O
     (t.gave_up, t.alarm, t.alarm_at) = (true, true, now);
     let n = (t.attempts[0] + ATTEMPTS_WINDOW - now).div_ceil(60);
     let what = what.replace("{конец}", rotor.next(phrases::END));
-    Some(say(&f.id, format!("{}: {what}. Через {n} мин попробую снова.", f.project), true))
+    Some(say(&f.id, Class::Urgent, &f.project, format!("{what}. Через {n} мин попробую снова.")))
 }
 
 /// Работает, а событий нет `quiet` секунд: помощники, опасное, лестница Esc → Ctrl+C → перезапуск.
@@ -391,7 +395,7 @@ fn hang(t: &mut Track, rotor: &mut Rotor, ctx: &Ctx, f: &Facts, quiet: u64) -> V
                     return vec![];
                 }
                 (t.said, t.alarm, t.alarm_at) = (true, true, now);
-                return say(&f.id, format!("{p}: агент не ответил про помощника — {}.", rotor.next(phrases::END)), true);
+                return say(&f.id, Class::Urgent, p, format!("агент не ответил про помощника — {}.", rotor.next(phrases::END)));
             }
             Ladder::Hung => {
                 if let Some(acts) = spent(t, rotor, f, now, "помощник агента снова молчит — {конец}") {
@@ -429,7 +433,7 @@ fn hang(t: &mut Track, rotor: &mut Rotor, ctx: &Ctx, f: &Facts, quiet: u64) -> V
                 return vec![];
             }
             (t.said, t.alarm, t.alarm_at) = (true, true, now);
-            return say(&f.id, format!("{p}: агент снова висит, поднять не вышло — {}.", rotor.next(phrases::END)), true);
+            return say(&f.id, Class::Urgent, p, format!("агент снова висит, поднять не вышло — {}.", rotor.next(phrases::END)));
         }
         _ => {}
     }
@@ -442,20 +446,20 @@ fn hang(t: &mut Track, rotor: &mut Rotor, ctx: &Ctx, f: &Facts, quiet: u64) -> V
         (t.said, t.alarm, t.alarm_at) = (true, true, now);
         let tool = f.sub_call.as_ref().and_then(|c| c["name"].as_str()).unwrap_or_default();
         let text = if what == "непонятный вызов" {
-            format!("{p}: сабагент висит на вызове {tool}, прерывать ли — не знаю; {}.", rotor.next(phrases::END))
+            format!("сабагент висит на вызове {tool}, прерывать ли — не знаю; {}.", rotor.next(phrases::END))
         } else {
-            format!("{p}: сабагент висит на опасном шаге — {what}; не трогаю, {}.", rotor.next(phrases::END))
+            format!("сабагент висит на опасном шаге — {what}; не трогаю, {}.", rotor.next(phrases::END))
         };
-        return say(&f.id, text, true);
+        return say(&f.id, Class::Urgent, p, text);
     }
     if let Some(what) = f.call.as_ref().and_then(danger) {
         (t.said, t.alarm, t.alarm_at) = (true, true, now);
         let text = if what == "непонятный вызов" {
-            format!("{p}: агент висит на вызове {name}, прерывать ли — не знаю; {}.", rotor.next(phrases::END))
+            format!("агент висит на вызове {name}, прерывать ли — не знаю; {}.", rotor.next(phrases::END))
         } else {
-            format!("{p}: агент висит на опасном шаге — {what}; не трогаю, {}.", rotor.next(phrases::END))
+            format!("агент висит на опасном шаге — {what}; не трогаю, {}.", rotor.next(phrases::END))
         };
-        return say(&f.id, text, true);
+        return say(&f.id, Class::Urgent, p, text);
     }
     if let Some(acts) = spent(t, rotor, f, now, "агент снова висит, поднять не вышло — {конец}") {
         return acts;
@@ -601,7 +605,7 @@ mod tests {
             w.tracks.entry(s.into()).or_default().project = "p".into();
         }
         let mut say = |s: &str, what, err: Option<&str>| match w.done(s, what, err.map(String::from), 1) {
-            Some(Act::Say { text, .. }) => text,
+            Some(Act::Say { project, text, .. }) => format!("{project}: {text}"),
             other => panic!("{other:?}"),
         };
         let woke: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| say(s, What::Wake, None)).collect();
@@ -624,7 +628,7 @@ mod tests {
         let mut w = Watch::default();
         w.check(&ctx(100, 0), vec![f("a")], |_| true, |_| false);
         let acts = w.check(&ctx(110, 5), vec![], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: false, text, .. }] if text == "p: агент закрылся посреди хода."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Restore, project, text, .. }] if project == "p" && text == "агент закрылся посреди хода."), "{acts:?}");
     }
 
     #[test]
@@ -632,7 +636,7 @@ mod tests {
         let mut w = Watch::default();
         w.check(&ctx(100, 0), vec![f("a"), Facts { state: State::Idle, ..f("b") }], |_| false, |_| false);
         let acts = w.check(&ctx(200, 999), vec![], |_| false, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text.contains("не в herdr или Orca")), "закрытый в покое агент — не новость: {acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Urgent, text, .. }] if text.contains("не в herdr или Orca")), "закрытый в покое агент — не новость: {acts:?}");
     }
 
     #[test]
@@ -652,7 +656,7 @@ mod tests {
         let mut w = Watch::default();
         let a = Facts { call: Some(json!({"name": "Bash", "input": {"command": "git push origin main"}})), ..f("a") };
         let acts = w.check(&ctx(800, 999), vec![a.clone()], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент висит на опасном шаге — push; не трогаю, загляни, пожалуйста."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Urgent, project, text, .. }] if project == "p" && text == "агент висит на опасном шаге — push; не трогаю, загляни, пожалуйста."), "{acts:?}");
         assert!(w.check(&ctx(900, 999), vec![a], |_| true, |_| false).is_empty(), "один раз");
         assert_eq!((w.trouble(), w.health("a").as_str()), (1, "завис"));
     }
@@ -662,7 +666,7 @@ mod tests {
         let mut w = Watch::default();
         let a = Facts { call: Some(json!({"name": "mcp__db__delete_row", "input": {}})), ..f("a") };
         let acts = w.check(&ctx(800, 999), vec![a], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент висит на вызове mcp__db__delete_row, прерывать ли — не знаю; загляни, пожалуйста."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Urgent, project, text, .. }] if project == "p" && text == "агент висит на вызове mcp__db__delete_row, прерывать ли — не знаю; загляни, пожалуйста."), "{acts:?}");
     }
 
     #[test]
@@ -677,7 +681,7 @@ mod tests {
         let j = run_of(&acts[0]).unwrap();
         assert_eq!((j.what, &j.steps[..2]), (What::Interrupt, &[Step::Key(Key::Esc), Step::Pause(1500)][..]));
         assert!(text_of(j).starts_with("Ход завис на 14 мин, я прервала его."), "{}", text_of(j));
-        assert!(matches!(w.done("a", What::Interrupt, None, 861), Some(Act::Say { urgent: false, text, .. }) if text == "p: прервала зависший ход, попросила продолжить."));
+        assert!(matches!(w.done("a", What::Interrupt, None, 861), Some(Act::Say { class: Class::Restore, project, text, .. }) if project == "p" && text == "прервала зависший ход, попросила продолжить."));
         assert!(w.check(&ctx(1000, 999), vec![a.clone()], |_| true, |_| false).is_empty());
         assert_eq!(run_of(&w.check(&ctx(861 + 360, 999), vec![a], |_| true, |_| false)[0]).unwrap().what, What::Kill);
     }
@@ -714,7 +718,7 @@ mod tests {
         }
         let a = Facts { call: Some(json!({"name": "Agent", "input": {}})), active_at: t, ..f("a") };
         let acts = w.check(&ctx(t + 800, 999), vec![a.clone()], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент снова висит, поднять не вышло — загляни, пожалуйста. Через 20 мин попробую снова."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Urgent, project, text, .. }] if project == "p" && text == "агент снова висит, поднять не вышло — загляни, пожалуйста. Через 20 мин попробую снова."), "{acts:?}");
         assert_eq!(w.trouble(), 1);
         assert!(w.check(&ctx(4400, 999), vec![a.clone()], |_| true, |_| false).is_empty(), "сказано один раз, попытки ещё в окне");
         assert_eq!(run_of(&w.check(&ctx(4401, 999), vec![a], |_| true, |_| false)[0]).unwrap().what, What::Interrupt, "первая попытка вышла из часа — не сдаёмся");
@@ -731,7 +735,7 @@ mod tests {
         let j = run_of(&acts[0]).unwrap();
         assert_eq!((j.what, &j.steps[..]), (What::Nudge, &[Step::Text("Твой фоновый помощник молчит 14 мин — похоже, завис. Проверь его: завис — останови и перезапусти.".into())][..]));
         assert!(w.check(&ctx(900, 0), vec![a], |_| true, |_| false).is_empty());
-        assert!(matches!(w.done("a", What::Nudge, None, 901), Some(Act::Say { text, .. }) if text == "p: написала агенту: его помощник молчит."));
+        assert!(matches!(w.done("a", What::Nudge, None, 901), Some(Act::Say { project, text, .. }) if project == "p" && text == "написала агенту: его помощник молчит."));
     }
 
     #[test]
@@ -751,7 +755,7 @@ mod tests {
         let acts = w.check(&ctx(800, 999), vec![a], |_| true, |_| false);
         let j = run_of(&acts[0]).unwrap();
         assert_eq!(text_of(j), "Сабагент висел 13 мин, я прервала ход. Перезапусти его, если он ещё нужен.");
-        assert!(matches!(w.done("a", What::Interrupt, None, 801), Some(Act::Say { text, .. }) if text == "p: прервала зависшего сабагента, агент запустит его заново."));
+        assert!(matches!(w.done("a", What::Interrupt, None, 801), Some(Act::Say { project, text, .. }) if project == "p" && text == "прервала зависшего сабагента, агент запустит его заново."));
     }
 
     #[test]
@@ -761,13 +765,13 @@ mod tests {
         let five: Vec<Facts> = (0..5).map(|i| Facts { state: State::Idle, active_at: 100, error: err.clone(), ..f(&format!("a{i}")) }).collect();
         let says = w.check(&ctx(110, 0), five.clone(), |_| true, |_| false);
         assert_eq!(says.len(), 1, "{says:?}");
-        assert!(matches!(&says[0], Act::Say { session, urgent: false, text } if session == "limit" && text.starts_with("Кончился лимит Claude, сброс в ")));
+        assert!(matches!(&says[0], Act::Say { session, class: Class::Restore, project, text } if session == "limit" && project.is_empty() && text.starts_with("Кончился лимит Claude, сброс в ")));
         assert!(w.health("a0").starts_with("лимит до "));
         assert!(w.check(&ctx(5030, 0), five.clone(), |_| true, |_| false).is_empty(), "сброс + 60 с ещё не настал");
         let wakes = w.check(&ctx(5061, 0), five.clone(), |_| true, |_| false);
         assert_eq!(wakes.iter().filter_map(run_of).filter(|j| j.what == What::Wake && text_of(j) == "Лимит сброшен, продолжай с того места, где остановился.").count(), 5);
         assert!(w.check(&ctx(5200, 0), five, |_| true, |_| false).is_empty(), "будим один раз");
-        assert!(matches!(w.done("a0", What::Wake, None, 5201), Some(Act::Say { text, .. }) if text == "p: разбудила агента: лимит сброшен."));
+        assert!(matches!(w.done("a0", What::Wake, None, 5201), Some(Act::Say { project, text, .. }) if project == "p" && text == "разбудила агента: лимит сброшен."));
     }
 
     #[test]
@@ -781,7 +785,7 @@ mod tests {
         let mut w = Watch::default();
         w.limited("b", 5000);
         let acts = w.check(&ctx(5061, 0), vec![Facts { pane: None, ..a }.clone_as("b")], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: false, text, .. }] if text == "p: лимит сброшен; агент не в herdr и не в Orca — разбуди его, пожалуйста."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Now, project, text, .. }] if project == "p" && text == "лимит сброшен; агент не в herdr и не в Orca — разбуди его, пожалуйста."), "{acts:?}");
     }
 
     #[test]
@@ -796,7 +800,7 @@ mod tests {
             assert!(w.check(&ctx(at + 150, 0), vec![lost(at)], |_| true, |_| false).is_empty(), "та же ошибка — одна просьба");
         }
         let acts = w.check(&ctx(800, 0), vec![lost(700)], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: связь с Claude не держится — загляни, пожалуйста."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Urgent, project, text, .. }] if project == "p" && text == "связь с Claude не держится — загляни, пожалуйста."), "{acts:?}");
         assert!(w.check(&ctx(1000, 0), vec![lost(900)], |_| true, |_| false).is_empty(), "сказано один раз");
     }
 
@@ -805,7 +809,7 @@ mod tests {
         let mut w = Watch::default();
         let a = Facts { state: State::Idle, active_at: 100, error: Some(ApiError { kind: "authentication_failed".into(), at: 100, resets_at: None }), ..f("a") };
         let acts = w.check(&ctx(110, 0), vec![a.clone()], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: ошибка API — нужен вход в Claude."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Urgent, project, text, .. }] if project == "p" && text == "ошибка API — нужен вход в Claude."), "{acts:?}");
         assert!(w.check(&ctx(200, 0), vec![a], |_| true, |_| false).is_empty());
         assert_eq!((w.trouble(), w.health("a").as_str()), (1, "ошибка API"));
     }
@@ -826,7 +830,7 @@ mod tests {
         let mut w = Watch::default();
         let a = Facts { pane: None, call: Some(json!({"name": "Agent", "input": {}})), ..f("a") };
         let acts = w.check(&ctx(800, 999), vec![a], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент висит вне herdr и Orca, мне его не достать — загляни, пожалуйста."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Urgent, project, text, .. }] if project == "p" && text == "агент висит вне herdr и Orca, мне его не достать — загляни, пожалуйста."), "{acts:?}");
     }
 
     #[test]
@@ -839,14 +843,14 @@ mod tests {
         assert!(matches!(&w.check(&ctx(1600, 999), vec![a.clone()], |_| true, |_| false)[..], [Act::Judge { .. }]));
         w.judged("a", true, 1605);
         let acts = w.check(&ctx(1660, 999), vec![a], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент висит вне herdr и Orca, мне его не достать — загляни, пожалуйста."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Urgent, project, text, .. }] if project == "p" && text == "агент висит вне herdr и Orca, мне его не достать — загляни, пожалуйста."), "{acts:?}");
     }
 
     #[test]
     fn failed_action_is_urgent() {
         let mut w = Watch::default();
         w.check(&ctx(800, 999), vec![Facts { call: Some(json!({"name": "Agent", "input": {}})), ..f("a") }], |_| true, |_| false);
-        assert!(matches!(w.done("a", What::Interrupt, Some("таймаут".into()), 801), Some(Act::Say { urgent: true, text, .. }) if text == "p: сообщение агенту не ушло — загляни, пожалуйста."));
+        assert!(matches!(w.done("a", What::Interrupt, Some("таймаут".into()), 801), Some(Act::Say { class: Class::Urgent, project, text, .. }) if project == "p" && text == "сообщение агенту не ушло — загляни, пожалуйста."));
         assert_eq!(w.trouble(), 1);
     }
 
@@ -907,10 +911,10 @@ mod tests {
         let mut w = Watch::default();
         let a = Facts { call: Some(json!({"name": "Agent", "input": {}})), sub_call: Some(json!({"name": "Bash", "input": {"command": "npx prisma migrate deploy"}})), ..f("a") };
         let acts = w.check(&ctx(800, 999), vec![a], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: сабагент висит на опасном шаге — миграция; не трогаю, загляни, пожалуйста."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Urgent, project, text, .. }] if project == "p" && text == "сабагент висит на опасном шаге — миграция; не трогаю, загляни, пожалуйста."), "{acts:?}");
         let mut w = Watch::default();
         let b = Facts { call: Some(json!({"name": "Agent", "input": {}})), sub_call: Some(json!({"name": "mcp__db__write", "input": {}})), ..f("b") };
-        assert!(matches!(&w.check(&ctx(800, 999), vec![b], |_| true, |_| false)[..], [Act::Say { urgent: true, text, .. }] if text.contains("прерывать ли — не знаю")));
+        assert!(matches!(&w.check(&ctx(800, 999), vec![b], |_| true, |_| false)[..], [Act::Say { class: Class::Urgent, text, .. }] if text.contains("прерывать ли — не знаю")));
     }
 
     #[test]
@@ -937,7 +941,7 @@ mod tests {
         w.check(&ctx(t + 800, 0), vec![a.clone()], |_| true, |_| false);
         w.judged("a", true, t + 801);
         let acts = w.check(&ctx(t + 802, 0), vec![a.clone()], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: помощник агента снова молчит — загляни, пожалуйста. Через 15 мин попробую снова."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Urgent, project, text, .. }] if project == "p" && text == "помощник агента снова молчит — загляни, пожалуйста. Через 15 мин попробую снова."), "{acts:?}");
         assert!(w.check(&ctx(t + 900, 0), vec![a.clone()], |_| true, |_| false).is_empty());
         assert_eq!(run_of(&w.check(&ctx(803 + 3600, 0), vec![a], |_| true, |_| false)[0]).unwrap().what, What::Nudge, "окно освободилось — пишем снова");
     }
@@ -951,7 +955,7 @@ mod tests {
         assert_eq!(run_of(&w.check(&ctx(802, 0), vec![a.clone()], |_| true, |_| false)[0]).unwrap().what, What::Nudge);
         assert!(w.check(&ctx(802 + 719, 0), vec![a.clone()], |_| true, |_| false).is_empty(), "ждём ответа агента");
         let acts = w.check(&ctx(802 + 720, 0), vec![a.clone()], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент не ответил про помощника — загляни, пожалуйста."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Urgent, project, text, .. }] if project == "p" && text == "агент не ответил про помощника — загляни, пожалуйста."), "{acts:?}");
         assert!(w.check(&ctx(2000, 0), vec![a.clone()], |_| true, |_| false).is_empty(), "один раз");
         assert_eq!(w.trouble(), 1);
         assert!(w.check(&ctx(2100, 0), vec![Facts { active_at: 2050, ..a }], |_| true, |_| false).is_empty());
@@ -995,13 +999,13 @@ mod tests {
         w.ended("a"); // Ctrl+C дважды — Claude Code шлёт SessionEnd
         let acts = w.check(&ctx(1210, 0), vec![], |_| true, |_| false);
         assert_eq!(run_of(&acts[0]).unwrap().what, What::Resume);
-        assert!(matches!(w.done("a", What::Resume, None, 1215), Some(Act::Say { text, .. }) if text == "p: перезапустила зависшего агента."));
+        assert!(matches!(w.done("a", What::Resume, None, 1215), Some(Act::Say { project, text, .. }) if project == "p" && text == "перезапустила зависшего агента."));
         let mut w = Watch::default();
         w.check(&ctx(800, 0), vec![a.clone()], |_| true, |_| false);
         w.check(&ctx(1200, 0), vec![a.clone()], |_| true, |_| false);
         w.done("a", What::Kill, None, 1201); // Ctrl+C не закрыл агента
         w.check(&ctx(1300, 0), vec![Facts { active_at: 1290, ..a }], |_| true, |_| false);
-        assert!(matches!(&w.check(&ctx(1600, 0), vec![], |_| true, |_| false)[..], [Act::Say { urgent: false, .. }]), "закрыл пользователь, сидя за компьютером, — только сказать");
+        assert!(matches!(&w.check(&ctx(1600, 0), vec![], |_| true, |_| false)[..], [Act::Say { class: Class::Restore, .. }]), "закрыл пользователь, сидя за компьютером, — только сказать");
     }
 
     #[test]
@@ -1024,7 +1028,7 @@ mod tests {
         let mut w = Watch::default();
         w.check(&ctx(100, 0), vec![f("a")], |_| true, |_| false);
         w.check(&ctx(200, 999), vec![], |_| true, |_| false);
-        assert!(matches!(w.done("a", What::Resume, Some("нет терминала".into()), 201), Some(Act::Say { urgent: true, .. })));
+        assert!(matches!(w.done("a", What::Resume, Some("нет терминала".into()), 201), Some(Act::Say { class: Class::Urgent, .. })));
         assert_eq!(w.trouble(), 1);
         w.check(&ctx(260, 999), vec![], |_| true, |_| false);
         assert_eq!(w.trouble(), 1, "оранжевый держится, пока пользователь не посмотрел");

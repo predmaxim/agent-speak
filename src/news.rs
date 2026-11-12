@@ -119,12 +119,22 @@ impl Board {
         self.items.push(n);
     }
 
-    /// Пользователь ответил (хоть в терминале раньше Омы): ждать и спрашивать больше нечего, и «нужно» агента снято.
+    /// Вопрос агента решён (ответили, ход кончился, он спросил новое): ждать и спрашивать больше нечего. «Нужно» агента
+    /// остаётся: его снимает только ответ пользователя (prompted).
     pub fn answered(&mut self, session: &str) {
+        self.drop_asks(session, &[Class::Question]);
+    }
+
+    /// Пользователь написал агенту (хоть в терминале раньше Омы): и вопрос, и «нужно» агента сняты.
+    pub fn prompted(&mut self, session: &str) {
+        self.drop_asks(session, &[Class::Question, Class::Now]);
+    }
+
+    fn drop_asks(&mut self, session: &str, classes: &[Class]) {
         if self.asked.as_ref().is_some_and(|(q, _)| q.session == session) {
             self.asked = None;
         }
-        let asks = |i: &News| i.session == session && matches!(i.class, Class::Question | Class::Now);
+        let asks = |i: &News| i.session == session && classes.contains(&i.class);
         self.items.retain(|i| !asks(i));
         self.spoken.retain(|(i, _)| !asks(i));
     }
@@ -245,9 +255,11 @@ impl Board {
         }
     }
 
-    /// «<prefix>: …» («Пока тебя не было», «Пока было тихо») — по счётчикам доски; пусто — None.
-    pub fn overview(&self, prefix: &str) -> Option<String> {
-        let mut done: Vec<&str> = self.items.iter().filter(|i| i.class == Class::Final).map(|i| i.session.as_str()).collect();
+    /// «<prefix>: …» («Пока тебя не было», «Пока было тихо») — по счётчикам доски; пусто — None. skip — агент в фокусе:
+    /// его итог не в счёт, как в drop_focused.
+    pub fn overview(&self, prefix: &str, skip: Option<&str>) -> Option<String> {
+        let finals = self.items.iter().filter(|i| i.class == Class::Final && Some(i.session.as_str()) != skip);
+        let mut done: Vec<&str> = finals.map(|i| i.session.as_str()).collect();
         done.sort_unstable();
         done.dedup();
         let (d, w) = (done.len(), self.question_sessions().len());
@@ -316,7 +328,7 @@ fn batch(finals: &[News]) -> Vec<Chunk> {
         }
     }
     if !names.is_empty() {
-        let verb = plural(names.len(), ["Закончил", "Закончили", "Закончили"]);
+        let verb = if names.len() == 1 { "Закончил" } else { "Закончили" }; // перечень имён, а не числительное
         let more = if chunks.is_empty() { "" } else { " ещё" };
         chunks.push(Chunk { class: Some(Class::Final), project: String::new(), text: format!("{verb}{more}: {}.", names.join(", ")) });
     }
@@ -499,15 +511,15 @@ mod tests {
     #[test]
     fn overview_counts_and_plurals() {
         let mut b = Board::default();
-        assert_eq!(b.overview("Пока тебя не было"), None);
+        assert_eq!(b.overview("Пока тебя не было", None), None);
         b.push(n("a", Class::Final, "x", 1));
-        assert_eq!(b.overview("Пока тебя не было").unwrap(), "Пока тебя не было: 1 проект закончил.");
+        assert_eq!(b.overview("Пока тебя не было", None).unwrap(), "Пока тебя не было: 1 проект закончил.");
         b.push(n("b", Class::Final, "x", 1));
         b.push(n("q", Class::Question, "Q?", 1));
-        assert_eq!(b.overview("Пока было тихо").unwrap(), "Пока было тихо: 2 проекта закончили, 1 ждёт ответа.");
+        assert_eq!(b.overview("Пока было тихо", None).unwrap(), "Пока было тихо: 2 проекта закончили, 1 ждёт ответа.");
         for s in ["c", "d", "e"] { b.push(n(s, Class::Final, "x", 1)); }
         b.push(n("r", Class::Question, "R?", 1));
-        assert_eq!(b.overview("Пока тебя не было").unwrap(), "Пока тебя не было: 5 проектов закончили, 2 ждут ответа.");
+        assert_eq!(b.overview("Пока тебя не было", None).unwrap(), "Пока тебя не было: 5 проектов закончили, 2 ждут ответа.");
         assert_eq!(b.finals(), 5);
     }
 
@@ -694,7 +706,9 @@ mod tests {
         b.retain_sessions(|_| false);
         assert!(b.sayable(10, None), "rescan «нужно» не снимает");
         b.answered("w");
-        assert_eq!(tk(&mut b, 10, None), None, "ответ снимает");
+        assert!(b.sayable(10, None), "новый вопрос агента или конец хода снимают только прежний вопрос");
+        b.prompted("w");
+        assert_eq!(tk(&mut b, 10, None), None, "ответ пользователя снимает");
     }
 
     #[test]
@@ -744,6 +758,11 @@ mod tests {
         b.push(imp("c", "agent-speak: нужно решить, куда пушить.", 7));
         b.push(n("a", Class::Final, "datebook: готово.", 8));
         assert_eq!(tk(&mut b, 30, None).unwrap(), "agent-speak: нужно решить, куда пушить. Закончил ещё: datebook.");
+        // глагол — по числу имён, а не правило числительных: 21 проект — «Закончили»
+        for i in 0..21 {
+            b.push(n(&format!("s{i}"), Class::Final, &format!("p{i}: готово."), 40 + i));
+        }
+        assert!(tk(&mut b, 40, None).unwrap().starts_with("Закончили: p0, p1,"));
     }
 
     #[test]
