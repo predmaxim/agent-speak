@@ -346,7 +346,6 @@ class Oma:
             if ev[1]:
                 self.ear.speaking = True
             else:
-                self.ear.aec_until = until or 0.0  # кадры, записанные до конца её звука, — с эхоподавлением (Ear._read)
                 self.bg(self._tail_over(self.sound, until or 0.0))
             # >=, а не ==: лишняя засчитанная реплика оставила бы её в «говорю» навсегда, а не на один ответ раньше
             await self.act(c.audio(ev[1], until, voiced is None or voiced >= self.says or user_paused))
