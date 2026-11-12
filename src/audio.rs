@@ -186,8 +186,10 @@ mod tests {
         use std::os::fd::AsRawFd;
         let (_r, mut w) = std::io::pipe().unwrap();
         assert_eq!(queued(w.as_raw_fd()), Some(0));
-        w.write_all(&[0; 9600]).unwrap();
-        assert_eq!(queued(w.as_raw_fd()), Some(9600), "остаток канала pw-cat — по его пишущему концу");
+        // не больше PIPE_BUF: его пустой канал вмещает всегда — и урезанный до страницы лимитом pipe-user-pages-soft
+        // (pipe(7)); 9600 байт в таком канале без читателя вешали тест навсегда
+        w.write_all(&[0; libc::PIPE_BUF]).unwrap();
+        assert_eq!(queued(w.as_raw_fd()), Some(libc::PIPE_BUF), "остаток канала pw-cat — по его пишущему концу");
     }
 
     #[test]
