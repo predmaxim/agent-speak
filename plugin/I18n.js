@@ -19,6 +19,7 @@ var TABLES = {
     "No agents": "Агентов нет", "You": "Ты", "Ask Oma…": "Спросить Ому…", "Untitled chat": "Без названия",
     "No chats yet": "Чатов пока нет", "Quiet now": "Сейчас тихо", "On schedule": "По расписанию", "From / to": "С / до",
     "Hearing": "Слух", "Pause music while Oma speaks and listens": "Пауза музыки, пока Ома говорит и слушает",
+    "Headset button": "Кнопка наушников", "Play — «I'm here» or «hush», next — the summary": "Пуск — «я тут» или «замолчи», вперёд — сводка",
     "Orb": "Орб", "Over fullscreen windows": "Над полноэкранными окнами", "Agent satellites": "Спутники агентов", "Orb mood": "Настроение орба", "Mic is off": "Микрофон выключен", "%1 failed calls this turn": "ошибок за ход: %1",
     "Tempo: very slow": "Темп: очень медленно", "Tempo: slow": "Темп: медленно", "Tempo: normal": "Темп: обычно",
     "Tempo: fast": "Темп: быстро", "Tempo: very fast": "Темп: очень быстро", "Breathes at rest": "Дышит в покое", "%1 more": "ещё %1",

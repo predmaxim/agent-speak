@@ -3,6 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 command -v cargo >/dev/null || { echo "нужен cargo (rustup или pacman -S rust)" >&2; exit 1; }
+# кнопка наушников (src/mpris.rs): crate dbus собирается на системной libdbus
+pkg-config --exists dbus-1 2>/dev/null || { echo "нужны pkg-config и libdbus (pacman -S pkgconf dbus)" >&2; exit 1; }
 DATA=~/.local/share/agent-speak
 
 cargo build --release

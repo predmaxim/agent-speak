@@ -7,6 +7,7 @@ use crate::digest::{self, Ask, Digest, Job};
 use crate::focus::{self, Agent, SessionRef};
 use crate::ipc::{self, Msg};
 use crate::limits::{self, Limits};
+use crate::mpris::{Button, Player};
 use crate::mux::{self, Pane};
 use crate::news::{self, Board, Chunk, Class, News, SUMMARY};
 use crate::notice::notify as notice;
@@ -45,6 +46,7 @@ enum Event {
     Show(String, Sender<Result<String, String>>), // `agent-speak show`: агент (пусто — следующий ждущий), ответ — его проект или ошибка
     Bt(&'static str, bool), // режим наушников переключён (headset | music) и переключала ли его Ома
     Outs(String, String), // выходы звука сменились: выход по умолчанию, динамики ноутбука — от потока `pactl subscribe`
+    Button(Button),       // кнопка наушников: вызов MPRIS-плеера Омы (mpris.rs)
 }
 
 /// Микрофон наушников для «Ты тут?»: ушёл в наушниках — ответ услышит только он.
@@ -170,6 +172,7 @@ struct Status<'a> {
     wake: &'a str,            // слово-побудка: on | off | battery | muted | busy | no_model | no_mic
     wake_word: bool,          // настройка: отзываться на «Ома»
     memory: bool,             // настройка: помнить прошлые дни
+    headset_button: bool,     // настройка: кнопка наушников (MPRIS-плеер Омы, пока она говорит или спросила «Ты тут?»)
 }
 
 /// Процесс Омы (python -m agent_voice): команды — строками в stdin, события — через сокет.
@@ -305,6 +308,7 @@ struct State {
     voice_base: u64, // столько их было до запуска нынешней Омы: voiced считается от него
     rate_now: Option<String>, // темп этого ответа с колеса над орбом; None — из настроек
     struggling_sent: usize,   // struggling последней разосланной строки состояния
+    player: Player,           // MPRIS-плеер Омы для кнопки наушников; в тестах — без шины
 }
 
 fn home() -> PathBuf {
@@ -430,6 +434,12 @@ pub fn run() {
         });
     }
 
+    let player = {
+        let tx = tx.clone();
+        crate::mpris::spawn(move |b| {
+            let _ = tx.send(Event::Button(b));
+        })
+    };
     let mut st = State {
         cfg,
         shared,
@@ -511,6 +521,7 @@ pub fn run() {
         voice_base: 0,
         rate_now: None,
         struggling_sent: 0,
+        player,
     };
     st.board.every = st.cfg.news_every * 60; // дальше — apply() при каждой смене настроек
     {
@@ -543,7 +554,9 @@ pub fn run() {
             Event::Show(agent, reply) => st.show(&agent, reply),
             Event::Bt(mode, switched) => st.on_bt(mode, switched),
             Event::Outs(default, speakers) => st.on_outs(default, speakers),
+            Event::Button(b) => st.on_button(b),
         }
+        st.sync_player(); // плеер кнопки наушников — по итогу любого события: говорит ли она, спросила ли «Ты тут?»
     }
 }
 
@@ -1028,6 +1041,8 @@ impl State {
             wake_word: false,
             // память между днями
             memory: self.cfg.memory,
+            // волна 5: кнопка наушников
+            headset_button: self.cfg.headset_button,
         };
         format!("{}\n", serde_json::to_string(&st).unwrap())
     }
@@ -2001,12 +2016,46 @@ impl State {
             self.stop();
             return;
         }
+        self.brief();
+    }
+
+    /// Сводка агентов одной фразой кодом — вслух (Kind::Read) и пузырём Омы; при тишине по причине — только пузырь.
+    fn brief(&mut self) {
         let text = self.registry.brief();
         self.bubble("", "summary", "Ома", &text, "oma"); // при показе экрана bubble() закрывает текст
         // тихий режим жест не глушит (он явный), а тишина по причине («Не беспокоить», показ экрана) — только пузырь
         if !self.quiet_why.any() {
             self.enqueue(Agent::Claude, "summary", &text, Kind::Read);
         }
+    }
+
+    /// Кнопка наушников выбрала плеер Омы: он виден, только пока она говорит (и между фразами её ответа) или ждёт
+    /// ответа на «Ты тут?», и если кнопка не выключена в настройках.
+    fn sync_player(&mut self) {
+        let on = self.shared.busy.load(Ordering::SeqCst) || self.oma.state == "speaking" || self.here_ask.is_some();
+        self.player.set(self.cfg.headset_button && on);
+    }
+
+    /// Кнопка наушников (MPRIS): во время «Ты тут?» любая — «я тут», как «да» голосом; иначе — «замолчи»: стоп, как
+    /// `agent-speak stop`, а звучит её ответ — и ход мозга оборвать, как Esc. Next ещё и говорит сводку кодом, как средний
+    /// клик. Оме кнопка не шлёт ни слова — она никогда не «да, передай». Плеера уже нет — запоздалый вызов не действует.
+    fn on_button(&mut self, b: Button) {
+        if !self.player.on {
+            return;
+        }
+        if self.here_ask.is_some() {
+            let back = self.presence.said(Mode::Here, (self.now_secs)());
+            self.on_back(back);
+            self.oma_send(&serde_json::json!({"do": "here"})); // её окно вопроса — закрыть, как после «да»: новости не ждут его конца
+        } else if self.oma.state == "speaking" {
+            self.oma_send(&serde_json::json!({"do": "cancel"}));
+        }
+        self.stop(); // и дозвучивающий «Ты тут?»
+        self.oma_paused = false;
+        if b == Button::Next && self.cfg.agents_voice {
+            self.brief(); // после stop: звук ещё не смолк, а сводка — уже вместо него
+        }
+        self.broadcast();
     }
 
     /// `agent-speak show`: агент (пусто — следующий ждущий по кругу, Registry::jump) — на экран. hyprctl и CLI
@@ -2370,6 +2419,7 @@ mod tests {
             voice_base: 0,
             rate_now: None,
             struggling_sent: 0,
+            player: Player::offline(),
         }
     }
 
@@ -2771,6 +2821,7 @@ mod tests {
                 "done_facts", "permission_buttons", "agent_inbox",              // агенты: волна 4
                 "wake", "wake_word",                                            // слово-побудка: волна 5
                 "memory",                                                       // память между днями
+                "headset_button",                                               // кнопка наушников: волна 5
             ]
         );
     }
@@ -3959,6 +4010,95 @@ mod tests {
         st.on_msg(Msg::Summary);
         assert!(texts(&st).is_empty(), "«Не беспокоить» — сводка не звучит");
         assert_eq!(bubbles(&mut r).iter().map(|b| b["text"].as_str().unwrap().to_string()).collect::<Vec<_>>(), ["Работает почта."]);
+    }
+
+    /// Команды Оме — в файл (заглушка `cat`): что ушло ей в stdin.
+    fn oma_to_file(st: &mut State, tag: &str) -> (TempHome, PathBuf) {
+        let h = TempHome::new(tag);
+        std::fs::create_dir_all(&h.dir).unwrap();
+        let out = h.dir.join("in.txt");
+        st.voice_cmd = vec!["sh".into(), "-c".into(), format!("cat > {}", out.display())];
+        st.oma_spawn();
+        (h, out)
+    }
+
+    /// Строки, ушедшие Оме: служба (её stdin) закрыта, заглушка дописала и вышла.
+    fn oma_got(mut st: State, out: &Path) -> Vec<serde_json::Value> {
+        let mut child = st.oma.child.take().unwrap();
+        drop(st);
+        child.wait().unwrap();
+        std::fs::read_to_string(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    }
+
+    #[test]
+    fn headset_player_lives_while_she_speaks_or_asks_are_you_there() {
+        let mut st = test_state();
+        st.sync_player();
+        assert!(!st.player.on, "покой — плеера нет: кнопка — музыке");
+        st.shared.busy.store(true, Ordering::SeqCst);
+        st.sync_player();
+        assert!(st.player.on, "говорит");
+        st.shared.busy.store(false, Ordering::SeqCst);
+        st.oma.state = "speaking".into();
+        st.sync_player();
+        assert!(st.player.on, "её ответ между фразами — плеер не мигает");
+        st.oma.state = "listening".into();
+        st.here_ask = Some(HereAsk::Since(1000));
+        st.sync_player();
+        assert!(st.player.on, "ждёт ответа на «Ты тут?»");
+        st.cfg.headset_button = false;
+        st.sync_player();
+        assert!(!st.player.on, "настройка выключена — плеера нет");
+        let v: serde_json::Value = serde_json::from_str(&st.status_line()).unwrap();
+        assert_eq!(v["headset_button"], false);
+    }
+
+    #[test]
+    fn headset_toggle_during_are_you_there_is_here_and_the_news_follow() {
+        let (mut st, _env, _now) = asked_are_you_there();
+        let (_h, out) = oma_to_file(&mut st, "button-here");
+        st.sync_player();
+        assert!(st.player.on);
+        st.on_button(Button::Toggle);
+        assert!(st.here_ask.is_none(), "«я тут» — вопрос снят");
+        assert_eq!(st.presence.mode(1100), Mode::Here);
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."], "новости — сразу");
+        // Оме — только закрыть окно вопроса: ни реплики, ни «да» — кнопка никогда не «да, передай»
+        assert_eq!(oma_got(st, &out), [serde_json::json!({"do": "here"}), serde_json::json!({"do": "warm"})], "warm — прогрев слуха к новостям");
+    }
+
+    #[test]
+    fn headset_toggle_during_speech_is_hush_and_cuts_her_turn() {
+        let mut st = test_state();
+        let (_h, out) = oma_to_file(&mut st, "button-hush");
+        st.enqueue(Agent::Claude, "voice", "Раз. Два.", Kind::Voice);
+        st.shared.busy.store(true, Ordering::SeqCst);
+        st.oma.state = "speaking".into();
+        st.sync_player();
+        st.on_button(Button::Toggle);
+        assert!(texts(&st).is_empty(), "«замолчи» — очередь пуста");
+        assert_eq!(oma_got(st, &out), [serde_json::json!({"do": "cancel"})], "её ответ звучит — и ход оборвать, как Esc");
+    }
+
+    #[test]
+    fn headset_next_cuts_and_says_the_summary_by_code() {
+        let mut st = test_state();
+        with_agents(&mut st, &["почта"]);
+        st.enqueue(Agent::Claude, "news", "Длинная новость.", Kind::News);
+        st.shared.busy.store(true, Ordering::SeqCst); // ещё звучит: стоп у потока воспроизведения — позже
+        st.sync_player();
+        st.on_button(Button::Next);
+        assert_eq!(texts(&st), ["Работает почта."], "сводка — вместо того, что звучало");
+    }
+
+    #[test]
+    fn headset_button_after_the_player_left_does_nothing() {
+        let mut st = test_state();
+        st.enqueue(Agent::Claude, "news", "Новость.", Kind::News);
+        st.on_button(Button::Toggle);
+        st.on_button(Button::Next);
+        assert_eq!(texts(&st), ["Новость."], "плеера нет — запоздалый вызов не действует");
     }
 
     fn sub(st: &mut State) -> BufReader<UnixStream> {

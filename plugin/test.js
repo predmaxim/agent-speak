@@ -266,7 +266,7 @@ assert.strictEqual(M.taken("", { key: "chat:1", role: "me", text: "" }), false)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 20)
+assert.strictEqual(M.SETTINGS_ROWS.length, 21)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "kseniya", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
@@ -285,7 +285,8 @@ assert.deepStrictEqual(M.settingStep("agents_voice", Object.assign({}, cfg, { ag
 assert.deepStrictEqual(M.settingStep("screencast_privacy", Object.assign({}, cfg, { screencast_privacy: true }), 1), { key: "screencast_privacy", value: false, sample: false })
 assert.deepStrictEqual(M.settingStep("hush_summary", cfg, 1), { key: "hush_summary", value: true, sample: false })
 assert.deepStrictEqual(M.settingStep("music_pause", Object.assign({}, cfg, { music_pause: true }), 1), { key: "music_pause", value: false, sample: false })
-assert.deepStrictEqual(M.SETTINGS_SECTIONS.find(s => s.title === "Hearing").rows, ["music_pause"])
+assert.deepStrictEqual(M.SETTINGS_SECTIONS.find(s => s.title === "Hearing").rows, ["music_pause", "headset_button"])
+assert.deepStrictEqual(M.settingStep("headset_button", Object.assign({}, cfg, { headset_button: true }), 1), { key: "headset_button", value: false, sample: false })
 assert.deepStrictEqual(M.settingStep("limit_warn", Object.assign({}, cfg, { limit_warn: true }), 1), { key: "limit_warn", value: false, sample: false })
 assert.strictEqual(M.SETTINGS_SECTIONS[4].rows[M.SETTINGS_SECTIONS[4].rows.length - 1], "limit_warn", "«Предупреждать о лимите» — последняя в агентах")
 assert.deepStrictEqual(M.settingStep("memory", Object.assign({}, cfg, { memory: true }), 1), { key: "memory", value: false, sample: false })
@@ -372,6 +373,10 @@ assert.deepStrictEqual(M.toResume([pl("a", false), pl("b", false), pl("c", false
 assert.deepStrictEqual(M.toResume([pl("a", false, { playbackState: 0 })], ["a"], PAUSED), [], "stopped by the user: not played again")
 assert.deepStrictEqual(M.toResume([pl("a", false), pl("x", true)], ["a"], PAUSED), [], "something plays already: nothing resumes")
 assert.deepStrictEqual(M.toResume([pl("a", true)], ["a"], PAUSED), [], "the user resumed it himself")
+// Oma's own player (the headset button, only while she speaks or asks): never paused, and its «playing» holds nothing back
+const oma = pl("org.mpris.MediaPlayer2.oma", true)
+assert.deepStrictEqual(M.toPause([pl("a", true), oma]).map(p => p.dbusName), ["a"])
+assert.deepStrictEqual(M.toResume([pl("a", false), oma], ["a"], PAUSED).map(p => p.dbusName), ["a"])
 
 // The memory page's rows: «I remember» lines, the days (as Oma sent them, the freshest first), «Forget everything»;
 // nothing before her answer; a QML signal's sequences are lists too
