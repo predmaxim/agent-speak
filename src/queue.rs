@@ -76,9 +76,9 @@ impl Queue {
         self.items.iter().any(|i| self.playable(i))
     }
 
-    /// Ждёт ли в очереди фраза сессии session.
-    pub fn has(&self, session: &str) -> bool {
-        self.items.iter().any(|i| i.session == session)
+    /// Сколько фраз сессии session ждёт в очереди.
+    pub fn count(&self, session: &str) -> usize {
+        self.items.iter().filter(|i| i.session == session).count()
     }
 
     /// Номера реплик Омы, чьи фразы ждут в очереди.

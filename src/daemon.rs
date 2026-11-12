@@ -59,7 +59,9 @@ enum Headset {
 /// очереди: синтез бывает долгим (холодный старт, перезапуск сервера), новости Омы удерживаются.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum HereAsk {
-    Queued,
+    /// Его предложений, что не прозвучали и не выброшены (в очереди и у потока воспроизведения): счёт по сигналам потока
+    /// и выбросам службы, а не по очереди к часу разбора — цикл разбирает сигналы позже, чем поток их шлёт.
+    Queued(usize),
     Since(u64),
 }
 
@@ -755,9 +757,9 @@ impl State {
         self.night_keep &= quiet; // тишина кончилась (и вручную) — держать до утра нечего
         let here = {
             let mut q = self.shared.queue.lock().unwrap();
-            let had = q.has("here");
+            let had = q.count("here");
             q.retain_audible(quiet);
-            had && !q.has("here")
+            had - q.count("here")
         };
         // новости тишины не ждут утра — кроме накопленного, пока пользователя не было; без «Озвучивать агентов» звучат только вопросы
         if quiet {
@@ -769,9 +771,7 @@ impl State {
         } else if !self.cfg.agents_voice {
             self.board.retain_classes(&[]); // за агентами не следим — о них ни слова
         }
-        if here {
-            self.on_dropped("here");
-        }
+        self.here_dropped(here);
     }
 
     /// Удержание новостей, пока Ома думает или говорит; снятие будит поток воспроизведения.
@@ -1059,7 +1059,6 @@ impl State {
                 Headset::Off => {}
                 h => self.headset = Headset::Asked(h == Headset::Ready(true)),
             }
-            self.here_ask = Some(HereAsk::Queued);
             ("here", ARE_YOU_THERE.to_string())
         } else {
             let mut parts = Vec::new();
@@ -1084,7 +1083,11 @@ impl State {
         };
         eprintln!("agent-speak: говорю ({kind}, {mode:?}): {}", text.chars().take(200).collect::<String>());
         // «Ты тут?» — своей сессией: окно ответа открывается, когда пойдёт его звук (on_sound)
-        if self.enqueue(Agent::Claude, if kind == "here" { "here" } else { "news" }, &text, Kind::News) > 0 {
+        let n = self.enqueue(Agent::Claude, if kind == "here" { "here" } else { "news" }, &text, Kind::News);
+        if kind == "here" {
+            self.here_ask = (n > 0).then_some(HereAsk::Queued(n));
+        }
+        if n > 0 {
             self.oma_send(&serde_json::json!({"do": "warm"}));
             if kind != "here" {
                 self.listen_after = Some((kind, text));
@@ -1101,7 +1104,7 @@ impl State {
 
     /// Пошёл звук фразы сессии session; у «Ты тут?» — окно ответа HERE_WAIT с этого мига, и у службы, и у Омы.
     fn on_sound(&mut self, session: &str) {
-        if session == "here" && self.here_ask == Some(HereAsk::Queued) {
+        if session == "here" && matches!(self.here_ask, Some(HereAsk::Queued(_))) {
             self.here_ask = Some(HereAsk::Since((self.now_secs)()));
             self.listen_here();
         }
@@ -1113,11 +1116,19 @@ impl State {
         self.after_speech();
     }
 
-    /// Фраза сессии session ушла, не прозвучав: её выбросил поток воспроизведения (его сигнал — по порядку с «пошёл звук»)
-    /// или служба из очереди (стоп, тишина). «Ты тут?» ответа не ждёт.
+    /// Фраза сессии session ушла, не прозвучав: её выбросил поток воспроизведения (его сигнал — по порядку с «пошёл звук»).
     fn on_dropped(&mut self, session: &str) {
-        if session == "here" && self.here_ask == Some(HereAsk::Queued) {
-            self.here_ask = None;
+        if session == "here" {
+            self.here_dropped(1);
+        }
+    }
+
+    /// n предложений «Ты тут?» ушли без звука (сигналы потока, стоп и тишина службы). Ответа не ждёт, только когда ушёл
+    /// весь вопрос: первое выброшено, а второе ещё прозвучит — окно ответа откроет его звук.
+    fn here_dropped(&mut self, n: usize) {
+        if let Some(HereAsk::Queued(left)) = self.here_ask {
+            let left = left.saturating_sub(n);
+            self.here_ask = Some(HereAsk::Queued(left)).filter(|_| left > 0);
         }
     }
 
@@ -1212,12 +1223,10 @@ impl State {
     }
 
     fn stop(&mut self) {
-        let here = self.shared.queue.lock().unwrap().has("here"); // у потока воспроизведения — о нём скажет его сигнал
+        let here = self.shared.queue.lock().unwrap().count("here"); // у потока воспроизведения — о нём скажет его сигнал
         self.shared.stop();
         (self.listen_after, self.listen_at) = (None, None); // новости оборвали сами — ответа не ждём
-        if here {
-            self.on_dropped("here");
-        }
+        self.here_dropped(here);
     }
 
     /// Запуск Омы: EOF её stdin (демон умер) — Ома выходит сама.
@@ -1383,9 +1392,10 @@ impl State {
                     eprintln!("agent-speak: говорю (here, в динамики): {ARE_YOU_THERE}");
                     // окно — когда пойдёт звук; не встал в очередь (тихо) — считать сразу, иначе ждали бы вечно
                     self.here_ask = Some(HereAsk::Since(secs));
-                    if self.enqueue(Agent::Claude, "here", ARE_YOU_THERE, Kind::News) > 0 {
+                    let n = self.enqueue(Agent::Claude, "here", ARE_YOU_THERE, Kind::News);
+                    if n > 0 {
                         self.oma_send(&serde_json::json!({"do": "warm"}));
-                        self.here_ask = Some(HereAsk::Queued);
+                        self.here_ask = Some(HereAsk::Queued(n));
                     }
                 } else {
                     self.presence.unanswered();
@@ -2237,7 +2247,7 @@ mod tests {
         drain(&mut r);
         st.on_msg(Msg::Voice { text: "Почта пуста.".into() });
         assert_eq!(voiced(&mut r), [(false, 1, 0.0)]);
-        assert!(st.shared.queue.lock().unwrap().has("voice"), "ответ ждёт снятия паузы");
+        assert!(st.shared.queue.lock().unwrap().count("voice") > 0, "ответ ждёт снятия паузы");
         st.on_msg(Msg::Pause);
         assert_eq!(voiced(&mut r), [(false, 1, 0.0)]);
         assert_eq!(texts(&st), ["Почта пуста."]);
@@ -3982,8 +3992,9 @@ mod tests {
         assert!(taken(&st).iter().all(|i| i.session == "here"));
         st.on_busy();
         st.on_busy();
-        assert_eq!(st.here_ask, Some(HereAsk::Queued), "смолкла — не повод: о выброшенной фразе поток скажет сам");
+        assert_eq!(st.here_ask, Some(HereAsk::Queued(2)), "смолкла — не повод: о выброшенной фразе поток скажет сам");
         st.on_dropped("here");
+        st.on_dropped("here"); // по сигналу на предложение
         assert_eq!(st.here_ask, None, "выброшен без звука");
         // из очереди его выбрасывают стоп и тишина — сами
         let (mut st, _env, _now) = asked_are_you_there_kept();
@@ -3996,7 +4007,34 @@ mod tests {
         let (mut st, _env, _now) = asked_are_you_there_kept();
         taken(&st);
         st.on_msg(Msg::Stop);
-        assert_eq!(st.here_ask, Some(HereAsk::Queued), "у потока: прозвучал ли, скажет его сигнал");
+        assert_eq!(st.here_ask, Some(HereAsk::Queued(2)), "у потока: прозвучал ли, скажет его сигнал");
+    }
+
+    #[test]
+    fn are_you_there_first_sentence_dropped_second_awaited() {
+        // «Ты тут?» в очереди — два предложения (ревью раунда 5): поток выбросил первое (синтез не смог), второе ещё звучит —
+        // ответа ждать; цикл разбирает сигналы позже, когда второе уже у потока, — решает порядок сигналов, а не очередь
+        let (mut st, _env, _now) = asked_are_you_there_kept();
+        let first = taken(&st);
+        assert_eq!(first.len(), 2, "в очереди — по предложению");
+        st.on_dropped("here");
+        assert!(matches!(st.here_ask, Some(HereAsk::Queued(_))), "второе ещё не отзвучало: {:?}", st.here_ask);
+        st.on_sound("here");
+        assert_eq!(st.here_ask, Some(HereAsk::Since(1100)), "второе зазвучало — окно ответа");
+        // выброшены оба — весь вопрос: ответа не ждём
+        let (mut st, _env, _now) = asked_are_you_there_kept();
+        taken(&st);
+        st.on_dropped("here");
+        st.on_dropped("here");
+        assert_eq!(st.here_ask, None);
+        // первое у потока ещё не прозвучало, второе выбросила тишина — первое прозвучит: ждать его
+        let (mut st, _env, _now) = asked_are_you_there_kept();
+        st.shared.queue.lock().unwrap().pop();
+        st.cfg.quiet_override = "on".into();
+        st.apply();
+        assert!(matches!(st.here_ask, Some(HereAsk::Queued(_))), "первое у потока: {:?}", st.here_ask);
+        st.on_dropped("here");
+        assert_eq!(st.here_ask, None, "и первое ушло без звука — весь вопрос выброшен");
     }
 
     #[test]
