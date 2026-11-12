@@ -1237,21 +1237,20 @@ impl State {
         }
         self.push_agents();
         self.speak_news(); // пересказ готов — звучит сразу, а не со следующим тиком
-        if let Some(class) = class {
-            self.ripple(&d.session, class);
+        // волна — новость пришла, а Ома её сейчас не говорит: тихий режим (на доску она не легла) или ждёт на доске (занят,
+        // отошёл, разговор, тишина по причине, окно пачки); важное промежуточное вслух не звучит никогда (полосы)
+        let unsaid = match class {
+            Some(c) => self.quiet() || self.board.has(&d.session, c),
+            None => d.ask == Ask::Progress && d.important,
+        };
+        if let Some(tone) = kind.filter(|_| unsaid) {
+            self.ripple(&d.session, tone);
         }
     }
 
-    /// Волна на орбе вместо слов: новость пришла, а Ома её сейчас не говорит — тихий режим (на доску она не легла)
-    /// или ждёт на доске (занят, отошёл, разговор, тишина по причине). Агент, которым он занят, — без волны: он на него смотрит.
-    fn ripple(&mut self, session: &str, class: Class) {
-        let tone = match class {
-            Class::Final => "final",
-            Class::Question => "question",
-            Class::Progress => "status",
-            Class::Urgent | Class::Restore => return,
-        };
-        if !self.cfg.orb_moods || !(self.quiet() || self.board.has(session, class)) || self.engaged().as_deref() == Some(session) {
+    /// Волна на орбе вместо слов, тон — вид пузыря (final | question | status). Агент, которым он занят, — без волны: он на него смотрит.
+    fn ripple(&mut self, session: &str, tone: &str) {
+        if !self.cfg.orb_moods || self.engaged().as_deref() == Some(session) {
             return;
         }
         self.broadcast_line(&format!("{}\n", serde_json::json!({"ripple": {"tone": tone}})));
