@@ -271,15 +271,21 @@ class Conversation:
         self.quiet_at = self.window["until"]  # после _to: окно — ровно secs, а не WINDOW_END
         return acts
 
-    def end(self):
-        """Конец разговора: оборвать ход, выбросить черновик, закрыть слух."""
-        acts = self._stop_turn() + self._drop()
+    def end(self, stop=True):
+        """Конец разговора: оборвать ход (stop), выбросить черновик, закрыть слух."""
+        acts = (self._stop_turn() if stop else []) + self._drop()
         self.quiet_at = None
         self.window = None
         if self.active:
             self.active = False
             acts.append(("ear", False))
         return acts + self._to("idle")
+
+    def answered(self):
+        """«Ты тут?» решён без слов (кнопка наушников, служба уже знает «я тут»): закрыть окно вопроса, пока в нём не
+        ответили словами. Звук не трогать — его решает служба (сводка по кнопке не обрывается); мозгу — ни слова."""
+        w = self.window
+        return self.end(stop=False) if w and w["kind"] == "here" and w["first"] else []
 
     def cancel(self):
         """Esc: выбросить фразу; идущий ответ оборвать."""

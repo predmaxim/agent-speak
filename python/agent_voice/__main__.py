@@ -187,6 +187,8 @@ class Oma:
                 self.to_brain(self.brain.warm)  # claude поднимается, пока пользователь говорит
         elif do == "cancel":
             await self.act(c.cancel())
+        elif do == "here":  # «Ты тут?» решён кнопкой наушников — окно вопроса не нужно
+            await self.act(c.answered())
         elif do == "warm":  # демон прогревает слух до окна ответа: whisper не грузится при открытом микрофоне
             self.warm()
         elif do == "listen":
