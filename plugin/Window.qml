@@ -246,7 +246,7 @@ Item {
     if (root.page === "main") return root.openChat(root.cursorKey)
     if (root.page === "history") return root.openChat(root.chatList[root.cursor].key)
     var row = Model.SETTINGS_ROWS[root.cursor]
-    var box = { speaker: speakerBox, rate: rateBox, quiet_hours: root.hoursCol ? toBox : fromBox }[row]
+    var box = { speaker: speakerBox, rate: rateBox, news_every: newsBox, quiet_hours: root.hoursCol ? toBox : fromBox }[row]
     if (box) box.open()
     else root.step(row, 1)
   }
@@ -950,6 +950,26 @@ Item {
                 }
               }
 
+              SettingRow {
+                key: "intonation"
+                label: root.tr("Intonation by meaning")
+                ToggleSwitch {
+                  checked: root.speech.intonation === true
+                  foreground: root.fg
+                  onToggled: root.step("intonation", 1)
+                }
+              }
+
+              SettingRow {
+                key: "earcons"
+                label: root.tr("Sound cues")
+                ToggleSwitch {
+                  checked: root.speech.earcons === true
+                  foreground: root.fg
+                  onToggled: root.step("earcons", 1)
+                }
+              }
+
               PanelSectionHeader {
                 leftPadding: Style.spacing.rowPaddingX
                 topPadding: Style.space(14)
@@ -1110,6 +1130,20 @@ Item {
                   checked: root.speech.progress_digest === true
                   foreground: root.fg
                   onToggled: root.step("progress_digest", 1)
+                }
+              }
+
+              SettingRow {
+                key: "news_every"
+                label: root.tr("Results aloud at most every")
+                Dropdown {
+                  id: newsBox
+                  options: Model.newsEvery(root.tr)
+                  value: String(root.speech.news_every)
+                  foreground: root.fg
+                  fontFamily: root.font
+                  onChanged: function(v) { root.choose("news_every", Number(v), false); value = Qt.binding(function() { return String(root.speech.news_every) }) }
+                  onPopupOpenChanged: if (!popupOpen) root.refocus()
                 }
               }
 
