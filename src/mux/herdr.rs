@@ -296,6 +296,9 @@ mod tests {
         // (`m(t[0])+we.dim(t.slice(1))`); вживую в herdr не снята — у проб подсказки не было
         assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[7mп\x1b[0m\x1b[2mродолжай\x1b[22m\r"])), "");
         assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[7mп\x1b[27m\x1b[2;38;2;129;131;135mродолжай\x1b[0m\r"])), "");
+        // как herdr 0.9.5 отдал printf с dim, инверсией и dim+цветом (проверено 2026-11-12): dim — ESC[2m, отдельно от цвета
+        let real = "\x1b[0m\x1b[2mтусклый\x1b[0m обычный \x1b[0m\x1b[7mи\x1b[0m\x1b[2m\x1b[38;2;129;131;135mнверсия\x1b[0m\r";
+        assert_eq!(strip(real).1.split_whitespace().collect::<Vec<_>>(), ["обычный"]);
         // курсор внутри набранного и на единственной букве — буква набранная
         assert_eq!(composer_text(&screen(&["❯\u{a0}печ\x1b[7mа\x1b[0mтаю\r"])), "печатаю");
         assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[7mд\x1b[0m\r"])), "д");
