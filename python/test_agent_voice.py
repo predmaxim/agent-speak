@@ -2973,7 +2973,7 @@ def test_barge_in_answered_on_topic_stays_speaking_until_voiced():
     run(go())
 
 
-HERE ="Эй, ты тут? Есть новости."
+HERE = "Эй, ты тут? Есть новости."
 
 
 def test_are_you_there_echo_judged_by_its_own_question():
