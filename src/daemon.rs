@@ -504,6 +504,7 @@ pub fn run() {
         voices: 0,
         voice_base: 0,
     };
+    st.board.every = st.cfg.news_every * 60; // дальше — apply() при каждой смене настроек
     {
         let tx = tx.clone();
         crate::audio::watch_outs(move |default, speakers| tx.send(Event::Outs(default, speakers)).is_ok());
