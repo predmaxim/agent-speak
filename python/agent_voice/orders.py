@@ -110,6 +110,9 @@ async def cli(*args, timeout=90):
     return (True, out.decode().strip()) if p.returncode == 0 else (False, err.decode().strip() or f"код {p.returncode}")
 
 
+CHAT = "в чат Orca передать не могу — ответь в Orca"  # как orders::CHAT службы
+
+
 def _name(path):
     return os.path.basename(path.rstrip("/")) or path
 
@@ -161,6 +164,8 @@ class Orders:
 
     async def tell(self, entry, text, gist, option=0):
         n, p, ask = self.n, entry["project"], asked(entry)
+        if entry.get("chat"):  # чат Orca: CLI Orca пишет только в терминалы — спрашивать «да, передай» не о чем
+            return f"Не передано: {p} — {CHAT}. Скажи пользователю коротко."
         d = self.gate(text, ask, option)  # до чтения экрана: по реплике хода, в котором мозг вызвал tell
         item, question, also = chosen(ask, option), f"Передать проекту {p}: {gist}?", ""
         expect = item.split(" — ")[0]  # метка варианта, как её видел мозг: tell жмёт, только если в вызове агента та же
@@ -202,6 +207,8 @@ class Orders:
         «подтверждаю …»); одно подтверждение — одна передача позже, Ома скажет о ней вслух. Свободному и второе поручение
         тому же агенту — отказ до вопроса: подтверждать зря нечего."""
         n, p = self.n, entry["project"]
+        if entry.get("chat"):
+            return f"Не поставлено: {p} — {CHAT}. Скажи пользователю коротко."
         if entry.get("state") != "working":
             return f"Не поставлено: {p} сейчас не работает — передай сейчас через tell."
         listed, err = await self.later_list()
