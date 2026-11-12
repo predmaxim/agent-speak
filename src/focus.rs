@@ -60,18 +60,29 @@ pub fn project_of(pid: u32) -> String {
         .unwrap_or_default()
 }
 
-/// Агент окна в фокусе; несколько агентов под одним окном (Orca, herdr) — чей терминал виден, говорит мультиплексор.
-pub fn focused() -> Option<SessionRef> {
+/// Окно в фокусе: его агент на экране и все агенты под окном.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Focus {
+    /// Агент на экране: один под окном — он; несколько (Orca, herdr) — чей терминал виден, говорит мультиплексор.
+    pub agent: Option<SessionRef>,
+    /// Сессии всех агентов под окном (процесс — потомок окна или терминал его мультиплексора): чат Orca под окном Orca
+    /// в фокусе — «занят», какой из чатов на экране, Orca не сообщает.
+    pub under: Vec<String>,
+}
+
+/// Окно в фокусе и его агенты; hyprctl не ответил или стол пуст — пусто.
+pub fn focused() -> Focus {
     // timeout: зависший hyprctl не должен вешать цикл событий
-    let out = Command::new("timeout").args(["2", "hyprctl", "activewindow", "-j"]).output().ok()?;
+    let Ok(out) = Command::new("timeout").args(["2", "hyprctl", "activewindow", "-j"]).output() else { return Focus::default() };
     let Ok(win) = window_pid(&out.stdout) else {
         eprintln!("agent-speak: hyprctl activewindow не ответил ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim());
-        return None;
+        return Focus::default();
     };
-    let w = win?;
+    let Some(w) = win else { return Focus::default() };
     let mut all = claude_under(w);
     all.extend(codex_under(w));
-    pick(all, crate::mux::active_among)
+    let under = all.iter().map(|(_, s)| s.id.clone()).collect();
+    Focus { agent: pick(all, crate::mux::active_among), under }
 }
 
 /// Ответ `hyprctl activewindow -j`: pid окна; пустой стол — `{}` (Hyprland, activeWindowRequest), не ответ — Err.

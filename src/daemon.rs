@@ -257,8 +257,8 @@ struct State {
     learn: Sender<(Agent, String)>,
     asm: Assembler,
     tail: Tailer,
-    focus_cache: Option<(Instant, Option<SessionRef>)>, // None — устарел
-    focus_src: Box<dyn FnMut() -> Option<SessionRef>>, // окно в фокусе; в тестах — подделка
+    focus_cache: Option<(Instant, focus::Focus)>, // None — устарел
+    focus_src: Box<dyn FnMut() -> focus::Focus>, // окно в фокусе; в тестах — подделка
     clock: Box<dyn Fn() -> Instant>,
     subs: Vec<UnixStream>,
     projects: HashMap<String, String>, // сессия → имя папки проекта (из хуков и окна в фокусе)
@@ -933,16 +933,21 @@ impl State {
     /// Агент в фокусе — по требованию (перед речью, чтение, снимок мозга), не опросом: hyprctl и база Orca стоят
     /// десятки мс. Флаг focused в строке агентов — с последнего такого вопроса.
     fn focused(&mut self) -> Option<SessionRef> {
+        self.focus().agent
+    }
+
+    /// Окно в фокусе (focused) и агенты под ним, тем же вопросом hyprctl.
+    fn focus(&mut self) -> focus::Focus {
         let now = (self.clock)();
         if !self.focus_cache.as_ref().is_some_and(|(t, _)| now.saturating_duration_since(*t) < Duration::from_millis(500)) {
             let f = (self.focus_src)();
-            if let Some(f) = &f {
-                self.projects.insert(f.id.clone(), f.project.clone());
+            if let Some(a) = &f.agent {
+                self.projects.insert(a.id.clone(), a.project.clone());
             }
-            self.registry.set_focused(f.as_ref().map(|f| f.id.as_str()));
+            self.registry.set_focused(f.agent.as_ref().map(|a| a.id.as_str()));
             self.focus_cache = Some((now, f));
         }
-        self.focus_cache.as_ref().and_then(|(_, f)| f.clone())
+        self.focus_cache.as_ref().map(|(_, f)| f.clone()).unwrap_or_default()
     }
 
     /// Ход мозга Омы (turn): снимку агентов — фокус этой минуты. Ответ — строка агентов: снимок свежий по протоколу,
@@ -1007,7 +1012,7 @@ impl State {
         eprintln!("agent-speak: показ экрана: {why}");
         self.quiet_why.screencast = on;
         self.quiet_over |= on;
-        if !self.quiet_why.any() && self.quiet_over && (!self.cfg.hush_summary || self.board.overview(QUIET_OVER, None).is_none()) {
+        if !self.quiet_why.any() && self.quiet_over && (!self.cfg.hush_summary || self.board.overview(QUIET_OVER, &[]).is_none()) {
             // сводки не будет (выключена или считать нечего): итоги за тишину выбросить сейчас, как выбросила бы она, — иначе
             // окно пачки их придержит и они прозвучат после; вопросы, срочное и восстановление — по своим правилам
             self.quiet_over = false;
@@ -1395,7 +1400,7 @@ impl State {
 
     /// Волна на орбе вместо слов, тон — вид пузыря (final | question | status). Агент, которым он занят, — без волны: он на него смотрит.
     fn ripple(&mut self, session: &str, tone: &str) {
-        if !self.cfg.orb_moods || self.engaged().as_deref() == Some(session) {
+        if !self.cfg.orb_moods || self.engaged().iter().any(|s| s == session) {
             return;
         }
         self.broadcast_line(&format!("{}\n", serde_json::json!({"ripple": {"tone": tone}})));
@@ -1422,10 +1427,10 @@ impl State {
         }
         // сводка тишины ждёт своего часа и тогда, когда итоги держит окно пачки (news_every): она их и заменяет
         let hush = self.quiet_over && self.cfg.hush_summary;
-        let summary = |b: &news::Board, skip: Option<&str>| hush && b.overview(QUIET_OVER, skip).is_some();
-        let summary_any = summary(&self.board, None);
+        let summary = |b: &news::Board, skip: &[String]| hush && b.overview(QUIET_OVER, skip).is_some();
+        let summary_any = summary(&self.board, &[]);
         // hyprctl — только когда и без учёта фокуса есть что сказать: итоги, ждущие ответа на вопрос, его не опрашивают каждый тик
-        if !self.board.sayable(now, None) && !summary_any {
+        if !self.board.sayable(now, &[]) && !summary_any {
             self.welcome &= mode == Mode::Unsure; // вводить в курс нечем — приветствие следующих новостей не ждёт
             self.quiet_over &= mode == Mode::Unsure; // и сводка тишины тоже
             return;
@@ -1433,7 +1438,7 @@ impl State {
         let focused = self.engaged();
         let (kind, chunks) = if mode == Mode::Unsure {
             // итог агента в фокусе сводка не считает, как и drop_focused
-            if !self.board.sayable(now, focused.as_deref()) && !summary(&self.board, focused.as_deref()) {
+            if !self.board.sayable(now, &focused) && !summary(&self.board, &focused) {
                 return; // «Есть новости» не врёт: после «да» прозвучит хоть что-то
             }
             match self.headset {
@@ -1454,12 +1459,12 @@ impl State {
             let mut parts = Vec::new();
             if std::mem::take(&mut self.welcome) {
                 self.quiet_over = false; // приветствие с обзором покрывает и сводку тишины
-                if !self.board.sayable(now, focused.as_deref()) {
+                if !self.board.sayable(now, &focused) {
                     return; // вводить в курс нечем — приветствие без новостей не нужно
                 }
-                self.board.drop_focused(focused.as_deref()); // не в обзор и не в сводку
+                self.board.drop_focused(&focused); // не в обзор и не в сводку
                 parts.push(Chunk::oma(self.rotor.next(phrases::WELCOME)));
-                parts.extend(self.board.overview(self.rotor.next(phrases::AWAY), None).map(Chunk::oma));
+                parts.extend(self.board.overview(self.rotor.next(phrases::AWAY), &[]).map(Chunk::oma));
                 // итог агента Claude со свежим recap Claude Code — его первым предложением; Haiku — только остальным
                 let registry = &self.registry;
                 let recapped = self.board.recap(|s| registry.get(s).filter(|e| e.agent == "claude").and_then(|e| agents::recap(Path::new(&e.transcript))));
@@ -1472,14 +1477,14 @@ impl State {
                 // тишина по причине кончилась: накопленное — одной фразой кодом, посчитанное (и вопросы) — с доски;
                 // агент остаётся красным в орбе и окне, срочное сторожа звучит по своим правилам. Без сводки — как после тишины.
                 if self.cfg.hush_summary {
-                    self.board.drop_focused(focused.as_deref());
-                    parts.extend(self.board.overview(QUIET_OVER, None).map(Chunk::oma));
+                    self.board.drop_focused(&focused);
+                    parts.extend(self.board.overview(QUIET_OVER, &[]).map(Chunk::oma));
                     self.board.retain_classes(&[Class::Urgent, Class::Now, Class::Restore]);
                 } else {
                     self.board.retain_classes(&[Class::Urgent, Class::Now, Class::Restore, Class::Question]);
                 }
             }
-            parts.extend(self.board.take(now, focused.as_deref()));
+            parts.extend(self.board.take(now, &focused));
             if parts.is_empty() {
                 return;
             }
@@ -1565,19 +1570,25 @@ impl State {
         }
     }
 
-    /// Агент, которым пользователь занят, — его новости не вслух: его чат открыт в окне Омы или его вкладка в фокусе,
-    /// и пользователь печатает (ввод за FOCUS_INPUT) или ждёт его ответа (свой промпт за FOCUS_PROMPT).
-    /// Просто вкладка в фокусе — нет: может, отошёл или смотрит в телефон.
-    fn engaged(&mut self) -> Option<String> {
+    /// Агенты, которыми пользователь занят, — их новости не вслух (пузыри остаются): чат агента открыт в окне Омы; его
+    /// вкладка в фокусе, и пользователь печатает (ввод за FOCUS_INPUT) или ждёт его ответа (свой промпт за FOCUS_PROMPT) —
+    /// просто вкладка в фокусе — нет: может, отошёл или смотрит в телефон; все чаты Orca, пока её окно в фокусе: какой чат
+    /// на экране, Orca не сообщает (нет CLI «активный чат», docs/upstream/orca-active-chat.md).
+    fn engaged(&mut self) -> Vec<String> {
         if !self.viewing.is_empty() {
-            return Some(self.viewing.clone());
+            return vec![self.viewing.clone()];
         }
-        let id = self.focused()?.id;
+        let f = self.focus();
+        let mut out: Vec<String> = self.registry.entries().iter().filter(|e| e.chat && f.under.contains(&e.id)).map(|e| e.id.clone()).collect();
+        let Some(id) = f.agent.map(|a| a.id).filter(|id| !out.contains(id)) else { return out };
         let now = (self.now_secs)();
         let typing = now.saturating_sub(self.presence.last_input(now)) < FOCUS_INPUT;
         let prompt = self.registry.get(&id).and_then(|e| e.feed.iter().rev().find(|l| l.kind == "prompt").map(|l| l.at));
         let waiting = prompt.is_some_and(|at| now.saturating_sub(at) < FOCUS_PROMPT);
-        (typing || waiting).then_some(id)
+        if typing || waiting {
+            out.push(id);
+        }
+        out
     }
 
     /// Ничего не звучит и не ждёт очереди.
@@ -2744,7 +2755,7 @@ mod tests {
             asm: Assembler::new(),
             tail: Tailer::new(),
             focus_cache: None,
-            focus_src: Box::new(|| None), // hyprctl в тестах не зовётся
+            focus_src: Box::new(focus::Focus::default), // hyprctl в тестах не зовётся
             clock: Box::new(Instant::now),
             subs: Vec::new(),
             projects: HashMap::new(),
@@ -4014,7 +4025,7 @@ mod tests {
         let focus: Arc<Mutex<Option<SessionRef>>> = Default::default();
         let now = Arc::new(Mutex::new(Instant::now()));
         let (f, n) = (focus.clone(), now.clone());
-        st.focus_src = Box::new(move || f.lock().unwrap().clone());
+        st.focus_src = Box::new(move || focus::Focus { agent: f.lock().unwrap().clone(), under: vec![] });
         st.clock = Box::new(move || *n.lock().unwrap());
         (st, (focus, now))
     }
@@ -4037,7 +4048,7 @@ mod tests {
 
     /// Пачка доски одной строкой; пусто — None.
     fn board_line(st: &mut State, now: u64) -> Option<String> {
-        let c = st.board.take(now, None);
+        let c = st.board.take(now, &[]);
         (!c.is_empty()).then(|| news::line(&c))
     }
 
@@ -4182,7 +4193,7 @@ mod tests {
         let c = calls.clone();
         st.focus_src = Box::new(move || {
             *c.lock().unwrap() += 1;
-            focus.lock().unwrap().clone().or(Some(sref("b")))
+            focus::Focus { agent: focus.lock().unwrap().clone().or(Some(sref("b"))), under: vec![] }
         });
         with_agents(&mut st, &["a", "b"]);
         for _ in 0..3 {
@@ -4255,7 +4266,7 @@ mod tests {
         let c = calls.clone();
         st.focus_src = Box::new(move || {
             *c.lock().unwrap() += 1;
-            None
+            focus::Focus::default()
         });
         with_agents(&mut st, &["s", "t"]);
         question(&mut st, "s", true, "Удалить старый код?");
@@ -4673,11 +4684,11 @@ mod tests {
         assert!(delivered(&acts), "одно подтверждение — одна передача: сейчас");
         st.registry.prompt("a", "дальше", 1000);
         st.later_cmd(later_msg("tell", "a", "Прогони тесты")).unwrap();
-        st.focus_src = Box::new(|| Some(sref("a"))); // его вкладка в фокусе, ввод — только что: Ctrl+U стёр бы черновик
+        st.focus_src = Box::new(|| focus::Focus { agent: Some(sref("a")), under: vec![] }); // его вкладка в фокусе, ввод — только что: Ctrl+U стёр бы черновик
         st.focus_cache = None;
         stop(&mut st, "a", "Готово.");
         assert!(!delivered(&acts));
-        st.focus_src = Box::new(|| None);
+        st.focus_src = Box::new(focus::Focus::default);
         st.focus_cache = None;
         st.tick();
         assert!(delivered(&acts), "перестал печатать в нём — со следующего тика");
@@ -6477,6 +6488,33 @@ mod tests {
         final_s(&mut st);
         st.tick();
         assert_eq!(texts(&st), ["плуг: Фича готова."]);
+    }
+
+    #[test]
+    fn orca_chats_keep_quiet_while_the_orca_window_is_focused() {
+        // какой чат Orca на экране, Orca не сообщает: её окно в фокусе — все её чаты «заняты» (пузыри, без голоса);
+        // агент терминала под тем же окном — как прежде; другое окно — чаты звучат
+        let mut st = test_state();
+        let live = vec![Live { chat: true, ..live("s") }, live("t")];
+        st.scan = Box::new(move || live.clone());
+        st.rescan();
+        let under = Arc::new(Mutex::new(vec!["s".to_string(), "t".to_string()]));
+        let u = under.clone();
+        st.focus_src = Box::new(move || focus::Focus { agent: None, under: u.lock().unwrap().clone() });
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        final_s(&mut st);
+        st.on_digest(dg("t", Ask::Final, false, "Тесты прошли."));
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Тесты прошли."], "итог чата s — только пузырём");
+        assert_eq!(bubbles(&mut r).len(), 2, "пузыри — у обоих");
+        question(&mut st, "s", true, "Удалить старый код?");
+        st.tick();
+        assert!(texts(&st).is_empty(), "вопрос чата ждёт, пока окно Orca в фокусе");
+        under.lock().unwrap().clear(); // в фокусе другое окно
+        st.focus_cache = None;
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Удалить старый код?"]);
     }
 
     #[test]
