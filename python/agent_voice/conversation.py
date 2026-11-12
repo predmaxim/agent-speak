@@ -268,11 +268,11 @@ class Conversation:
         if first and w["kind"] == "here":
             if is_yes(text):
                 return acts + self.end()
-            ctx = f"Ома спросила: «{w['said']}» "
+            ctx = f"Твой вопрос вслух: «{w['said']}» "  # пометки мозгу о ней — без рода: голос меняет её род
         elif first:
             if w["kind"] == "news" and is_ack(text):
                 return acts + self.end()
-            ctx = f"Ома только что сказала: «{w['said']}». "
+            ctx = f"Твои слова вслух: «{w['said']}». "
         # окно открыла Ома сама: одна реплика и её ответ, дальше микрофон закрыт — разговор в комнате не уходит
         # в Claude; продолжить разговор — кликом
         w["close"] = True

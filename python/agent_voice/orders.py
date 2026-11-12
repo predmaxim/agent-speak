@@ -146,7 +146,7 @@ class Orders:
         if n != self.n:  # пока tell читал экран, начался другой ход: прерванный не передаёт и не трогает новый
             return "Не передано: ход прерван новой репликой пользователя."
         if self.tripped:  # мозг перефразировал поручение в том же ходе — передавать нельзя ничего
-            return "Не передано: поручение уже ждёт подтверждения, Ома о нём спросила."
+            return "Не передано: поручение уже ждёт подтверждения, вопрос уже задан вслух."
         if d:
             self.tripped = True
             question = f"{ask} Скажи: да, {verb}." if d is ORDINARY else f"{ask} Это {d[0]}. Скажи: подтверждаю {d[1]}."
@@ -154,7 +154,7 @@ class Orders:
                 self.ask(question, {"args": args, "what": d, "verb": verb, "said": said, "until": self.clock() + CONFIRM_WAIT, "n": n,
                                     "shown": shown})
             why = "голосом поручение уходит" if d is ORDINARY else f"это {d[0]}, такое уходит"
-            return f"Не передано: {why} только после подтверждения. Ома спросила вслух: «{question}»"
+            return f"Не передано: {why} только после подтверждения. Вопрос уже задан вслух: «{question}»"
         ok, out = await self.run(*args)
         if not ok:
             return f"Не передано: {out}. Скажи пользователю коротко, что не вышло."
@@ -247,7 +247,7 @@ class Orders:
         ws, d = words(text), p["what"]
         if NO & set(ws) or (ws and ws[0].startswith(NEGATIVE)):
             self.pending = None
-            self.note = "(Пользователь не подтвердил — Ома ничего не передала.) "
+            self.note = "(Пользователь не подтвердил — ничего не передано.) "  # пометки мозгу о ней — без рода
             return "Хорошо, не передаю."
         short = len(ws) <= 4
         ok = short and "да" in ws and _has(ws, GO) if d is ORDINARY else confirms(text, d)
@@ -256,11 +256,11 @@ class Orders:
                 misheard = gendered("Не расслышал{|а}", self.gender)
                 return f"{misheard}. Скажи: да, {p['verb']}." if d is ORDINARY else f"{misheard}. Скажи: подтверждаю {d[1]}."
             self.pending = None
-            self.note = "(Пользователь не подтвердил — Ома ничего не передала.) "
+            self.note = "(Пользователь не подтвердил — ничего не передано.) "
             return None
         self.pending = None
         ok, out = await self.run(*p["args"])
         pressed = gendered("Нажал{|а}", self.gender)
         said = (p["said"] + (f" {pressed} «{out}»." if out and p["args"][0] == "tell" else "")) if ok else f"Не вышло: {out}."  # tell: метка с экрана
-        self.note = f"(Пользователь подтвердил голосом, Ома сама: {said}) "
+        self.note = f"(Пользователь подтвердил голосом; поручение исполнял код, вслух сказано: {said}) "
         return said
