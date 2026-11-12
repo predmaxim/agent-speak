@@ -27,7 +27,7 @@ FILES_MEMORY = f"Файлы ты только читаешь, и только в
 # Code разрешает её сам (auto memory), а хук PreToolUse (memory.gate) пускает лишь слова пользователя в MEMORY.md
 MEMORY_TOOLS = ["Write", "Edit"]
 OMA_TOOLS = ["mcp__oma__agents", "mcp__oma__agent_feed", "mcp__oma__agent_tail", "mcp__oma__selection",
-             "mcp__oma__presence", "mcp__oma__tell", "mcp__oma__projects", "mcp__oma__launch"]
+             "mcp__oma__presence", "mcp__oma__tell", "mcp__oma__projects", "mcp__oma__launch", "mcp__oma__show"]
 STALE_HOURS = 2
 # Ома спросила подтверждение поручения: ход кончается сразу после tell/launch (хук PostToolUse, continue false) —
 # второй проход модели только повторял бы вопрос; stopReason остаётся в разговоре, мозг увидит его в следующем ходе
@@ -79,6 +79,8 @@ OMA_PROMPT = ("Ты — Ома, голосовой заместитель пол
               "не составляй и не передавай — переспроси, что именно передать. «Продолжай», «давай», «ага», «ну» — не согласие. "
               "После tell или launch скажи пользователю одной фразой смысл и кому, не текст задания. Не понятно, "
               "о чём речь, — коротко переспроси. "
+              "«Покажи его», «покажи datebook», «к следующему» — show: агент выходит на экран, ему ничего не пишется, "
+              "подтверждение не нужно; пустой agent — следующий ждущий. "
               "Если пользователь просит сейчас не говорить или отложить («не сейчас», «давай потом», «замолчи» и т. п.) — "
               "вызови presence с busy; говорит, что уходит, — away; просит новости или говорит, что вернулся, — here. "
               "После presence ответь одним-двумя словами или ничего. "
@@ -273,7 +275,21 @@ def oma_tools(snapshot, send, orders=None) -> list:
         return _text(await orders.launch(args.get("path", ""), args.get("task", ""), args.get("gist", ""),
                                          args.get("where") or "orca"))
 
-    return [agents, agent_feed, agent_tail, sel, presence, tell, projects, launch]
+    # только фокус: в терминал ничего не пишется — проверки «да, передай» нет, Orca и herdr закрытыми не открывает
+    @tool("show", "Показать агента пользователю: его вкладка Orca или панель herdr и окно — на экран. Агенту ничего не "
+                  "пишет. agent — id из agents (или часть названия/проекта); пусто — следующий, кто ждёт ответа.",
+          {"type": "object", "properties": {"agent": {"type": "string"}}})
+    async def show(args):
+        target = "next"
+        if (args.get("agent") or "").strip():
+            e, why = pick_agent(snapshot(), args["agent"])
+            if not e:
+                return _text(why)
+            target = e["id"]
+        ok, out = await orders.run("show", target)
+        return _text(f"Показала: {out}." if ok else f"Не показала: {out}. Скажи пользователю коротко.")
+
+    return [agents, agent_feed, agent_tail, sel, presence, tell, projects, launch, show]
 
 
 class Brain:
