@@ -2523,7 +2523,8 @@ impl State {
         let gone: Vec<String> = self.later.list.iter().filter(|o| o.kind == "tell" && self.registry.get(&o.agent).is_none()).map(|o| o.id.clone()).collect();
         for id in gone {
             if let Some(o) = self.later.take(&id) {
-                self.later_say("", &o.id, "", &format!("{} закрылся — поручение не передала", o.who));
+                let text = phrases::gendered(phrases::LATER_GONE, self.gender()).replace("{кто}", &o.who);
+                self.later_say("", &o.id, "", &text);
                 self.push_later();
             }
         }
@@ -2534,8 +2535,8 @@ impl State {
         match d {
             crate::later::Done::Told { order: o, result } => {
                 let text = match result {
-                    Ok(()) => format!("передала — {}", o.gist),
-                    Err(e) => format!("не передала: {e}"),
+                    Ok(()) => phrases::gendered(phrases::LATER_TOLD, self.gender()).replace("{что}", &o.gist),
+                    Err(e) => phrases::gendered(phrases::LATER_NOT_TOLD, self.gender()).replace("{что}", &e),
                 };
                 self.later_say(&o.agent, &o.id, &o.who, &text);
             }
@@ -2544,7 +2545,7 @@ impl State {
                 let text = match result {
                     Ok(true) => format!("проверки PR {} прошли", o.pr),
                     Ok(false) => format!("проверки PR {} упали", o.pr),
-                    Err(e) => format!("не смогла проверить PR {}: {e}", o.pr),
+                    Err(e) => phrases::gendered(phrases::CHECKS_UNKNOWN, self.gender()).replace("{n}", &o.pr.to_string()).replace("{что}", &e),
                 };
                 self.later_say("", &o.id, &o.who, &text);
                 self.push_later();
@@ -2661,7 +2662,7 @@ impl State {
 
     /// Исход действия в терминале: фраза пользователю и здоровье в окне.
     fn on_acted(&mut self, d: mux::Done) {
-        if let Some(a) = self.watch.done(&d.session, d.what, d.err, (self.now_secs)()) {
+        if let Some(a) = self.watch.done(&d.session, d.what, d.err, (self.now_secs)(), self.gender()) {
             self.on_act(a, &HashMap::new());
         }
         self.refresh_health();
@@ -4732,6 +4733,10 @@ mod tests {
         let id = st.later_cmd(checks("/tmp")).unwrap();
         st.on_later_done(crate::later::Done::Checked { id, result: Err("no checks reported on the 'x' branch".into()) });
         assert_eq!(board_line(&mut st, 2000).unwrap(), "tmp: не смогла проверить PR 12: no checks reported on the 'x' branch");
+        st.cfg.speaker = "aidar".into(); // мужской голос — о себе в мужском роде; чужой текст ошибки — как есть
+        let id = st.later_cmd(checks("/tmp")).unwrap();
+        st.on_later_done(crate::later::Done::Checked { id, result: Err("{a|b}".into()) });
+        assert_eq!(board_line(&mut st, 2000).unwrap(), "tmp: не смог проверить PR 12: {a|b}");
     }
 
     #[test]

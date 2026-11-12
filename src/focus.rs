@@ -183,9 +183,9 @@ fn show_steps(pane: Option<&crate::mux::Pane>, win: Option<&str>, focus: impl Fn
         (Some(p), None) if p.mux == "orca" => Err("Orca закрыта — открой её".into()),
         (Some(p), None) => {
             focus(p)?;
-            Err(format!("в {} выбрала его панель, а окно {} не нашла", p.mux, p.mux))
+            Err(format!("в {} его панель выбрана, а окна {} не вижу", p.mux, p.mux))
         }
-        (None, None) => Err("окно агента не нашла".into()),
+        (None, None) => Err("окна агента не вижу".into()),
         (pane, Some(w)) => {
             if let Some(p) = pane {
                 focus(p)?;
@@ -208,7 +208,7 @@ fn window_of(clients: &str, holds: impl Fn(u32) -> bool) -> Option<String> {
 fn raise(address: &str) -> Result<(), String> {
     let lua = format!("hl.dsp.focus({{ window = \"address:{address}\" }})");
     let out = crate::mux::run(Command::new("hyprctl").args(["dispatch", &lua]), HYPRCTL_TIMEOUT)?;
-    if out.trim() == "ok" { Ok(()) } else { Err(format!("окно не подняла: {}", out.trim())) }
+    if out.trim() == "ok" { Ok(()) } else { Err(format!("окно не поднимается: {}", out.trim())) }
 }
 
 pub fn parse_learned(out: &str, asked: &[String]) -> Vec<(String, String)> {
@@ -282,9 +282,9 @@ mod tests {
         assert_eq!(go(Some(&orca), Some("0x1")), (Ok(()), vec!["focus orca".into(), "raise 0x1".into()]), "вкладка, потом окно");
         assert_eq!(go(Some(&orca), None), (Err("Orca закрыта — открой её".into()), vec![]), "закрытую Orca CLI открыл бы — не зовём");
         let (r, c) = go(Some(&herdr), None);
-        assert!(r.unwrap_err().contains("окно herdr не нашла") && c == ["focus herdr"], "окно клиента herdr по дереву не найти — панель всё же выбрана");
+        assert!(r.unwrap_err().contains("окна herdr не вижу") && c == ["focus herdr"], "окно клиента herdr по дереву не найти — панель всё же выбрана");
         assert_eq!(go(None, Some("0x2")), (Ok(()), vec!["raise 0x2".into()]), "агент в простом терминале — только окно");
-        assert_eq!(go(None, None).0, Err("окно агента не нашла".into()));
+        assert_eq!(go(None, None).0, Err("окна агента не вижу".into()));
         let failed = show_steps(Some(&orca), Some("0x1"), |_| Err("нет терминала".into()), |_| panic!("вкладка не вышла — окно не трогаем"));
         assert_eq!(failed, Err("нет терминала".into()));
     }
