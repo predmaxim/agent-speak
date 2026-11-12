@@ -45,18 +45,10 @@ impl Mux for Orca {
         // запрос один на всех агентов окна, а не на каждого
         let mut sessions: HashMap<String, Option<String>> = HashMap::new(); // папка данных Orca → её ответ
         let mut one = |env: &&HashMap<String, String>| -> Option<bool> {
-            let data = env.get("ORCA_USER_DATA_PATH")?;
-            let out = sessions.entry(data.clone()).or_insert_with(|| workspace(data)).as_deref()?;
-            match (env.get("ORCA_TAB_ID"), env.get("ORCA_WORKTREE_ID")) {
-                (Some(tab), Some(worktree)) => tab_shown(out, worktree, tab),
-                _ => chat_shown(out, env.get("ORCA_AGENT_SESSION_ID")?),
-            }
+            let (tab, worktree, data) = (env.get("ORCA_TAB_ID")?, env.get("ORCA_WORKTREE_ID")?, env.get("ORCA_USER_DATA_PATH")?);
+            tab_shown(sessions.entry(data.clone()).or_insert_with(|| workspace(data)).as_deref()?, worktree, tab)
         };
         envs.iter().map(&mut one).collect()
-    }
-    fn chat(&self, env: &HashMap<String, String>) -> bool {
-        // у процесса чата нет ORCA_TERMINAL_HANDLE и ORCA_TAB_ID, есть сессия агента Orca — она же entityId его вкладки
-        env.get("ORCA_AGENT_SESSION_ID").is_some_and(|s| !s.is_empty())
     }
     fn focus(&self, pane: &Pane) -> Result<(), String> {
         succeeded(&cli(orca(pane, &["switch"]))?) // `orca terminal switch --terminal <handle>`: вкладка в окне Orca
@@ -115,13 +107,7 @@ fn workspace(data: &str) -> Option<String> {
     cli(c).ok()
 }
 
-/// Для чатов ещё — открытого worktree: активная группа вкладок (grp), группы (groups) и вкладки (chats, `unifiedTabs`).
-/// У вкладки чата activeTabIdByWorktree бывает null, а activeTabId группы — она.
-const SHOWN_QUERY: &str = "select json_extract(payload,'$.activeWorktreeId') as worktree, json_extract(payload,'$.activeTabIdByWorktree') as tabs, \
-    json_extract(payload,'$.activeGroupIdByWorktree.\"' || json_extract(payload,'$.activeWorktreeId') || '\"') as grp, \
-    json_extract(payload,'$.tabGroups.\"' || json_extract(payload,'$.activeWorktreeId') || '\"') as groups, \
-    json_extract(payload,'$.unifiedTabs.\"' || json_extract(payload,'$.activeWorktreeId') || '\"') as chats \
-    from profile_state_documents where domain='workspaceSession'";
+const SHOWN_QUERY: &str = "select json_extract(payload,'$.activeWorktreeId') as worktree, json_extract(payload,'$.activeTabIdByWorktree') as tabs from profile_state_documents where domain='workspaceSession'";
 
 /// Ответ базы Orca: открыт ли сейчас worktree агента и в нём — его вкладка.
 fn tab_shown(out: &str, worktree: &str, tab: &str) -> Option<bool> {
@@ -129,17 +115,6 @@ fn tab_shown(out: &str, worktree: &str, tab: &str) -> Option<bool> {
     let row = rows.get(0)?;
     let tabs: Value = serde_json::from_str(row["tabs"].as_str()?).ok()?;
     Some(row["worktree"] == worktree && tabs[worktree] == tab)
-}
-
-/// Ответ базы Orca: открыт ли сейчас чат с сессией агента Orca session — активная вкладка активной группы открытого
-/// worktree; чат в другом worktree — нет.
-fn chat_shown(out: &str, session: &str) -> Option<bool> {
-    let rows: Value = serde_json::from_str(out).ok()?;
-    let row = rows.get(0)?;
-    let groups: Value = serde_json::from_str(row["groups"].as_str()?).ok()?;
-    let tabs: Value = serde_json::from_str(row["chats"].as_str().unwrap_or("[]")).ok()?;
-    let active = &groups.as_array()?.iter().find(|g| g["id"] == row["grp"])?["activeTabId"];
-    Some(tabs.as_array()?.iter().any(|t| t["id"] == *active && t["entityId"] == session))
 }
 
 /// Ответ `worktree list`: папки worktree; мусор — пусто.
@@ -210,42 +185,19 @@ mod tests {
     }
 
     #[test]
-    fn shown_chat_is_the_active_tab_of_the_active_group() {
-        // так отвечает sqlite3 -json: открытый worktree, его активная группа вкладок, группы и вкладки (чаты) этого worktree
-        let row = |grp: &str| serde_json::json!([{"worktree": "w2", "tabs": "{}", "grp": grp,
-            "groups": r#"[{"id":"g1","activeTabId":"structured-agent-session-claude_a"},{"id":"g2","activeTabId":"t-term"}]"#,
-            "chats": r#"[{"id":"structured-agent-session-claude_a","entityId":"claude_a","contentType":"agent-session"},{"id":"structured-agent-session-claude_b","entityId":"claude_b"}]"#}]).to_string();
-        assert_eq!(chat_shown(&row("g1"), "claude_a"), Some(true));
-        assert_eq!(chat_shown(&row("g1"), "claude_b"), Some(false), "чат того же worktree, но вкладка у группы другая");
-        assert_eq!(chat_shown(&row("g2"), "claude_a"), Some(false), "в активной группе — терминал");
-        assert_eq!(chat_shown(&row("g1"), "claude_x"), Some(false), "чат другого worktree");
-        assert_eq!(chat_shown("[]", "claude_a"), None, "нет сессии — фокус неизвестен");
-    }
-
-    #[test]
-    fn chat_is_known_by_its_agent_session() {
-        let chat = HashMap::from([("ORCA_AGENT_SESSION_ID".to_string(), "claude_a".to_string()), ("ORCA_USER_DATA_PATH".into(), "/d".into())]);
-        assert!(Orca.chat(&chat));
-        assert_eq!(Orca.locate(&chat), None, "у чата нет терминала");
-        assert!(!Orca.chat(&HashMap::from([("ORCA_TERMINAL_HANDLE".to_string(), "term_1".to_string())])));
-    }
-
-    #[test]
     fn shown_tabs_of_all_agents_from_one_query() {
         // база Orca как у живой: индекс профилей и workspaceSession; агенты окна — один запрос на всех
         let data = std::env::temp_dir().join(format!("oma-orca-{}", std::process::id()));
         std::fs::create_dir_all(data.join("profiles/p1")).unwrap();
         std::fs::write(data.join("orca-profile-index.json"), r#"{"activeProfileId":"p1"}"#).unwrap();
-        let payload = r#"{"activeWorktreeId":"w2","activeTabIdByWorktree":{"w1":"tab-a","w2":"tab-b"},"activeGroupIdByWorktree":{"w2":"g"},"tabGroups":{"w2":[{"id":"g","activeTabId":"tab-b"}]},"unifiedTabs":{"w2":[{"id":"tab-b"},{"id":"tab-c","entityId":"claude_c"}]}}"#;
+        let payload = r#"{"activeWorktreeId":"w2","activeTabIdByWorktree":{"w1":"tab-a","w2":"tab-b"}}"#;
         let sql = format!("create table profile_state_documents(domain text, payload text); insert into profile_state_documents values('workspaceSession', '{payload}');");
         let db = data.join("profiles/p1/profile-state.db");
         assert!(Command::new("sqlite3").arg(&db).arg(sql).status().unwrap().success());
         let env = |wt: &str, tab: &str| HashMap::from([("ORCA_TAB_ID".to_string(), tab.to_string()), ("ORCA_WORKTREE_ID".into(), wt.into()),
             ("ORCA_USER_DATA_PATH".into(), data.to_string_lossy().into_owned())]);
         let (a, b) = (env("w1", "tab-a"), env("w2", "tab-b"));
-        // чат: в окружении нет вкладки и worktree — только его сессия агента Orca
-        let c = HashMap::from([("ORCA_AGENT_SESSION_ID".to_string(), "claude_c".to_string()), ("ORCA_USER_DATA_PATH".into(), data.to_string_lossy().into_owned())]);
-        assert_eq!(Orca.shown(&[&a, &b, &HashMap::new(), &c]), [Some(false), Some(true), None, Some(false)]);
+        assert_eq!(Orca.shown(&[&a, &b, &HashMap::new()]), [Some(false), Some(true), None]);
         let _ = std::fs::remove_dir_all(data);
     }
 
