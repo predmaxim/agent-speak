@@ -342,8 +342,16 @@ class Brain:
         return {"continue_": False, "stopReason": ASKED} if self.orders.tripped else {}
 
     async def _remember(self, inp, tool_use_id, ctx):
-        """Перед Write/Edit: в память — только слова пользователя из этой реплики (orders.heard), иначе отказ."""
-        why = memory.gate(inp.get("tool_input") or {}, self.orders.heard)
+        """Перед Write/Edit: в память — только слова пользователя из этой реплики (orders.heard), иначе отказ. Внутри
+        prefs/ хук — единственная защита: память выключили посреди чата (у клиента ещё есть Write/Edit) или проверка
+        не прошла сама (MEMORY.md не прочесть) — тоже отказ."""
+        if not self.memory:
+            why = "Память выключена в настройках: не запомнила."
+        else:
+            try:
+                why = memory.gate(inp.get("tool_input") or {}, self.orders.heard)
+            except Exception as e:
+                why = f"Память не проверить ({e!r}): не запомнила."
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                        "permissionDecisionReason": why}} if why else {}
 

@@ -15,7 +15,6 @@ import sys
 import time
 import tomllib
 
-from .conversation import words
 
 DIR = os.path.expanduser("~/.local/share/agent-speak/memory")
 CONFIG = os.path.expanduser("~/.config/agent-speak/config.toml")
@@ -104,9 +103,9 @@ def block():
         try:
             with open(os.path.join(DIR, "days", day + ".md")) as f:
                 text = " ".join(l.strip() for l in f.read().splitlines() if l.strip())
-        except OSError:
+            line = f"{day}, {SHORT[datetime.date.fromisoformat(day).weekday()]}: {text}"
+        except (OSError, ValueError):  # битый файл или имя не дата (каталог правит и пользователь) — день пропускается
             continue
-        line = f"{day}, {SHORT[datetime.date.fromisoformat(day).weekday()]}: {text}"
         room -= len(line) + (1 if lines else 0)
         if room < 0:
             break
@@ -115,7 +114,9 @@ def block():
 
 
 def _run_in(quote, heard):
-    q, h = words(quote), words(heard)
+    # слова и числа: «после 18:00, порт 8080» не станет «после 23 00, порт 22»
+    tokens = lambda t: re.findall(r"[a-zа-я0-9]+", t.lower().replace("ё", "е"))
+    q, h = tokens(quote), tokens(heard)
     return bool(q) and any(h[i:i + len(q)] == q for i in range(len(h) - len(q) + 1))
 
 
@@ -203,13 +204,16 @@ async def haiku(text):
 
 async def compress(now=None, ask=None):
     """Каждый ещё не сжатый день до вчерашнего: заметка в days/<день>.md, затем — смещения чатов и удаление пересказов.
-    Сбой модели — ничего не сдвигается, повтор при следующем запуске. Старое — удаляется."""
-    if not enabled():
-        log("выключена")
-        return
+    Сбой модели — ничего не сдвигается, повтор при следующем запуске. Память выключена или день старше KEEP_DAYS (в
+    промпт он не попадёт) — модель не зовётся: только смещения и удаление пересказов, чтобы включённая потом память
+    этих дней не сжала. Старое — удаляется."""
+    on = enabled()
+    if not on:
+        log("выключена: прошлые дни только отмечены, не сжимаются")
     from . import brain  # SDK — тяжёлый импорт, только задаче
     now, ask = time.time() if now is None else now, ask or haiku
     today = day_of(now)
+    oldest = (datetime.date.fromisoformat(today) - datetime.timedelta(days=KEEP_DAYS)).isoformat()
     ensure()
     for d in ("days", "news"):
         os.makedirs(os.path.join(DIR, d), mode=0o700, exist_ok=True)
@@ -234,8 +238,9 @@ async def compress(now=None, ask=None):
             work.setdefault(d, {"chats": {}, "news": None})["news"] = f
     for d in sorted(work):
         w = work[d]
-        chats = [f'{"я" if m["role"] == "me" else "Ома"}: {m["text"]}' for msgs in w["chats"].values() for m in brain.messages_of(msgs)]
-        news = _news(w["news"]) if w["news"] else []
+        keep = on and d >= oldest
+        chats = [f'{"я" if m["role"] == "me" else "Ома"}: {m["text"]}' for msgs in w["chats"].values() for m in brain.messages_of(msgs)] if keep else []
+        news = _news(w["news"]) if w["news"] and keep else []
         if chats or news:
             name = f"{d}, {WEEKDAYS[datetime.date.fromisoformat(d).weekday()]}"
             reply = await ask(PROMPT.format(day=name, chats="\n".join(chats) or "—", news="\n".join(news) or "—"))
