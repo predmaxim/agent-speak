@@ -296,7 +296,7 @@ struct State {
     presence_seen: String,      // прошлые факты снимка словами — смену пишем в журнал
     viewing: String,            // чат какого агента открыт в окне Омы; пусто — никакого
     window: Option<u32>,        // процесс окна в фокусе — по событиям Hyprland (Event::Window), не опросом
-    under: fn(u32, u32) -> bool, // процесс (агент) — потомок процесса окна; в тестах — подделка
+    under: fn(u32, u32) -> bool, // агент — в окне: потомок его процесса (чат Orca) или терминал его мультиплексора; в тестах — подделка
     welcome: bool,              // вернулся после долгого отсутствия: следующие новости — с приветствием и обзором
     night_keep: bool,           // тишина настала, пока пользователя нет: накопленное ждёт утра
     quiet_why: QuietWhy,        // тишина по причине: Ома молчит, новости копятся
@@ -525,7 +525,7 @@ pub fn run() {
         presence_seen: String::new(),
         viewing: String::new(),
         window: None,
-        under: focus::under,
+        under: in_app,
         welcome: false,
         night_keep: false,
         quiet_why: QuietWhy::default(),
@@ -632,6 +632,12 @@ fn pane_for(e: &Entry, locate: impl Fn(u32) -> Option<Pane>) -> Option<Pane> {
 }
 
 /// Факты о агенте без чтения диска: то, что знает реестр.
+/// Агент pid — в окне win: потомок его процесса (чат Orca, агент в терминале) или в терминале его мультиплексора (pty-хост
+/// Orca — потомок systemd, а не окна, — mux::in_app_window, как его находит show).
+fn in_app(pid: u32, win: u32) -> bool {
+    focus::under(pid, win) || mux::in_app_window(win, pid)
+}
+
 fn blank_facts(e: &Entry, activity: u64) -> Facts {
     Facts {
         id: e.id.clone(), project: e.project.clone(), state: e.state,
@@ -1403,7 +1409,8 @@ impl State {
             Ask::Progress => d.important.then_some("status"),
             Ask::Hung => None,
         };
-        if let Some(kind) = kind {
+        // агент окна в фокусе — пользователь видит его в окне: пузыря нет, как и голоса
+        if let Some(kind) = kind.filter(|_| !self.window_engaged().contains(&d.session)) {
             self.bubble(&d.session, &format!("{kind}-{}", d.session), &who, &heard, kind);
         }
         // промежуточное — только строка «что сейчас» и пузырь (важное): вслух его нет
@@ -1470,11 +1477,11 @@ impl State {
             self.quiet_over &= mode == Mode::Unsure; // и сводка тишины тоже
             return;
         }
-        // и не тогда, когда сказать есть только о чатах Orca под окном в фокусе: их знают события Hyprland
-        let chats = self.chats_engaged();
-        if !self.board.sayable(now, &chats) && !summary(&self.board, &chats) {
+        // и не тогда, когда сказать есть только об агентах окна в фокусе: их знают события Hyprland
+        let shown = self.window_engaged();
+        if !self.board.sayable(now, &shown) && !summary(&self.board, &shown) {
             if mode != Mode::Unsure {
-                self.board.drop_focused(&chats); // итог чата под окном в фокусе снимается молча (пузырь остался), как ниже в take
+                self.board.drop_focused(&shown); // итог агента окна в фокусе снимается молча, как ниже в take
             }
             return;
         }
@@ -1613,15 +1620,15 @@ impl State {
         }
     }
 
-    /// Агенты, которыми пользователь занят, — их новости не вслух (пузыри остаются): чат агента открыт в окне Омы; его
-    /// вкладка в фокусе, и пользователь печатает (ввод за FOCUS_INPUT) или ждёт его ответа (свой промпт за FOCUS_PROMPT) —
-    /// просто вкладка в фокусе — нет: может, отошёл или смотрит в телефон; все чаты Orca, пока её окно в фокусе: какой чат
-    /// на экране, Orca не сообщает (нет CLI «активный чат», docs/upstream/orca-active-chat.md).
+    /// Агенты, которыми пользователь занят, — их новости не вслух: чат агента открыт в окне Омы; его вкладка в фокусе, и
+    /// пользователь печатает (ввод за FOCUS_INPUT) или ждёт его ответа (свой промпт за FOCUS_PROMPT) — просто вкладка в
+    /// фокусе — нет: может, отошёл или смотрит в телефон; все агенты окна в фокусе, пока пользователь за компьютером
+    /// (window_engaged).
     fn engaged(&mut self) -> Vec<String> {
         if !self.viewing.is_empty() {
             return vec![self.viewing.clone()];
         }
-        let mut out = self.chats_engaged();
+        let mut out = self.window_engaged();
         let Some(id) = self.focused().map(|f| f.id) else { return out };
         let now = (self.now_secs)();
         let typing = now.saturating_sub(self.presence.last_input(now)) < FOCUS_INPUT;
@@ -1633,10 +1640,16 @@ impl State {
         out
     }
 
-    /// Чаты Orca под окном в фокусе: их процесс — потомок окна, как его находит show. Окно — из событий Hyprland, без hyprctl.
-    fn chats_engaged(&self) -> Vec<String> {
+    /// Агенты окна в фокусе (Orca, herdr, терминал) — пользователь их и так видит: ни голоса, ни пузырей о их итогах и
+    /// вопросах (итог снимается молча, вопрос ждёт, пока он уйдёт из окна); беды сторожа и «нужно» звучат — их в окне не
+    /// видно (решение пользователя 2026-11-13). Только пока он за компьютером (присутствие Here): Orca в фокусе, а его нет —
+    /// новости звучат, «Ты тут?» спрашивается. Окно — из событий Hyprland, без hyprctl.
+    fn window_engaged(&self) -> Vec<String> {
         let Some(w) = self.window else { return vec![] };
-        self.registry.entries().iter().filter(|e| e.chat && (self.under)(e.pid, w)).map(|e| e.id.clone()).collect()
+        if self.presence.mode((self.now_secs)()) != Mode::Here {
+            return vec![];
+        }
+        self.registry.entries().iter().filter(|e| (self.under)(e.pid, w)).map(|e| e.id.clone()).collect()
     }
 
     /// Окно в фокусе сменилось (событие Hyprland): чаты ушедшего окна снова звучат — сразу, а не с тика.
@@ -2849,7 +2862,7 @@ mod tests {
             presence_seen: String::new(),
             viewing: String::new(),
             window: None,
-            under: focus::under,
+            under: in_app,
             welcome: false,
             night_keep: false,
             quiet_why: QuietWhy::default(),
@@ -6575,14 +6588,14 @@ mod tests {
     }
 
     #[test]
-    fn orca_chats_keep_quiet_while_the_orca_window_is_focused() {
-        // какой чат Orca на экране, Orca не сообщает: её окно в фокусе (событие Hyprland) — все её чаты «заняты»: пузыри
-        // без голоса; терминал под тем же окном — как прежде; другое окно — чаты звучат сразу, по событию
+    fn agents_of_the_focused_window_keep_quiet_while_the_user_is_there() {
+        // решение пользователя 2026-11-13: окно в фокусе (Orca) — его агенты, чаты и терминалы, ни вслух, ни пузырём: он их
+        // и так видит; итог снимается молча, вопрос ждёт ухода из окна; агент другого окна — как прежде
         let mut st = test_state();
-        let live = vec![Live { chat: true, pid: 11, ..live("s") }, Live { pid: 12, ..live("t") }];
+        let live = vec![Live { chat: true, pid: 11, ..live("s") }, Live { pid: 12, ..live("t") }, Live { pid: 3, ..live("u") }];
         st.scan = Box::new(move || live.clone());
         st.rescan();
-        st.under = |pid, win| win == 99 && pid > 10; // 11 и 12 — потомки окна 99 (Orca)
+        st.under = |pid, win| win == 99 && pid > 10; // 11 (чат) и 12 (терминал) — в окне 99 (Orca), 3 — нет
         let calls = Arc::new(Mutex::new(0));
         let c = calls.clone();
         st.focus_src = Box::new(move || {
@@ -6594,19 +6607,39 @@ mod tests {
         hello(&mut r);
         final_s(&mut st);
         st.on_digest(dg("t", Ask::Final, false, "Тесты прошли."));
+        st.on_digest(dg("u", Ask::Final, false, "Сборка готова."));
         st.tick();
-        assert_eq!(texts(&st), ["плуг: Тесты прошли."], "итог чата s — только пузырём");
-        assert_eq!(bubbles(&mut r).len(), 2, "пузыри — у обоих");
-        question(&mut st, "s", true, "Удалить старый код?");
+        assert_eq!(texts(&st), ["плуг: Сборка готова."], "вслух — только агент не из окна в фокусе");
+        assert_eq!(bubbles(&mut r).len(), 1, "пузырь — только у него");
+        question(&mut st, "t", true, "Удалить старый код?");
         *calls.lock().unwrap() = 0;
         for _ in 0..3 {
             st.focus_cache = None;
             st.tick();
         }
-        assert!(texts(&st).is_empty(), "вопрос чата ждёт, пока окно Orca в фокусе");
-        assert_eq!(*calls.lock().unwrap(), 0, "ждущий вопрос чата hyprctl на каждом тике не спрашивает");
+        assert!(texts(&st).is_empty(), "вопрос агента окна ждёт, пока окно в фокусе");
+        assert!(bubbles(&mut r).is_empty(), "и пузыря у вопроса нет");
+        assert_eq!(*calls.lock().unwrap(), 0, "ждущий вопрос hyprctl на каждом тике не спрашивает");
         st.on_window(Some(5)); // в фокусе другое окно
         assert_eq!(texts(&st), ["плуг: Удалить старый код?"], "по событию, тика не ждёт");
+    }
+
+    #[test]
+    fn focused_window_does_not_hush_when_the_user_is_not_there() {
+        // окно Orca в фокусе, а пользователь давно ничего не трогал: может, отошёл — новости не глушатся
+        let mut st = test_state();
+        let live = vec![Live { pid: 12, ..live("t") }];
+        st.scan = Box::new(move || live.clone());
+        st.rescan();
+        st.under = |pid, win| win == 99 && pid > 10;
+        st.on_window(Some(99));
+        assert_eq!(st.window_engaged(), ["t".to_string()], "за компьютером — агент окна занят");
+        st.on_presence(r#"{"at":1000,"idle_since":90}"#);
+        assert!(st.window_engaged().is_empty(), "не уверена, что он тут, — окно не глушит");
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        st.on_digest(dg("t", Ask::Final, false, "Тесты прошли."));
+        assert_eq!(bubbles(&mut r).len(), 1, "пузырь есть");
     }
 
     #[test]
