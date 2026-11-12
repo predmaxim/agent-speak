@@ -16,9 +16,7 @@ pub struct Shared {
     pub voice: Mutex<(String, String)>, // (speaker, rate)
     pub busy: AtomicBool,
     pub current: Mutex<String>, // сессия звучащей фразы — для «Читаю: <проект>»
-    /// Основному циклу: None — смена «говорит/молчит», Some(сессия) — пошёл звук её фразы (записан первый кусок;
-    /// busy загорается раньше — до синтеза, а он бывает долгим).
-    pub changed: Mutex<Option<std::sync::mpsc::Sender<Option<String>>>>,
+    pub changed: Mutex<Option<std::sync::mpsc::Sender<Play>>>, // сигналы основному циклу
     pub sink: Arc<Mutex<String>>, // узел PipeWire для pw-cat --target; пусто — вывод по умолчанию
     /// Когда кончается (кончился) звук последней речи — CLOCK_MONOTONIC, с (как time.monotonic() в Python); 0 — речи не было.
     /// «Смолкла» (busy гаснет) приходит раньше: pw-cat ещё доигрывает свой канал.
@@ -26,6 +24,19 @@ pub struct Shared {
     /// Номер реплики Омы, чья фраза у потока воспроизведения (синтез, запись); 0 — ничья. Ставится под замком очереди
     /// вместе с pop, снимается до «смолкла».
     pub voice_now: AtomicU64,
+}
+
+/// Сигнал потока воспроизведения основному циклу. Сессия — в самом сигнале: цикл, занятый дольше фразы, её не потеряет,
+/// а судит по порядку сигналов, а не по тому, что видит в очереди к своему часу.
+#[derive(Debug, PartialEq)]
+pub enum Play {
+    /// Заговорил или смолк.
+    Busy,
+    /// Пошёл звук фразы этой сессии: записан первый кусок (busy загорается раньше — до синтеза, а он бывает долгим).
+    Sound(String),
+    /// Фраза этой сессии ушла без звука и в очередь не вернётся: синтез не смог её текст, запись не прошла второй раз,
+    /// стоп или перебив до первого куска.
+    Dropped(String),
 }
 
 /// Синтезатор и приёмник звука — трейты только ради тестов с подделками.
@@ -83,10 +94,10 @@ impl Shared {
         }
     }
 
-    /// Пошёл звук фразы сессии session — основному циклу; сессия в самом сигнале: цикл, занятый дольше фразы, её не потеряет.
-    fn sound(&self, session: &str) {
+    /// Сигнал основному циклу.
+    fn signal(&self, p: Play) {
         if let Some(tx) = &*self.changed.lock().unwrap() {
-            let _ = tx.send(Some(session.to_string()));
+            let _ = tx.send(p);
         }
     }
 
@@ -140,9 +151,7 @@ impl Shared {
         }
         drop(cur);
         if changed {
-            if let Some(tx) = &*self.changed.lock().unwrap() {
-                let _ = tx.send(None);
-            }
+            self.signal(Play::Busy);
         }
     }
 
@@ -163,12 +172,15 @@ const CHUNK: usize = 9600; // 0,1 с s16 48 кГц моно
 const TAIL: Duration = Duration::from_millis(1000); // ~0,7 с ещё играет из буфера pw-cat
 const RETRY: Duration = Duration::from_secs(10);
 
-/// Вернуть фразу в голову очереди, если её не отменили (стоп) — пауза не отменяет.
-fn requeue(shared: &Shared, q: &mut Queue, item: Item, my_gen: u64) {
+/// Вернуть фразу в голову очереди (после паузы — с начала предложения), если её не отменили (стоп, перебив) — пауза
+/// не отменяет. false — фраза ушла.
+fn requeue(shared: &Shared, q: &mut Queue, item: &Item, my_gen: u64) -> bool {
     // образец не возвращается: на паузе pop отдал бы его снова
-    if item.kind != Kind::Preview && (shared.generation.load(Ordering::SeqCst) == my_gen || q.paused()) {
-        q.push_front(item);
+    let back = item.kind != Kind::Preview && (shared.generation.load(Ordering::SeqCst) == my_gen || q.paused());
+    if back {
+        q.push_front(item.clone());
     }
+    back
 }
 
 // ponytail: «синтез наперёд» — за счёт буфера канала pw-cat (~0,7 с): пока доигрывает хвост,
@@ -204,8 +216,6 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                 if let Some(it) = q.pop() {
                     tail = None;
                     shared.voice_now.store(it.voice, Ordering::SeqCst);
-                    // под замком очереди, вместе с pop: фраза всегда или в очереди, или у потока при busy (daemon here_unqueue)
-                    shared.set_busy(Some(&it.session));
                     break (it, shared.generation.load(Ordering::SeqCst));
                 }
                 // фраза записана, оборвана или вернулась в очередь — у потока её нет; до «смолкла», чтобы строка
@@ -216,6 +226,7 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                 q = shared.cv.wait_timeout(q, to).unwrap().0;
             }
         };
+        shared.set_busy(Some(&item.session));
         let (speaker, rate) = shared.voice.lock().unwrap().clone();
         let pcm = match tts.synth(&item.text, &speaker, &rate) {
             Ok(pcm) => pcm,
@@ -230,7 +241,9 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                 let left = player.left();
                 player.close();
                 let mut q = shared.queue.lock().unwrap();
-                requeue(&shared, &mut q, item, my_gen);
+                if !requeue(&shared, &mut q, &item, my_gen) {
+                    shared.signal(Play::Dropped(item.session));
+                }
                 shared.idle(|| left);
                 let deadline = Instant::now() + RETRY;
                 while shared.generation.load(Ordering::SeqCst) == my_gen {
@@ -243,14 +256,11 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                 continue;
             }
         };
-        let mut done = true;
+        let (mut done, mut sounded, mut kept) = (true, false, false); // kept — вернулась в очередь
         for (i, chunk) in pcm.chunks(CHUNK).enumerate() {
             if shared.generation.load(Ordering::SeqCst) != my_gen {
                 player.reset();
-                let mut q = shared.queue.lock().unwrap();
-                if q.paused() && item.kind != Kind::Preview {
-                    q.push_front(item.clone()); // после паузы — с начала предложения
-                }
+                kept = requeue(&shared, &mut shared.queue.lock().unwrap(), &item, my_gen);
                 done = false;
                 break;
             }
@@ -258,15 +268,18 @@ fn run_with(shared: Arc<Shared>, mut tts: impl Synth, mut player: impl Sink) {
                 // не потерять молча, но только один раз подряд для той же фразы
                 if write_failed.as_deref() != Some(&item.text) {
                     write_failed = Some(item.text.clone());
-                    let mut q = shared.queue.lock().unwrap();
-                    requeue(&shared, &mut q, item.clone(), my_gen);
+                    kept = requeue(&shared, &mut shared.queue.lock().unwrap(), &item, my_gen);
                 }
                 done = false;
                 break;
             }
             if i == 0 {
-                shared.sound(&item.session);
+                shared.signal(Play::Sound(item.session.clone()));
+                sounded = true;
             }
+        }
+        if !sounded && !kept {
+            shared.signal(Play::Dropped(item.session.clone())); // пустой звук (синтез не смог), запись, стоп, перебив
         }
         if done {
             write_failed = None;
@@ -370,9 +383,9 @@ mod tests {
         *shared.changed.lock().unwrap() = Some(tx);
         say(&shared);
         wait(|| count(&ev, "write") == 2);
-        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), None); // начал говорить
-        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Some("s".into())); // пошёл звук
-        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), None); // замолчал
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Play::Busy); // начал говорить
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Play::Sound("s".into())); // пошёл звук
+        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), Play::Busy); // замолчал
         assert!(!shared.busy.load(Ordering::SeqCst));
         assert_eq!(*shared.current.lock().unwrap(), "s");
     }
@@ -388,7 +401,7 @@ mod tests {
         say(&shared);
         shared.resume();
         wait(|| count(&ev, "write") == 4 && !shared.busy.load(Ordering::SeqCst));
-        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [None, Some("s".into()), Some("s".into()), None], "начала, звук двух фраз, смолкла");
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [Play::Busy, Play::Sound("s".into()), Play::Sound("s".into()), Play::Busy], "начала, звук двух фраз, смолкла");
     }
 
     #[test]
@@ -417,13 +430,28 @@ mod tests {
         wait(|| count(&ev, "write") == 2);
     }
 
+    /// Сигналы потока основному циклу — в канал, как у службы.
+    fn signals(shared: &Shared) -> std::sync::mpsc::Receiver<Play> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        *shared.changed.lock().unwrap() = Some(tx);
+        rx
+    }
+
+    /// Следующие n сигналов.
+    fn next(rx: &std::sync::mpsc::Receiver<Play>, n: usize) -> Vec<Play> {
+        (0..n).map(|_| rx.recv_timeout(Duration::from_secs(3)).expect("не дождались сигнала")).collect()
+    }
+
     #[test]
     fn text_the_model_rejects_is_dropped_not_retried() {
         let fails = Arc::new(Mutex::new(1));
         let (shared, ev) = start_with(fails.clone(), Failed::Text, 0);
+        let rx = signals(&shared);
         say(&shared);
         wait(|| *fails.lock().unwrap() == 0 && !shared.busy.load(Ordering::SeqCst));
         assert!(shared.queue.lock().unwrap().is_empty(), "повтор того же текста не поможет — очередь не стоит");
+        // фраза ушла без звука — служба узнаёт это из сигнала, а не по своему состоянию («Ты тут?» не ждёт ответа)
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [Play::Busy, Play::Dropped("s".into()), Play::Busy]);
         say(&shared); // следующая фраза звучит сразу, без паузы RETRY
         wait(|| count(&ev, "write") == 2);
         // пустой звук — как доигранная фраза: pw-cat не закрыт посреди хвоста прежней, новый поверх не запущен
@@ -491,8 +519,47 @@ mod tests {
     #[test]
     fn write_failure_requeues_once() {
         let (shared, ev) = start(0, 1);
+        let rx = signals(&shared);
         say(&shared);
-        wait(|| count(&ev, "write") == 2);
+        wait(|| count(&ev, "write") == 2 && !shared.busy.load(Ordering::SeqCst));
+        assert!(!rx.try_iter().any(|p| matches!(p, Play::Dropped(_))), "вернулась в очередь и прозвучала");
+    }
+
+    #[test]
+    fn write_failing_twice_drops_without_sound() {
+        let (shared, ev) = start(0, 2);
+        let rx = signals(&shared);
+        say(&shared);
+        assert_eq!(next(&rx, 3), [Play::Busy, Play::Dropped("s".into()), Play::Busy]);
+        assert_eq!(count(&ev, "write"), 0);
+        assert!(shared.queue.lock().unwrap().is_empty());
+    }
+
+    /// Синтез, который идёт 0,5 с: за это время успеть оборвать фразу.
+    struct SlowSynth;
+    impl Synth for SlowSynth {
+        fn synth(&mut self, _: &str, _: &str, _: &str) -> Result<Vec<u8>, Failed> {
+            std::thread::sleep(Duration::from_millis(500));
+            Ok(vec![0; CHUNK * 2])
+        }
+    }
+
+    #[test]
+    fn stop_before_first_chunk_drops_without_sound_and_pause_keeps() {
+        let shared = Arc::new(Shared::new(Queue::new(), "x".into(), "m".into()));
+        let ev: Events = Default::default();
+        let (s, e) = (shared.clone(), ev.clone());
+        std::thread::spawn(move || run_with(s, SlowSynth, FakeSink(e, Arc::new(Mutex::new(0)))));
+        let rx = signals(&shared);
+        say(&shared);
+        wait(|| shared.busy.load(Ordering::SeqCst));
+        shared.pause(); // пауза — фраза вернётся в очередь: не выброшена
+        wait(|| !shared.busy.load(Ordering::SeqCst) && !shared.queue.lock().unwrap().is_empty());
+        shared.resume();
+        wait(|| shared.busy.load(Ordering::SeqCst));
+        shared.stop(); // стоп — ушла без звука
+        assert_eq!(next(&rx, 5), [Play::Busy, Play::Busy, Play::Busy, Play::Dropped("s".into()), Play::Busy]);
+        assert_eq!(count(&ev, "write"), 0);
     }
 
     #[test]

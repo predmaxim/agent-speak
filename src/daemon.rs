@@ -13,7 +13,7 @@ use crate::notice::notify as notice;
 use crate::presence::{self, Mode, Presence};
 use crate::queue::{Item, Kind, Queue};
 use crate::source::{claude, codex, tail::{has_line, tail_of, Tailer}};
-use crate::speaker::{self, Shared};
+use crate::speaker::{self, Play, Shared};
 use crate::text::{prepare, terms::Terms};
 use crate::tts::Tts;
 use crate::watch::{self, Act, Ctx, Facts, Watch};
@@ -34,8 +34,7 @@ enum Event {
     File(PathBuf),
     Config,
     Subscribe(UnixStream),
-    Busy, // поток воспроизведения: начал или закончил говорить
-    Sound(String), // поток воспроизведения: пошёл звук фразы этой сессии
+    Play(Play), // поток воспроизведения: заговорил или смолк, пошёл звук фразы, фраза ушла без звука
     Tick, // раз в секунду: Ома, граница тихого расписания, состав агентов
     Digest(Digest), // пересказ хода агента от воркеров digest
     Presence(String), // новый снимок сервиса присутствия
@@ -262,13 +261,13 @@ pub fn run() {
         });
     }
     {
-        // «говорит/молчит» и «пошёл звук» из потока воспроизведения — в основной цикл
-        let (btx, brx) = mpsc::channel::<Option<String>>();
+        // сигналы потока воспроизведения — в основной цикл
+        let (btx, brx) = mpsc::channel::<Play>();
         *shared.changed.lock().unwrap() = Some(btx);
         let tx = tx.clone();
         std::thread::spawn(move || {
-            for s in brx {
-                let _ = tx.send(s.map_or(Event::Busy, Event::Sound));
+            for p in brx {
+                let _ = tx.send(Event::Play(p));
             }
         });
     }
@@ -433,8 +432,9 @@ pub fn run() {
             Event::File(p) => st.on_file(&p),
             Event::Config => st.reload(),
             Event::Subscribe(s) => st.subscribe(s),
-            Event::Busy => st.on_busy(),
-            Event::Sound(session) => st.on_sound(&session),
+            Event::Play(Play::Busy) => st.on_busy(),
+            Event::Play(Play::Sound(session)) => st.on_sound(&session),
+            Event::Play(Play::Dropped(session)) => st.on_dropped(&session),
             Event::Digest(d) => st.on_digest(d),
             Event::Presence(t) => st.on_presence(&t),
             Event::Acted(d) => st.on_acted(d),
@@ -752,7 +752,12 @@ impl State {
         }
         let quiet = self.quiet();
         self.night_keep &= quiet; // тишина кончилась (и вручную) — держать до утра нечего
-        self.shared.queue.lock().unwrap().retain_audible(quiet);
+        let here = {
+            let mut q = self.shared.queue.lock().unwrap();
+            let had = q.has("here");
+            q.retain_audible(quiet);
+            had && !q.has("here")
+        };
         // новости тишины не ждут утра — кроме накопленного, пока пользователя не было; без «Озвучивать агентов» звучат только вопросы
         if quiet {
             if !self.night_keep {
@@ -760,9 +765,11 @@ impl State {
             }
             // новости выброшены — окно ответа по чужой речи не откроется, невыпущенный «Ты тут?» не прозвучит
             (self.listen_after, self.listen_at) = (None, None);
-            self.here_unqueue();
         } else if !self.cfg.agents_voice {
             self.board.retain_classes(&[]); // за агентами не следим — о них ни слова
+        }
+        if here {
+            self.on_dropped("here");
         }
     }
 
@@ -1102,18 +1109,12 @@ impl State {
     fn on_busy(&mut self) {
         self.broadcast();
         self.after_speech();
-        self.here_unqueue(); // «Ты тут?», выброшенный потоком без звука (синтез не смог, запись не прошла), — здесь
     }
 
-    /// «Ты тут?» ушёл, не прозвучав: его нет ни в очереди, ни у потока воспроизведения (молчит) — ответа не ждём.
-    /// Зовётся на каждом «смолкла» и там, где фразы выбрасывают из очереди, не меняя busy (стоп, тишина).
-    fn here_unqueue(&mut self) {
-        let gone = {
-            let q = self.shared.queue.lock().unwrap();
-            // busy включается под замком очереди вместе с pop: снятая фраза уже у потока, и он не молчит
-            !self.shared.busy.load(Ordering::SeqCst) && !q.has("here")
-        };
-        if gone && self.here_ask == Some(HereAsk::Queued) {
+    /// Фраза сессии session ушла, не прозвучав: её выбросил поток воспроизведения (его сигнал — по порядку с «пошёл звук»)
+    /// или служба из очереди (стоп, тишина). «Ты тут?» ответа не ждёт.
+    fn on_dropped(&mut self, session: &str) {
+        if session == "here" && self.here_ask == Some(HereAsk::Queued) {
             self.here_ask = None;
         }
     }
@@ -1202,9 +1203,12 @@ impl State {
     }
 
     fn stop(&mut self) {
+        let here = self.shared.queue.lock().unwrap().has("here"); // у потока воспроизведения — о нём скажет его сигнал
         self.shared.stop();
         (self.listen_after, self.listen_at) = (None, None); // новости оборвали сами — ответа не ждём
-        self.here_unqueue();
+        if here {
+            self.on_dropped("here");
+        }
     }
 
     /// Запуск Омы: EOF её stdin (демон умер) — Ома выходит сама.
@@ -2432,7 +2436,7 @@ mod tests {
         st.on_msg(Msg::Pause);
         assert_eq!(next(&mut r)["paused"], true);
         st.shared.set_busy(Some("s"));
-        st.broadcast(); // так цикл отвечает на Event::Busy
+        st.broadcast(); // так цикл отвечает на Play::Busy
         assert_eq!(next(&mut r)["speaking"], true);
     }
 
@@ -3718,7 +3722,7 @@ mod tests {
     }
 
     /// Сказанное отзвучало: хвост pw-cat доиграл, окно ответа открыто.
-    /// Очередь отзвучала: звук каждой фразы пошёл (Event::Sound её сессии, как от потока воспроизведения).
+    /// Очередь отзвучала: звук каждой фразы пошёл (Play::Sound её сессии, как от потока воспроизведения).
     fn sound(st: &mut State) -> Vec<String> {
         let items: Vec<Item> = {
             let mut q = st.shared.queue.lock().unwrap();
@@ -3925,22 +3929,47 @@ mod tests {
         assert!(texts(&st).is_empty());
     }
 
+    /// Поток воспроизведения взял из очереди всё: фразы у него.
+    fn taken(st: &State) -> Vec<Item> {
+        let mut q = st.shared.queue.lock().unwrap();
+        std::iter::from_fn(|| q.pop()).collect()
+    }
+
     #[test]
     fn are_you_there_dropped_without_sound_is_not_awaited() {
-        // поток воспроизведения выбросил «Ты тут?», не дав звука (синтез не смог, запись не прошла второй раз): busy
-        // погас, в очереди его нет — ответа не ждём; иначе новости молчали бы, а гарнитура не вернулась бы в музыку
+        // «Ты тут?» ушёл без звука — ответа не ждём; иначе новости молчали бы, а гарнитура не вернулась бы в музыку.
+        // У потока воспроизведения (синтез не смог, запись не прошла второй раз, стоп до первого куска) — по его сигналу
         let (mut st, _env, _now) = asked_are_you_there_kept();
+        assert!(taken(&st).iter().all(|i| i.session == "here"));
         st.on_busy();
-        assert_eq!(st.here_ask, Some(HereAsk::Queued), "ещё в очереди — ждёт звука");
-        let q = || st.shared.queue.lock().unwrap();
-        let held: Vec<Item> = std::iter::from_fn(|| q().pop()).collect();
-        st.shared.set_busy(Some("here"));
         st.on_busy();
-        assert_eq!(st.here_ask, Some(HereAsk::Queued), "у потока воспроизведения — ещё зазвучит");
-        st.shared.set_busy(None);
+        assert_eq!(st.here_ask, Some(HereAsk::Queued), "смолкла — не повод: о выброшенной фразе поток скажет сам");
+        st.on_dropped("here");
+        assert_eq!(st.here_ask, None, "выброшен без звука");
+        // из очереди его выбрасывают стоп и тишина — сами
+        let (mut st, _env, _now) = asked_are_you_there_kept();
+        st.on_msg(Msg::Stop);
+        assert_eq!(st.here_ask, None, "стоп");
+        let (mut st, _env, _now) = asked_are_you_there_kept();
+        st.cfg.quiet_override = "on".into();
+        st.apply();
+        assert_eq!(st.here_ask, None, "тишина");
+        let (mut st, _env, _now) = asked_are_you_there_kept();
+        taken(&st);
+        st.on_msg(Msg::Stop);
+        assert_eq!(st.here_ask, Some(HereAsk::Queued), "у потока: прозвучал ли, скажет его сигнал");
+    }
+
+    #[test]
+    fn are_you_there_played_while_the_loop_lagged_is_awaited() {
+        // цикл занят дольше, чем «Ты тут?» синтезируется и пишется (ревью раунда 4): «заговорила» он разбирает, когда поток
+        // уже смолк, — вопроса нет ни в очереди, ни у потока, но в канале следом «пошёл звук»: окно ответа, а не сброс
+        let (mut st, _env, _now) = asked_are_you_there_kept();
+        taken(&st);
         st.on_busy();
-        assert_eq!(st.here_ask, None, "смолкла без звука вопроса");
-        assert!(held.iter().all(|i| i.session == "here"));
+        st.on_sound("here");
+        st.on_busy();
+        assert_eq!(st.here_ask, Some(HereAsk::Since(1100)));
     }
 
     #[test]
