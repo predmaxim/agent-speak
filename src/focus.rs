@@ -39,7 +39,7 @@ pub(crate) fn ppid(pid: u32) -> Option<u32> {
     stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
 }
 
-fn under(mut pid: u32, ancestor: u32) -> bool {
+pub(crate) fn under(mut pid: u32, ancestor: u32) -> bool {
     while pid > 1 {
         if pid == ancestor {
             return true;

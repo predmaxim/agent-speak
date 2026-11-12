@@ -1,5 +1,5 @@
 //! Реестр живых агентов пользователя: кто работает, ждёт ответа или закончил; лента событий каждого.
-use crate::text::clean::plain;
+use crate::text::clean::{mask_secrets, plain};
 use crate::text::plural;
 use crate::focus;
 use serde::Serialize;
@@ -12,6 +12,7 @@ pub const LINE_MAX: usize = 8000; // символов в строке ленты
 pub const IDLE_AFTER: u64 = 600; // с после «готово» → «простаивает»
 const STATUS_MAX: usize = 120;
 pub const FAILS_DROOP: usize = 3; // упавших вызовов за ход — орб «поник»
+pub const NOTE_MAX: usize = 200; // символов в заметке агента («нужно», `agent-speak note`)
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -54,6 +55,15 @@ pub struct Entry {
     pub ask: String,
     /// Вызовов инструментов, которые не смогли отработать, за этот ход (хук PostToolUseFailure, см. tool_failed).
     pub fails: usize,
+    /// Заметка агента Оме «нужно» (`agent-speak note`): текст агента — данные, не поручение; пусто — нет.
+    pub note: String,
+}
+
+impl Entry {
+    /// Ждёт пользователя: вопрос или заметка «нужно».
+    fn waits(&self) -> bool {
+        self.state == State::Waiting || !self.note.is_empty()
+    }
 }
 
 /// Живая сессия, найденная на диске / в /proc.
@@ -394,7 +404,7 @@ impl Registry {
                 changed = true;
                 self.entries.push(Entry {
                     id: l.id, agent: l.agent, title: l.title, project: folder(&l.cwd), cwd: l.cwd, transcript,
-                    state: l.state, status: String::new(), since: now, focused: false, heard: false, pid: l.pid, health: String::new(), ask: String::new(), fails: 0,
+                    state: l.state, status: String::new(), since: now, focused: false, heard: false, pid: l.pid, health: String::new(), ask: String::new(), fails: 0, note: String::new(),
                     // агент впервые на глазах (и после перезапуска демона): лента начинается с его истории
                     feed: if l.agent == "claude" { history(&l.transcript, &images_dir()) } else { VecDeque::new() },
                 });
@@ -471,6 +481,12 @@ impl Registry {
     }
 
     pub fn prompt(&mut self, id: &str, text: &str, now: u64) -> bool {
+        if !technical(text) {
+            // «нужно» агента снимает ответ пользователя, а не отчёт помощника
+            if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
+                e.note.clear();
+            }
+        }
         let text = if technical(text) { String::new() } else { shown(text) };
         self.event(id, "prompt", &text, State::Working, None, now)
     }
@@ -494,6 +510,20 @@ impl Registry {
         if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
             e.ask = text.to_string();
         }
+    }
+
+    /// Заметка агента «нужно»: одной строкой, без разметки и секретов, не длиннее NOTE_MAX; новая заменяет прежнюю.
+    /// None — агента нет или текст пуст (прежняя остаётся).
+    pub fn note(&mut self, id: &str, text: &str) -> Option<&Entry> {
+        let text: String = mask_secrets(&plain(text)).chars().take(NOTE_MAX).collect();
+        let e = self.entries.iter_mut().find(|e| e.id == id && !text.trim().is_empty())?;
+        e.note = text;
+        Some(e)
+    }
+
+    /// Агент, чей процесс — предок pid (его Bash и их дети): заметка без CLAUDE_CODE_SESSION_ID.
+    pub fn above(&self, pid: u32) -> Option<&Entry> {
+        self.entries.iter().find(|e| focus::under(pid, e.pid))
     }
 
     /// Пересказ Омы — строка «что сейчас» в окне; в ленту не пишется: там дословный текст агента.
@@ -532,7 +562,7 @@ impl Registry {
     /// прошлым разом; тот уже не ждёт — с начала. Показанного запоминает.
     pub fn jump(&mut self, id: &str) -> Option<&Entry> {
         let id = if id.is_empty() {
-            let mut w: Vec<&Entry> = self.entries.iter().filter(|e| e.state == State::Waiting).collect();
+            let mut w: Vec<&Entry> = self.entries.iter().filter(|e| e.waits()).collect();
             w.sort_by_key(|e| e.since);
             let after = w.iter().position(|e| e.id == self.jumped).map_or(0, |i| i + 1);
             w.get(after).or(w.first())?.id.clone()
@@ -556,7 +586,7 @@ impl Registry {
     }
 
     pub fn waiting(&self) -> usize {
-        self.entries.iter().filter(|e| e.state == State::Waiting).count()
+        self.entries.iter().filter(|e| e.waits()).count()
     }
 
     /// Строка для панели: ждущие, работающие, готовые, простаивающие; внутри группы — в порядке появления
@@ -615,6 +645,38 @@ mod tests {
     fn live(id: &str, busy: bool) -> Live {
         let state = if busy { State::Working } else { State::Idle };
         Live { id: id.into(), agent: "claude", pid: 1, title: id.into(), cwd: format!("/p/{id}"), transcript: PathBuf::new(), state, status_at: 0 }
+    }
+
+    #[test]
+    fn note_waits_until_the_users_own_prompt() {
+        let mut r = Registry::new();
+        r.sync(vec![live("a", true), live("b", true)], 100);
+        let note = |r: &Registry| r.get("a").unwrap().note.clone();
+        assert_eq!(r.note("a", "нужен\n**токен** TFS: ghp_abcdefghijklmnopqrstuvwxyz0123456789").map(|e| e.id.as_str()), Some("a"));
+        assert_eq!(note(&r), "нужен токен TFS: ghp_…", "одна строка, без разметки и секретов");
+        assert_eq!((r.get("a").unwrap().state, r.waiting()), (State::Working, 1), "работает, но ждёт пользователя");
+        assert_eq!(r.jump("").map(|e| e.id.clone()), Some("a".into()), "и в ждущих у show");
+        r.note("a", &"я".repeat(300));
+        assert_eq!(note(&r), "я".repeat(NOTE_MAX), "новая заменяет прежнюю; длина — не больше NOTE_MAX");
+        assert!(r.note("нет", "x").is_none());
+        assert!(r.note("a", "```\n```").is_none() && note(&r) == "я".repeat(NOTE_MAX), "пустая не стирает прежнюю");
+        r.status("a", "работаю", 110);
+        r.prompt("a", "<task-notification>помощник закончил</task-notification>", 115);
+        assert_eq!(r.waiting(), 1, "ход идёт, отчёт помощника — не ответ пользователя: заметка стоит");
+        r.prompt("a", "токен в ~/.tfs", 120);
+        assert_eq!((note(&r).as_str(), r.waiting()), ("", 0), "ответ пользователя снимает");
+        r.note("b", "выбери: A или B");
+        let v: Value = serde_json::from_str(&r.line()).unwrap();
+        assert_eq!((v["agents"][0]["note"].as_str(), v["agents"][1]["note"].as_str()), (Some(""), Some("выбери: A или B")), "в строке агентов — окну и мозгу");
+    }
+
+    #[test]
+    fn above_finds_the_agent_whose_process_runs_the_pid() {
+        let me = std::process::id();
+        let mut r = Registry::new();
+        r.sync(vec![Live { pid: crate::focus::ppid(me).unwrap(), ..live("a", true) }, live("b", true)], 100);
+        assert_eq!(r.above(me).map(|e| e.id.as_str()), Some("a"), "CLI заметки — потомок процесса агента");
+        assert_eq!(r.above(0).map(|e| e.id.as_str()), None);
     }
 
     #[test]

@@ -60,12 +60,27 @@ fn main() {
         // где запускать: orca (по умолчанию) или herdr
         Some("launch") if matches!(args.len(), 3 | 4) => return done(orders::launch(&args[1], &args[2], args.get(3).map_or("orca", |s| s))),
         Some("projects") => return done(orders::projects(args.get(1).map_or("orca", |s| s)).map(|v| println!("{}", v.join("\n")))),
+        // агент пишет Оме, что ему нужно от пользователя (README, «Агенты пишут Оме»); исход — ему, отказ — с подсказкой
+        Some("note") if args.len() >= 2 => {
+            let session = std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default();
+            let r = ipc::request(&Msg::Note { session, pid: std::process::id(), text: args[1..].join(" ") });
+            return done(r.map(|ok| println!("{ok}")).map_err(|e| format!("{e} — напиши это пользователю в ответе")));
+        }
         Some("hook") => {
             // вложенные вызовы моделей словаря не должны озвучиваться
             if std::env::var_os("AGENT_SPEAK").is_some() {
                 return;
             }
             let kind = args.get(1).cloned().unwrap_or_default();
+            if kind == "session-start" {
+                // в демон не идёт: stdout SessionStart — в контекст агента; Ома заметки не слушает — ни слова
+                let _ = std::io::stdin().read_to_string(&mut String::new());
+                let on = config::Config::load().is_ok_and(|c| c.agent_inbox && c.agents_voice);
+                if on && std::os::unix::net::UnixStream::connect(ipc::socket_path()).is_ok() {
+                    println!("{INBOX_HINT}");
+                }
+                return;
+            }
             if kind == "post-tool-use" {
                 // в демон не идёт: срабатывает на каждый вызов инструмента, ответ нужен сразу
                 let mut raw = String::new();
@@ -86,7 +101,7 @@ fn main() {
             Msg::Hook { kind, payload: serde_json::from_str(&raw).unwrap_or_default() }
         }
         _ => {
-            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | set <ключ> <значение> | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | menu <session> | show [<session>|next] | launch <path> <text> [orca|herdr] | projects [orca|herdr]");
+            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | set <ключ> <значение> | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | menu <session> | show [<session>|next] | launch <path> <text> [orca|herdr] | projects [orca|herdr] | note <text>");
             std::process::exit(2);
         }
     };
@@ -95,6 +110,11 @@ fn main() {
         eprintln!("agent-speak: сервис озвучки не запущен (systemctl --user start agent-speakd)");
     }
 }
+
+/// Строка агенту от хука SessionStart: как писать Оме. Каждая новая сессия платит за неё токенами — коротко.
+const INBOX_HINT: &str = "Ома — голосовой помощник пользователя, слышит тебя, даже когда он не смотрит в терминал.
+Если без пользователя дальше нельзя (доступ, токен, выбор A или B), выполни: agent-speak note \"одна строка\".
+Секретов в ней не пиши; ответ придёт обычным сообщением.";
 
 /// Значение `set` из командной строки: true, false, числа — как JSON, остальное — строка.
 fn set_value(v: &str) -> serde_json::Value {
@@ -176,6 +196,13 @@ fn user_statusline(settings: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbox_hint_is_short_and_names_the_command() {
+        assert_eq!(INBOX_HINT.lines().count(), 3);
+        assert!(INBOX_HINT.contains("agent-speak note \""));
+        assert!(INBOX_HINT.chars().count() < 300, "около 70 токенов на сессию");
+    }
 
     #[test]
     fn set_value_is_json_or_text() {
