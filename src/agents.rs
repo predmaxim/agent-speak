@@ -57,6 +57,8 @@ pub struct Entry {
     pub fails: usize,
     /// Заметка агента Оме «нужно» (`agent-speak note`): текст агента — данные, не поручение; пусто — нет.
     pub note: String,
+    /// Агент в чате Orca, а не в терминале: писать ему, жать клавиши и читать экран нечем — только показать.
+    pub chat: bool,
 }
 
 impl Entry {
@@ -77,6 +79,7 @@ pub struct Live {
     pub transcript: PathBuf,
     pub state: State,   // по файлу сессии: busy → работает, waiting → ждёт ответа, прочее → простаивает
     pub status_at: u64, // statusUpdatedAt файла сессии, с; 0 — неизвестно
+    pub chat: bool,     // чат Orca (entrypoint orca), см. Entry::chat
 }
 
 /// Хук PostToolUseFailure: вызов инструмента агента не смог отработать. Не в счёт: прерванный пользователем
@@ -98,7 +101,9 @@ pub fn scan_claude(sessions: &Path, projects: &Path, start_of: impl Fn(u32) -> O
             let v: Value = serde_json::from_str(&std::fs::read_to_string(f.path()).ok()?).ok()?;
             let pid = u32::try_from(v["pid"].as_u64()?).ok()?;
             let id = v["sessionId"].as_str()?.to_string();
-            if !matches!(v["kind"].as_str(), Some("interactive" | "bg")) || v["entrypoint"] != "cli" {
+            // cli — терминал; orca — чат Orca (CLAUDE_CODE_ENTRYPOINT=orca у его процесса); sdk-cli — свои вызовы Омы и чужие SDK
+            let chat = v["entrypoint"] == "orca";
+            if !matches!(v["kind"].as_str(), Some("interactive" | "bg")) || !(chat || v["entrypoint"] == "cli") {
                 return None;
             }
             let started = start_of(pid)?;
@@ -123,7 +128,7 @@ pub fn scan_claude(sessions: &Path, projects: &Path, start_of: impl Fn(u32) -> O
                 _ => State::Idle,
             };
             let status_at = v["statusUpdatedAt"].as_u64().unwrap_or(0) / 1000;
-            Some(Live { id, agent: "claude", pid, title, cwd, transcript, state, status_at })
+            Some(Live { id, agent: "claude", pid, title, cwd, transcript, state, status_at, chat })
         })
         .collect()
 }
@@ -139,7 +144,7 @@ pub fn scan_codex() -> Vec<Live> {
         }
         let Some((id, transcript)) = focus::codex_rollout(pid) else { continue };
         let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-        out.push(Live { id, agent: "codex", pid, title: focus::project_of(pid), cwd, transcript, state: State::Idle, status_at: 0 });
+        out.push(Live { id, agent: "codex", pid, title: focus::project_of(pid), cwd, transcript, state: State::Idle, status_at: 0, chat: false });
     }
     out
 }
@@ -420,7 +425,7 @@ impl Registry {
         for l in live {
             let transcript = l.transcript.to_string_lossy().into_owned();
             if let Some(e) = self.entries.iter_mut().find(|e| e.id == l.id) {
-                (e.title, e.project, e.cwd, e.transcript, e.pid) = (l.title, folder(&l.cwd), l.cwd, transcript, l.pid);
+                (e.title, e.project, e.cwd, e.transcript, e.pid, e.chat) = (l.title, folder(&l.cwd), l.cwd, transcript, l.pid, l.chat);
                 // после хуков файл главнее, только если обновлён позже последнего события: разрешение одобрено
                 // в терминале и Esc хуков не шлют; «простаивает» не стирает «готово»
                 let state = if l.state == State::Idle && e.state == State::Done { State::Done } else { l.state };
@@ -437,7 +442,7 @@ impl Registry {
                 changed = true;
                 self.entries.push(Entry {
                     id: l.id, agent: l.agent, title: l.title, project: folder(&l.cwd), cwd: l.cwd, transcript,
-                    state: l.state, status: String::new(), since: now, focused: false, heard: false, pid: l.pid, health: String::new(), ask: String::new(), fails: 0, note: String::new(),
+                    state: l.state, status: String::new(), since: now, focused: false, heard: false, pid: l.pid, health: String::new(), ask: String::new(), fails: 0, note: String::new(), chat: l.chat,
                     // агент впервые на глазах (и после перезапуска демона): лента начинается с его истории
                     feed: if l.agent == "claude" { history(&l.transcript, &images_dir()) } else { VecDeque::new() },
                 });
@@ -689,7 +694,7 @@ mod tests {
     use super::*;
     fn live(id: &str, busy: bool) -> Live {
         let state = if busy { State::Working } else { State::Idle };
-        Live { id: id.into(), agent: "claude", pid: 1, title: id.into(), cwd: format!("/p/{id}"), transcript: PathBuf::new(), state, status_at: 0 }
+        Live { id: id.into(), agent: "claude", pid: 1, title: id.into(), cwd: format!("/p/{id}"), transcript: PathBuf::new(), state, status_at: 0, chat: false }
     }
 
     #[test]
@@ -867,6 +872,8 @@ mod tests {
         std::fs::write(ss.join("2.json"), s(2, "b", "bg", "cli", "Почтовый клиент", "auto")).unwrap();
         std::fs::write(ss.join("3.json"), s(3, "c", "interactive", "sdk-cli", "tmp-1", "derived")).unwrap();
         std::fs::write(ss.join("4.json"), s(4, "d", "interactive", "cli", "x", "derived")).unwrap();
+        // чат Orca: Orca запускает Claude Code с CLAUDE_CODE_ENTRYPOINT=orca — агент пользователя, но без терминала
+        std::fs::write(ss.join("7.json"), s(7, "g", "interactive", "orca", "Агенты в чатах", "auto")).unwrap();
         std::fs::write(ss.join("1.abc.key"), "мусор").unwrap();
         // pid переиспользован: у процесса с этим номером другое время старта
         std::fs::write(ss.join("5.json"), r#"{"pid":5,"sessionId":"e","cwd":"/w","kind":"interactive","entrypoint":"cli","procStart":"999"}"#).unwrap();
@@ -875,7 +882,10 @@ mod tests {
         let got = scan_claude(&ss, &pp, |pid| (pid != 4).then(|| "100".to_string()));
         let mut ids: Vec<(String, String)> = got.iter().map(|l| (l.id.clone(), l.title.clone())).collect();
         ids.sort();
-        assert_eq!(ids, [("a".into(), "Скилл GitGuardian".into()), ("b".into(), "Почтовый клиент".into()), ("f".into(), "w".into())]);
+        assert_eq!(ids, [("a".into(), "Скилл GitGuardian".into()), ("b".into(), "Почтовый клиент".into()), ("f".into(), "w".into()),
+            ("g".into(), "Агенты в чатах".into())]);
+        let chats: Vec<&str> = got.iter().filter(|l| l.chat).map(|l| l.id.as_str()).collect();
+        assert_eq!(chats, ["g"], "чат Orca помечен: писать в него нечем");
         assert!(proc_start(std::process::id()).is_some_and(|s| s.parse::<u64>().is_ok()));
         assert!(got.iter().find(|l| l.id == "a").unwrap().transcript.ends_with("-home-u-Work/a.jsonl"));
         let _ = std::fs::remove_dir_all(root);
