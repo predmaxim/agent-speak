@@ -147,8 +147,17 @@ fn codex_under(win: u32) -> Vec<(u32, SessionRef)> {
 pub fn bring(pid: u32) -> Result<(), String> {
     let pane = crate::mux::locate(pid);
     let clients = crate::mux::run(Command::new("hyprctl").args(["clients", "-j"]), HYPRCTL_TIMEOUT)?;
-    let win = window_of(&clients, |w| under(pid, w) || crate::mux::in_app_window(w, pid));
+    let win = app_window(&clients, |w| under(pid, w), |w| crate::mux::in_app_window(w, pid));
     show_steps(pane.as_ref(), win.as_deref(), crate::mux::focus, raise)
+}
+
+/// Окно агента: сначала то, чей процесс — его предок (терминал; окно Orca, когда pty-хост — потомок окна), и только
+/// потом окно приложения-мультиплексора, которое держит его терминал (in_app_window).
+/// shortcut: второе — первое окно с подстрокой «orca»/«herdr» в командной строке (терминал с такой папкой в аргументах
+/// стоит раньше — поднимется он), а окна однопроцессного терминала (foot --server) — предки всем его агентам, и берётся
+/// первое; станет мешать — спрашивать у мультиплексора окно его терминала.
+fn app_window(clients: &str, holds: impl Fn(u32) -> bool, app: impl Fn(u32) -> bool) -> Option<String> {
+    window_of(clients, holds).or_else(|| window_of(clients, app))
 }
 
 const HYPRCTL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -231,6 +240,15 @@ mod tests {
         let parent = ppid(me).unwrap();
         let live = format!(r#"[{{"address":"0xab","pid":{parent}}}]"#);
         assert_eq!(window_of(&live, |w| under(me, w)).as_deref(), Some("0xab"));
+    }
+
+    #[test]
+    fn the_window_holding_the_agent_before_one_named_like_its_app() {
+        // терминал с «orca» в аргументах стоит в списке раньше окна Orca, чей процесс держит pty-хост агента
+        let clients = r#"[{"address":"0x1","pid":10},{"address":"0x2","pid":20}]"#;
+        assert_eq!(app_window(clients, |w| w == 20, |w| w == 10 || w == 20).as_deref(), Some("0x2"), "предок агента — не первое по имени");
+        assert_eq!(app_window(clients, |_| false, |w| w == 10 || w == 20).as_deref(), Some("0x1"), "pty-хост не под окном — по имени приложения");
+        assert_eq!(app_window(clients, |_| false, |_| false), None);
     }
 
     #[test]
