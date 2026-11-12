@@ -871,7 +871,7 @@ impl State {
             hush_summary: false,
             screencast_privacy: false,
             // волна 2 (C): спутники
-            orb_satellites: false,
+            orb_satellites: self.cfg.orb_satellites,
             // волна 2 (D): пауза музыки
             media_hold: false,
             music_pause: false,
@@ -1545,6 +1545,7 @@ impl State {
                 }
             }
             Msg::Read => self.read(),
+            Msg::Summary => self.summary(),
             Msg::Hook { kind, payload } => self.on_hook(&kind, &payload),
             Msg::Set { key, value } => {
                 let muted = key == "agents_voice" && value == false && self.cfg.agents_voice;
@@ -1681,6 +1682,24 @@ impl State {
         } else {
             eprintln!("agent-speak: read: читаю {} из {}", texts.len(), s.transcript.display());
         }
+    }
+
+    /// Средний клик по орбу: говорит или есть что сказать — стоп, как `read`; иначе сводка агентов одной фразой кодом
+    /// (`Registry::brief`, без модели) — вслух и пузырём Омы. Жест явный: звучит и в тихом режиме (Kind::Read).
+    /// Не следим за агентами — ничего.
+    // shortcut: причины тишины («Не беспокоить», показ экрана) в main ещё нет (волна 2 (A)) — с ней при причине
+    // сводка только пузырём, без enqueue (дизайн «Джарвис», «Решения строителя»: СКМ по орбу)
+    fn summary(&mut self) {
+        if !self.cfg.agents_voice {
+            return;
+        }
+        if self.shared.busy.load(Ordering::SeqCst) || self.shared.queue.lock().unwrap().ready() {
+            self.stop();
+            return;
+        }
+        let text = self.registry.brief();
+        self.bubble("", "summary", "Ома", &text, "oma");
+        self.enqueue(Agent::Claude, "summary", &text, Kind::Read);
     }
 
     fn on_hook(&mut self, kind: &str, p: &serde_json::Value) {
@@ -2257,6 +2276,15 @@ mod tests {
                 "memory",                                                       // память между днями
             ]
         );
+    }
+
+    #[test]
+    fn status_line_carries_orb_satellites() {
+        let sat = |st: &State| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["orb_satellites"].clone();
+        let mut st = test_state();
+        assert_eq!(sat(&st), true, "по умолчанию спутники есть");
+        st.cfg.orb_satellites = false;
+        assert_eq!(sat(&st), false);
     }
 
     /// Выход по умолчанию — Bluetooth-наушники (имя узла, как его даёт `pactl get-default-sink`).
@@ -3155,6 +3183,31 @@ mod tests {
         let live: Vec<Live> = ids.iter().map(|id| live(id)).collect();
         st.scan = Box::new(move || live.clone());
         st.rescan();
+    }
+
+    #[test]
+    fn summary_click_says_brief_and_bubbles_it() {
+        let mut st = test_state();
+        with_agents(&mut st, &["почта"]);
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        st.on_msg(Msg::Summary);
+        let b = bubbles(&mut r);
+        assert_eq!(b.len(), 1);
+        assert_eq!((b[0]["id"].as_str(), b[0]["agent"].as_str(), b[0]["who"].as_str(), b[0]["kind"].as_str(), b[0]["text"].as_str()),
+            (Some("summary"), Some(""), Some("Ома"), Some("oma"), Some("Работает почта.")), "пузырь Омы без агента — её чат");
+        assert_eq!(pop1(&st), "Работает почта.");
+        // жест явный: в тихом режиме сводка звучит, как ручное чтение
+        st.cfg.quiet_override = "on".into();
+        st.on_msg(Msg::Summary);
+        // что-то звучит или ждёт очереди — клик это останавливает, сводки нет
+        st.on_msg(Msg::Summary);
+        assert!(texts(&st).is_empty());
+        assert_eq!(bubbles(&mut r).len(), 1, "стоп — без пузыря");
+        // не следим за агентами — команда ничего не делает
+        st.cfg.agents_voice = false;
+        st.on_msg(Msg::Summary);
+        assert!(texts(&st).is_empty() && bubbles(&mut r).is_empty());
     }
 
     fn sub(st: &mut State) -> BufReader<UnixStream> {

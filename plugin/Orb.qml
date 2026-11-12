@@ -57,6 +57,33 @@ PanelWindow {
   property real dragDY: 0
   property bool tipShown: false
 
+  // The hover card (orb-peek): the tooltip's lines, then the agents, the most urgent first — only while watching
+  // them. Its «min» is counted at its showing (peekNow, s) and does not tick while it is open.
+  property real peekNow: 0
+  readonly property var peek: Model.peekRows(link.speech.agents_voice === true ? link.agents : [], peekNow)
+  readonly property int peekWidth: Style.space(300)
+
+  // Satellites (orb-satellites): a dot per agent on a quarter arc on the orb's side away from the screen's top or
+  // bottom edge, within the slot's width — clear of the bubbles beside it and of the window's edge. An agent keeps its
+  // dot's place (Model.satSlots); none while not watching agents, with the setting off or under Oma's window.
+  readonly property bool satsShown: link.speech.agents_voice === true && link.speech.orb_satellites === true && !win.covered
+  property var sats: []   // Model.satSlots: places hold from one agent line to the next
+  Component.onCompleted: sats = Model.satSlots(sats, link.agents, Model.SAT_MAX)
+  Connections {
+    target: win.link
+    function onAgentsChanged() { win.sats = Model.satSlots(win.sats, win.link.agents, Model.SAT_MAX) }
+  }
+  readonly property int satDot: Style.space(8)     // what is seen
+  readonly property int satZone: Style.space(14)   // what takes the pointer
+  readonly property real satR: slotSize / 2 + Style.space(4) + satDot / 2   // clear of the breathing disc
+  // The angle between neighbouring places, radians: the outermost, two steps from the middle, stays within the slot's width.
+  readonly property real satStep: Math.asin((slotSize - satZone) / 2 / satR) / 2
+
+  // The dots' colours: as the window's agent rows, the watch's word orange (the orb's «needs help»).
+  function dotColor(kind) {
+    return ({ working: Color.accent, waiting: win.fixedColors.red, health: win.fixedColors.values.orange || "#e0823d", done: Color.foreground })[kind] || Color.muted
+  }
+
   // A focus switch moves the window to another screen and the drag with it is lost.
   onScreenChanged: dragging = false
 
@@ -86,11 +113,17 @@ PanelWindow {
   // notifies nothing: without `made` the mask kept the circle alone, and
   // clicks on the bubbles went to the window below.
   property int made: 0
+  property int satsMade: 0   // the same for the satellites
   mask: Region {
     Region { item: orbSlot; shape: RegionShape.Ellipse }
     Region { item: win.made && slots.itemAt(0) && slots.itemAt(0).visible ? slots.itemAt(0) : null }
     Region { item: win.made && slots.itemAt(1) && slots.itemAt(1).visible ? slots.itemAt(1) : null }
     Region { item: win.made && slots.itemAt(2) && slots.itemAt(2).visible ? slots.itemAt(2) : null }
+    Region { item: win.satsMade && satRep.itemAt(0) && satRep.itemAt(0).visible ? satRep.itemAt(0) : null; shape: RegionShape.Ellipse }
+    Region { item: win.satsMade && satRep.itemAt(1) && satRep.itemAt(1).visible ? satRep.itemAt(1) : null; shape: RegionShape.Ellipse }
+    Region { item: win.satsMade && satRep.itemAt(2) && satRep.itemAt(2).visible ? satRep.itemAt(2) : null; shape: RegionShape.Ellipse }
+    Region { item: win.satsMade && satRep.itemAt(3) && satRep.itemAt(3).visible ? satRep.itemAt(3) : null; shape: RegionShape.Ellipse }
+    Region { item: win.satsMade && satRep.itemAt(4) && satRep.itemAt(4).visible ? satRep.itemAt(4) : null; shape: RegionShape.Ellipse }
   }
 
   Item {
@@ -108,13 +141,15 @@ PanelWindow {
       breathMax: win.breathMax
     }
 
-    // Left click talks, right click toggles the window; a left drag past
+    // Left click talks, right click toggles the window, the middle one asks for
+    // the agents in one sentence (the daemon's `summary`: built by code, no
+    // model; while something sounds — stops it); a left drag past
     // Style.space(8) carries the circle and the drop keeps the place.
     MouseArea {
       id: orbArea
       anchors.fill: parent
       hoverEnabled: true
-      acceptedButtons: Qt.LeftButton | Qt.RightButton
+      acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
       cursorShape: Qt.PointingHandCursor
       property point start    // the press, in the window: the window never moves
       property bool moved     // this press became a drag, even one cut short by a screen switch
@@ -146,6 +181,7 @@ PanelWindow {
         else if (moved) return
         else if (mouse.button === Qt.LeftButton) win.link.send(Model.omaCmd({ do: "talk" }))
         else if (mouse.button === Qt.RightButton) win.windowToggled()
+        else if (mouse.button === Qt.MiddleButton && win.link.speech.agents_voice === true) win.link.send(Model.cmd("summary"))
       }
       onCanceled: win.dragging = false
     }
@@ -155,7 +191,10 @@ PanelWindow {
   Timer {
     id: tipDelay
     interval: 400
-    onTriggered: win.tipShown = true
+    onTriggered: {
+      win.peekNow = Date.now() / 1000
+      win.tipShown = true
+    }
   }
 
   PopupWindow {
@@ -170,20 +209,165 @@ PanelWindow {
 
     BorderSurface {
       id: tipCard
-      implicitWidth: tipLabel.implicitWidth + 20
-      implicitHeight: tipLabel.implicitHeight + 14
+      implicitWidth: tipColumn.implicitWidth + 20
+      implicitHeight: tipColumn.implicitHeight + 14
       color: Color.tooltip.background
       borderSpec: Border.surfaceSpec("tooltip", "border", Color.tooltip.border, 1)
       radius: Style.cornerRadius
 
-      Text {
-        id: tipLabel
+      Column {
+        id: tipColumn
         anchors.centerIn: parent
-        textFormat: Text.PlainText
-        text: win.tip.map(function(l) { return win.tr(l[0], l[1]) }).join("\n")
-        color: Color.tooltip.text
-        font.family: Style.font.family
-        font.pixelSize: Style.font.body
+        spacing: Style.space(6)
+
+        Text {
+          id: tipLabel
+          textFormat: Text.PlainText
+          text: win.tip.map(function(l) { return win.tr(l[0], l[1]) }).join("\n")
+          color: Color.tooltip.text
+          font.family: Style.font.family
+          font.pixelSize: Style.font.body
+        }
+
+        // The card's agents: a dot of its state, the name and its time in it, under them a line of what it is at.
+        Repeater {
+          model: win.peek.rows
+
+          Item {
+            id: peekRow
+            required property var modelData
+            width: win.peekWidth
+            height: peekName.implicitHeight + (peekRow.modelData.text ? peekLine.implicitHeight : 0)
+
+            Rectangle {
+              y: (peekName.implicitHeight - height) / 2
+              width: win.satDot
+              height: width
+              radius: width / 2
+              color: win.dotColor(peekRow.modelData.dot)
+            }
+
+            Text {
+              id: peekName
+              x: win.satDot + Style.space(8)
+              width: parent.width - x - peekAgo.implicitWidth - Style.space(8)
+              textFormat: Text.PlainText
+              text: peekRow.modelData.name
+              color: Color.tooltip.text
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+              elide: Text.ElideRight
+            }
+
+            Text {
+              id: peekAgo
+              anchors.right: parent.right
+              textFormat: Text.PlainText
+              text: win.tr(peekRow.modelData.ago[0], peekRow.modelData.ago[1])
+              color: Qt.darker(Color.tooltip.text, 1.4)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+            }
+
+            Text {
+              id: peekLine
+              visible: text !== ""
+              x: peekName.x
+              y: peekName.implicitHeight
+              width: parent.width - x
+              textFormat: Text.PlainText
+              text: peekRow.modelData.text
+              color: Qt.darker(Color.tooltip.text, 1.4)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+              elide: Text.ElideRight
+            }
+          }
+        }
+
+        Text {
+          visible: win.peek.more > 0
+          textFormat: Text.PlainText
+          text: win.tr("%1 more", win.peek.more)
+          color: Qt.darker(Color.tooltip.text, 1.4)
+          font.family: Style.font.family
+          font.pixelSize: Style.font.body
+        }
+      }
+    }
+  }
+
+  // The satellites: on the window, not in the orb's slot — a mask Region follows its item's own place, and the
+  // dots' places follow the slot's. A new question flashes its dot three times (~2.4 s), then it stands red.
+  Repeater {
+    id: satRep
+    model: Model.SAT_MAX
+    onItemAdded: win.satsMade++
+
+    Item {
+      id: sat
+      required property int index
+      readonly property string sid: win.sats[index] || ""
+      readonly property bool more: sid === "+"
+      readonly property var agent: more ? null : Model.agentById(win.link.agents, sid)
+      readonly property string kind: agent ? Model.dotKind(agent) : ""
+      // places from the arc's middle out: one agent sits right under (or over) the orb
+      readonly property real angle: [0, -1, 1, -2, 2][index] * win.satStep
+      readonly property string key: agent ? agent.id + ":" + kind : ""
+      property string seen: ""
+      Component.onCompleted: seen = key
+      onKeyChanged: {
+        flash.stop()
+        satDisc.opacity = 1
+        if (Model.asks(seen, key)) flash.start()
+        seen = key
+      }
+
+      visible: win.satsShown && (more || agent !== null)
+      width: win.satZone
+      height: width
+      x: orbSlot.x + orbSlot.width / 2 + win.satR * Math.sin(angle) - width / 2
+      y: orbSlot.y + orbSlot.height / 2 + (win.atTop ? 1 : -1) * win.satR * Math.cos(angle) - height / 2
+
+      Rectangle {
+        id: satDisc
+        anchors.centerIn: parent
+        width: win.satDot
+        height: width
+        radius: width / 2
+        // «more» is hollow, without a number (the number is in its tooltip)
+        color: sat.more ? "transparent" : win.dotColor(sat.kind)
+        border.width: sat.more ? Math.max(1, Style.space(2)) : 0
+        border.color: Color.foreground
+
+        SequentialAnimation {
+          id: flash
+          loops: 3
+          NumberAnimation { target: satDisc; property: "opacity"; to: 0.2; duration: Style.duration(400); easing.type: Easing.InOutSine }
+          NumberAnimation { target: satDisc; property: "opacity"; to: 1; duration: Style.duration(400); easing.type: Easing.InOutSine }
+        }
+      }
+
+      // Left: the agent's chat in Oma's window; «more» — the window with them all.
+      MouseArea {
+        id: satArea
+        anchors.fill: parent
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: sat.more ? win.windowToggled() : win.chatOpened("agent:" + sat.sid)
+      }
+
+      // «Astral.Edo — ждёт · 15 мин», counted when the pointer comes
+      PanelToolTip {
+        visible: satArea.containsMouse
+        text: {
+          if (!satArea.containsMouse) return ""
+          if (sat.more) return win.tr("%1 more", win.link.agents.length - Model.SAT_MAX + 1)
+          if (!sat.agent) return ""
+          var a = Model.ago(sat.agent.since, Date.now() / 1000)
+          return (sat.agent.title || sat.agent.project || "") + " — "
+            + (sat.kind === "health" ? sat.agent.health : win.tr(Model.stateLabel(sat.agent.state)).toLowerCase()) + " · " + win.tr(a[0], a[1])
+        }
       }
     }
   }

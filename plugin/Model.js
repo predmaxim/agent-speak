@@ -59,6 +59,69 @@ function orbTip(st) {
   return [mode === "waiting" ? ["%1 waiting", st.waiting] : [tips[mode], ""]]
 }
 
+// An agent's dot (the window's, the orb's card and satellites): its state; the watch's word (orange) is above any but
+// waiting — the question's red stays first.
+function dotKind(a) {
+  if (a.state === "waiting") return "waiting"
+  if (a.health) return "health"
+  return a.state === "working" || a.state === "done" ? a.state : "idle"
+}
+
+var URGENCY = ["waiting", "health", "working", "done", "idle"]
+
+// Agents, the most urgent first: waiting (the longest waiting on top), the watch's word, working, done, idle (the
+// freshest on top). The daemon's agent line keeps its own order (stable for the window), so the orb sorts here.
+function byUrgency(agents) {
+  // through a QML signal or property the array may be an array-like sequence: Array.isArray is false for it
+  return Array.prototype.slice.call(agents || []).map(function(a, i) { return { a: a, i: i, g: URGENCY.indexOf(dotKind(a)) } })
+    .sort(function(x, y) { return x.g - y.g || (x.g === 0 ? x.a.since - y.a.since : y.a.since - x.a.since) || x.i - y.i })
+    .map(function(x) { return x.a })
+}
+
+function clip(s, n) {
+  s = String(s || "").trim()
+  return s.length > n ? s.slice(0, n - 1) + "…" : s
+}
+
+var PEEK_MAX = 8
+
+// The orb's hover card: {rows, more} — up to PEEK_MAX agents, the most urgent first, and how many more. A row: its
+// dot, name, time in its state (a tr key, at `now`) and a second line up to 60 chars — the question's first line for
+// a waiting one, the watch's word, else the status.
+function peekRows(agents, now) {
+  var all = byUrgency(agents)
+  return { more: Math.max(0, all.length - PEEK_MAX), rows: all.slice(0, PEEK_MAX).map(function(a) {
+    var dot = dotKind(a)
+    var ask = String(a.ask || "").split("\n").filter(function(l) { return l.trim() !== "" })[0]
+    var text = dot === "waiting" ? ask || a.status : dot === "health" ? a.health : a.status
+    return { id: a.id, dot: dot, name: a.title || a.project || "", ago: ago(a.since, now), text: clip(text, 60) }
+  }) }
+}
+
+var SAT_MAX = 5
+
+// The satellites' places, `max` of them, an agent id or "" each: a living agent keeps its place (prev, the last
+// result), a new one takes the first free place, the most urgent first, a gone one frees its own. Over `max` agents:
+// the most urgent max - 1 and "+" — the hollow «more» — at the last place.
+function satSlots(prev, agents, max) {
+  var all = byUrgency(agents), n = all.length > max ? max - 1 : max
+  var ids = all.slice(0, n).map(function(a) { return a.id })
+  var slots = []
+  for (var i = 0; i < n; i++) slots.push(prev && ids.indexOf(prev[i]) >= 0 ? prev[i] : "")
+  ids.forEach(function(id) { if (slots.indexOf(id) < 0) slots[slots.indexOf("")] = id })
+  return n < max ? slots.concat(["+"]) : slots
+}
+
+function agentById(agents, id) {
+  return Array.prototype.slice.call(agents || []).filter(function(a) { return a.id === id })[0] || null
+}
+
+// A satellite's flash: `key` ("<id>:<dotKind>") says its agent waits now, and `was` is the same agent before it did.
+function asks(was, key) {
+  var id = key.slice(0, key.lastIndexOf(":") + 1)
+  return /:waiting$/.test(key) && was !== key && id !== "" && was.indexOf(id) === 0
+}
+
 var BUBBLES_MAX = 3
 var BUBBLE_TTL = 10000
 
@@ -256,7 +319,7 @@ var SETTINGS_SECTIONS = [
   { title: "", rows: ["speaker", "rate"] },
   { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours"] },
   { title: "Hearing", rows: [] },
-  { title: "Orb", rows: ["orb_over_fullscreen"] },
+  { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites"] },
   { title: "Agents", rows: ["agents_voice", "progress_digest"] }
 ]
 
@@ -270,6 +333,7 @@ function settingStep(row, st, dx) {
   if (row === "quiet_now") return { key: "quiet_override", value: st.quiet ? "off" : "on", sample: false }
   if (row === "quiet_schedule") return { key: "quiet_schedule", value: !st.quiet_schedule, sample: false }
   if (row === "orb_over_fullscreen") return { key: row, value: !st.orb_over_fullscreen, sample: false }
+  if (row === "orb_satellites") return { key: row, value: !st.orb_satellites, sample: false }
   if (row === "progress_digest") return { key: row, value: !st.progress_digest, sample: false }
   if (row === "agents_voice") return { key: row, value: !st.agents_voice, sample: false }
   var sec = sections(function(t) { return t }).filter(function(x) { return x.key === row })[0]
