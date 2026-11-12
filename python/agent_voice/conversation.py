@@ -218,11 +218,13 @@ class Conversation:
         self.chunker.reset()
         return acts + self._to("listening")
 
-    def _stop_turn(self):
-        """Оборвать звук и ход агента (если они есть)."""
+    def _stop_turn(self, sound=True):
+        """Оборвать звук и ход агента (если они есть); sound=False — звук уже остановила служба: только ход."""
         acts = self._discard()
         if not acts and (self.audio_busy or self.state == "speaking"):
             acts.append(("stop",))
+        if not sound:
+            acts = []
         if self.turn:
             acts.append(("interrupt",))
         self.turn = False
@@ -310,9 +312,10 @@ class Conversation:
         w = self.window
         return self.end(stop=False) if w and w["kind"] == "here" and w["first"] else []
 
-    def cancel(self):
-        """Esc: выбросить фразу; идущий ответ оборвать."""
-        acts = self._stop_turn() + self._drop()
+    def cancel(self, sound=True):
+        """Esc: выбросить фразу; идущий ответ оборвать. sound=False — кнопка наушников: звук остановила служба и, может,
+        поставила сводку следом — hush срезал бы и её."""
+        acts = self._stop_turn(sound) + self._drop()
         return acts + self._to(self._rest())
 
     def ask(self, text):

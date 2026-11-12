@@ -354,6 +354,17 @@ def test_cancel_outside_conversation_returns_to_idle():
     assert cv.cancel() == [("interrupt",), ("state", "idle")] and cv.state == "idle"
 
 
+def test_cancel_without_sound_cuts_her_turn_and_leaves_the_sound_to_the_daemon():
+    # кнопка наушников: звук остановила служба и поставила сводку следом — hush срезал бы и её
+    clk, cv = _speaking_in_buds()
+    acts = cv.cancel(sound=False)
+    assert ("interrupt",) in acts and ("stop",) not in acts and not cv.turn
+    clk, cv = _speaking_in_buds()
+    cv.speech_start(2)  # перебив: её речь на паузе
+    acts = cv.cancel(sound=False)
+    assert ("stop",) not in acts and not any(a[0] == "pause_voice" for a in acts) and not cv.suspended
+
+
 def test_short_phrase_keeps_hearing_mark():
     clk, cv = _conv()
     cv.talk(); cv.speech_start(1); cv.speech_start(2)
@@ -1184,6 +1195,21 @@ def test_oma_cancel_command():
         await oma.event(("start", 1))
         await oma.command({"do": "cancel"})
         assert emitted[-1]["line"]["bubble"]["drop"] and emitted[-1]["line"]["bubble"]["id"] == "draft"
+
+    asyncio.run(run())
+
+
+def test_oma_cancel_from_the_headset_button_sends_no_hush():
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+
+    async def run():
+        _ask_answer(clk, oma.conv)
+        await oma.command({"do": "cancel", "sound": False})
+        assert {"cmd": "hush"} not in sent and not oma.conv.turn
+        _ask_answer(clk, oma.conv)
+        await oma.command({"do": "cancel"})
+        assert {"cmd": "hush"} in sent, "Esc — как раньше"
 
     asyncio.run(run())
 

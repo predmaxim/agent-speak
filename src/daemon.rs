@@ -2184,7 +2184,8 @@ impl State {
             self.on_back(back);
             self.oma_send(&serde_json::json!({"do": "here"})); // её окно вопроса — закрыть, как после «да»: новости не ждут его конца
         } else if self.oma.state == "speaking" {
-            self.oma_send(&serde_json::json!({"do": "cancel"}));
+            // звук — stop ниже; её hush после него срезал бы и сводку по «вперёд»
+            self.oma_send(&serde_json::json!({"do": "cancel", "sound": false}));
         }
         self.stop(); // и дозвучивающий «Ты тут?»
         self.oma_paused = false;
@@ -4937,7 +4938,7 @@ mod tests {
         st.sync_player();
         st.on_button(Button::Toggle);
         assert!(texts(&st).is_empty(), "«замолчи» — очередь пуста");
-        assert_eq!(oma_got(st, &out), [serde_json::json!({"do": "cancel"})], "её ответ звучит — и ход оборвать, как Esc");
+        assert_eq!(oma_got(st, &out), [serde_json::json!({"do": "cancel", "sound": false})], "её ответ звучит — и ход оборвать, как Esc; звук уже остановила служба");
     }
 
     #[test]
@@ -4949,6 +4950,21 @@ mod tests {
         st.sync_player();
         st.on_button(Button::Next);
         assert_eq!(texts(&st), ["Работает почта."], "сводка — вместо того, что звучало");
+    }
+
+    #[test]
+    fn headset_next_during_her_answer_cuts_her_turn_without_hush() {
+        let mut st = test_state();
+        let (_h, out) = oma_to_file(&mut st, "button-next");
+        with_agents(&mut st, &["почта"]);
+        st.enqueue(Agent::Claude, "voice", "Раз. Два.", Kind::Voice);
+        st.shared.busy.store(true, Ordering::SeqCst);
+        st.oma.state = "speaking".into();
+        st.sync_player();
+        st.on_button(Button::Next);
+        assert_eq!(texts(&st), ["Работает почта."], "сводка — вместо её ответа");
+        // её hush после stop срезал бы сводку, поставленную вслед: ход — оборвать, звук — не трогать
+        assert_eq!(oma_got(st, &out), [serde_json::json!({"do": "cancel", "sound": false})]);
     }
 
     #[test]

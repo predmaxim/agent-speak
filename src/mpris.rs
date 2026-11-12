@@ -17,7 +17,8 @@ use std::time::Duration;
 pub const NAME: &str = "org.mpris.MediaPlayer2.oma";
 const PATH: &str = "/org/mpris/MediaPlayer2";
 
-/// Что нажали: play, pause, play/pause и stop — одно и то же (у плеера Омы нет состояния паузы); next — сводка.
+/// Что нажали: pause, play/pause и stop — одно и то же (у плеера Омы нет состояния паузы); next — сводка. Play — ничего:
+/// она и так «играет», а «возобнови» шлёт автоматика (конец созвона, `playerctl play`) — ни «замолчи», ни «я тут».
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Button {
     Toggle,
@@ -83,10 +84,11 @@ fn serve(bus: impl FnOnce() -> Result<Channel, dbus::Error>, mut wake: UnixStrea
     });
     let player = cr.register("org.mpris.MediaPlayer2.Player", |b: &mut IfaceBuilder<OnButton>| {
         b.property("PlaybackStatus").get(|_, _| Ok("Playing".to_string()));
-        // трека нет: без xesam:title бар не показывает Ому как музыку, OSD нажатия подписывает её по Identity
+        // трек «Ома»: пока она говорит, медиа-панель показывает её (без названия виджет пропадал бы), пауза там — «замолчи»
         b.property("Metadata").get(|_, _| {
             let mut m = PropMap::new();
-            m.insert("mpris:trackid".into(), Variant(Box::new(dbus::Path::from("/org/mpris/MediaPlayer2/TrackList/NoTrack")) as Box<dyn RefArg>));
+            m.insert("mpris:trackid".into(), Variant(Box::new(dbus::Path::from("/org/mpris/MediaPlayer2/oma")) as Box<dyn RefArg>));
+            m.insert("xesam:title".into(), Variant(Box::new("Ома".to_string()) as Box<dyn RefArg>));
             Ok(m)
         });
         for p in ["CanControl", "CanPlay", "CanPause", "CanGoNext"] {
@@ -96,7 +98,7 @@ fn serve(bus: impl FnOnce() -> Result<Channel, dbus::Error>, mut wake: UnixStrea
             b.property(p).get(|_, _| Ok(false));
         }
         // shortcut: Seek, SetPosition и OpenUri не объявлены (CanSeek false, схем нет) — по MPRIS вызывать их некому
-        for (m, button) in [("PlayPause", Some(Button::Toggle)), ("Play", Some(Button::Toggle)), ("Pause", Some(Button::Toggle)),
+        for (m, button) in [("PlayPause", Some(Button::Toggle)), ("Play", None), ("Pause", Some(Button::Toggle)),
             ("Stop", Some(Button::Toggle)), ("Next", Some(Button::Next)), ("Previous", None)]
         {
             b.method(m, (), (), move |_, on: &mut OnButton, ()| {
@@ -209,12 +211,16 @@ mod tests {
         for p in ["PlaybackStatus", "Metadata", "CanControl", "CanPlay", "CanPause", "CanGoNext", "CanGoPrevious", "CanSeek"] {
             assert!(all.contains(p), "GetAll без {p}: {all}");
         }
-        for (m, want) in [("PlayPause", Button::Toggle), ("Pause", Button::Toggle), ("Play", Button::Toggle), ("Stop", Button::Toggle), ("Next", Button::Next)] {
+        let meta = busctl(&["--json=short", "get-property", NAME, PATH, player, "Metadata"]);
+        assert!(meta.contains(r#""xesam:title":{"type":"s","data":"Ома"}"#), "панель показывает её трек: {meta}");
+        for (m, want) in [("PlayPause", Button::Toggle), ("Pause", Button::Toggle), ("Stop", Button::Toggle), ("Next", Button::Next)] {
             busctl(&["call", NAME, PATH, player, m]);
             assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(want), "{m}");
         }
-        busctl(&["call", NAME, PATH, player, "Previous"]);
-        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "назад — ничего");
+        for m in ["Play", "Previous"] {
+            busctl(&["call", NAME, PATH, player, m]);
+            assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "{m} — ничего: «возобнови» автоматики не «замолчи»");
+        }
         p.set(false);
         assert!(wait(false), "выключен — имени нет: кнопка снова у музыки");
         p.set(true);

@@ -198,8 +198,8 @@ class Oma:
             await self.follow(await self.general() if leave else (key if key != self.brain.key else None))
             if c.active:
                 self.to_brain(self.brain.warm)  # claude поднимается, пока пользователь говорит
-        elif do == "cancel":
-            await self.act(c.cancel())
+        elif do == "cancel":  # sound false — от кнопки наушников: звук служба уже остановила
+            await self.act(c.cancel(cmd.get("sound", True) is not False))
         elif do == "here":  # «Ты тут?» решён кнопкой наушников — окно вопроса не нужно
             await self.act(c.answered())
         elif do == "warm":  # демон прогревает слух до окна ответа: whisper не грузится при открытом микрофоне
