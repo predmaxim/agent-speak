@@ -460,13 +460,16 @@ PanelWindow {
         readonly property color base: tone === "me" ? Model.ME_TINT : Color.foreground
         readonly property string shown: {
           if (!slot.bubble) return ""
+          if (slot.bubble.hidden) return win.tr("Permission")   // the screen is shared: no command
           var t = slot.bubble.text || ""
           if (slot.bubble.kind !== "draft" || !slot.bubble.hearing) return t
           return t ? t + " …" : "…"
         }
-        readonly property bool faded: win.bubbles.length >= Model.BUBBLES_MAX && bubble === win.bubbles[0]
+        // a permission card (Model.permBubbles): up while the request lives, never fading
+        readonly property bool perm: !!slot.bubble && slot.bubble.kind === "permission"
+        readonly property bool faded: win.bubbles.length >= Model.BUBBLES_MAX && bubble === win.bubbles[0] && !perm
         readonly property real inner: Math.min(Style.space(360) - card.contentLeftInset - card.contentRightInset,
-          Math.max(who.implicitWidth, body.implicitWidth))
+          Math.max(who.implicitWidth, body.implicitWidth, perm && !slot.bubble.hidden ? permButtons.implicitWidth : 0))
         visible: bubble !== null
         x: win.atLeft ? 0 : column.width - width
         width: card.width
@@ -535,6 +538,29 @@ PanelWindow {
               wrapMode: Text.Wrap
               maximumLineCount: win.textLines
               elide: Text.ElideRight
+            }
+
+            // A permission card's buttons — only when its whole text is in sight: nothing unseen gets approved (a long
+            // command — the click opens Oma's window, the card is there whole). The click answers at once.
+            Row {
+              id: permButtons
+              visible: slot.perm && !slot.bubble.hidden && !body.truncated
+              topPadding: Style.space(4)
+              spacing: Style.space(8)
+
+              Repeater {
+                model: [true, false]
+
+                Button {
+                  required property bool modelData
+                  bordered: true
+                  text: modelData ? win.tr("Allow") : win.tr("Deny")
+                  fontSize: Style.font.title
+                  iconSize: Style.font.title
+                  foreground: Color.popups.text
+                  onClicked: win.link.send(Model.permit(slot.bubble.perm, modelData))
+                }
+              }
             }
           }
         }

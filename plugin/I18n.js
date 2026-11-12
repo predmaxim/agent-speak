@@ -37,7 +37,10 @@ var TABLES = {
     "Quiet: screen sharing": "Тихо: показ экрана", "Quiet: do not disturb": "Тихо: не беспокоить",
     "Quiet and brief while sharing the screen": "При показе экрана — тихо и коротко", "Summary after quiet": "Сводка после тишины",
     "Intonation by meaning": "Интонация по смыслу", "Sound cues": "Звуковые знаки",
-    "Results aloud at most every": "Итоги вслух не чаще", "No limit": "Без ограничения"
+    "Results aloud at most every": "Итоги вслух не чаще", "No limit": "Без ограничения",
+    "Permissions": "Разрешения", "Permission": "Разрешение", "Allow": "Разрешить", "Deny": "Отклонить", "subagent": "сабагент",
+    "Permission buttons": "Кнопки разрешений", "Later": "Потом", "%1, when done": "%1, когда закончит",
+    "%1: checks of PR %2": "%1: проверки PR %2"
   }
 }
 

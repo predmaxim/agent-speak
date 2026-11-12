@@ -83,13 +83,22 @@ Item {
   // One cursor for keys and mouse: a row of the page (-1 none) or, with
   // onHead, the header's button headCol. On the main page it holds the row's
   // chat key (Model.rowKey), so it stays on its agent when the list changes.
-  readonly property int cursor: page === "main" ? Model.rowIndex(agents, cursorKey) : cursorRow
+  readonly property int cursor: page === "main" ? Model.rowIndex(agents, cursorKey, topKeys) : cursorRow
   property string cursorKey: ""
   property int cursorRow: -1
   function setCursor(i) {
-    if (page === "main") cursorKey = Model.rowKey(agents, i)
+    if (page === "main") cursorKey = Model.rowKey(agents, i, topKeys)
     else cursorRow = i
   }
+  // Main page, between Oma and the agents: the permission cards and the deferred orders («Later»), the daemon's lists.
+  readonly property var perms: link ? link.permissions : []
+  readonly property var laters: link ? link.later : []
+  readonly property var topKeys: Model.topRows(perms, laters)
+  // While the screen is shared a card shows only «Permission»: no command, no buttons — nothing unseen is approved.
+  readonly property bool sharing: speech.quiet_why === "screencast"
+  // A card's button under the keys (←/→): 0 Allow, 1 Deny; -1 none — Enter on a card does not answer by chance.
+  property int permCol: -1
+  onCursorKeyChanged: permCol = -1
   property bool onHead: false
   property int headCol: 0
   property int hoursCol: 0           // the hours row's dropdown: 0 from, 1 to
@@ -99,8 +108,8 @@ Item {
     for (var i = 0; i < agents.length; i++) if ("agent:" + agents[i].id === chatKey) return agents[i]
     return null
   }
-  // Main page: row 0 — the general chat with Oma, then the agents.
-  readonly property int rowCount: page === "main" ? agents.length + 1 : page === "history" ? chatList.length
+  // Main page: row 0 — the general chat with Oma, the cards and deferred orders, then the agents.
+  readonly property int rowCount: page === "main" ? agents.length + 1 + topKeys.length : page === "history" ? chatList.length
     : page === "memory" ? memRows.length : Model.SETTINGS_ROWS.length
   // Main page: talk, new chat, history, sound, settings, the power switch; Oma off: the switch; a page: Back.
   readonly property var headItems: Model.headItems(page, speech.running === true)
@@ -264,10 +273,13 @@ Item {
       var row = Model.SETTINGS_ROWS[root.cursor]
       if (row === "quiet_hours") root.hoursCol = dx < 0 ? 0 : 1
       else root.step(row, dx)
+    } else if (root.page === "main" && root.cursorKey.indexOf("perm:") === 0 && !root.sharing) {
+      root.permCol = dx < 0 ? 0 : 1
     } else return false
     var view = root.page === "main" ? agentList : root.page === "history" ? chatsView : null
-    if (view === agentList && root.cursor === 0) agentList.positionViewAtBeginning()  // the Oma row is the list's header
-    else if (view && root.cursor >= 0) view.positionViewAtIndex(root.cursor - (view === agentList ? 1 : 0), ListView.Contain)
+    var head = 1 + root.topKeys.length   // rows in the list's header: Oma, the cards, the deferred orders
+    if (view === agentList && root.cursor < head) agentList.positionViewAtBeginning()
+    else if (view && root.cursor >= 0) view.positionViewAtIndex(root.cursor - (view === agentList ? head : 0), ListView.Contain)
     if (root.page === "settings" && root.cursor >= 0) root.showRow(settingsView, settingsPage, root.cursor)
     if (root.page === "memory" && root.cursor >= 0) root.showRow(memoryView, memoryPage, root.cursor)
     return true
@@ -318,7 +330,7 @@ Item {
   function activate() {
     if (root.onHead) return root.press(root.headCol)
     if (root.cursor < 0 || root.cursor >= root.rowCount) return
-    if (root.page === "main") return root.openChat(root.cursorKey)
+    if (root.page === "main") return root.activateMain(root.cursorKey)
     if (root.page === "history") return root.openChat(root.chatList[root.cursor].key)
     if (root.page === "memory") return root.memActivate(root.memRows[root.cursor])
     var row = Model.SETTINGS_ROWS[root.cursor]
@@ -327,6 +339,28 @@ Item {
     if (box) box.open()
     else root.step(row, 1)
   }
+
+  // A main-page row: a card with a chosen button answers, a card without one and a deferred order open their agent's
+  // chat (checks of a PR have none), the rest — their chat.
+  function activateMain(key) {
+    var item = function(list, id) { return Array.prototype.slice.call(list).filter(function(x) { return x.id === id })[0] }
+    if (key.indexOf("perm:") === 0) {
+      if (root.permCol >= 0) return root.permit(key.slice(5), root.permCol === 0)
+      var p = item(root.perms, key.slice(5))
+      return p ? root.openChat("agent:" + p.agent) : null
+    }
+    if (key.indexOf("later:") === 0) {
+      var o = item(root.laters, key.slice(6))
+      return o && o.agent ? root.openChat("agent:" + o.agent) : null
+    }
+    root.openChat(key)
+  }
+
+  // A card's button: the click is the user's own, as typed — the daemon answers the agent's hook at once.
+  function permit(id, allow) { if (root.link) root.link.send(Model.permit(id, allow)) }
+
+  // A deferred order's × or Delete: cancelled at once — it sends nothing.
+  function cancelLater(id) { if (root.link) root.link.send(Model.laterCancel(id)) }
 
   // Enter in the field: a row or button under the cursor, otherwise the question.
   function enter() {
@@ -654,17 +688,218 @@ Item {
                 }
               }
 
-              Text {
+              // «Permissions»: a card per request an agent waits on (its hook holds the request) — what is approved,
+              // whole, its description dim, Allow / Deny; a click answers at once (the user's own, as typed). The card
+              // goes when the request is decided anywhere. The screen shared — only «Permission»: no command, no buttons.
+              RowsCaption {
+                visible: root.perms.length > 0
+                text: root.tr("Permissions").toUpperCase()
+              }
+
+              Repeater {
+                model: root.perms
+
+                CursorSurface {
+                  id: permRow
+                  required property var modelData
+                  readonly property string key: "perm:" + modelData.id
+                  width: parent.width
+                  implicitHeight: Math.max(Style.space(50), permText.implicitHeight + Style.spacing.rowPaddingX * 2)
+                  foreground: root.fg
+                  hasCursor: !root.onHead && root.cursorKey === key
+
+                  MouseArea {
+                    id: permArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onPositionChanged: function(mouse) {
+                      if (pointerGate.moved(permArea, mouse)) { root.onHead = false; root.cursorKey = permRow.key }
+                    }
+                    onClicked: root.openChat("agent:" + permRow.modelData.agent)
+                  }
+
+                  Rectangle {
+                    id: permDot
+                    x: Style.spacing.rowPaddingX
+                    y: Style.spacing.rowPaddingX + (permWho.implicitHeight - height) / 2
+                    width: Style.space(10)
+                    height: width
+                    radius: width / 2
+                    color: fixedColors.red
+                  }
+
+                  Column {
+                    id: permText
+                    anchors.left: permDot.right
+                    anchors.leftMargin: Style.space(12)
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.spacing.rowPaddingX
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(4)
+
+                    Text {
+                      id: permWho
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      text: [permRow.modelData.who, root.sharing ? "" : permRow.modelData.tool, permRow.modelData.sub ? root.tr("subagent") : ""]
+                        .filter(function(s) { return s }).join(" · ")
+                      color: root.fg
+                      font.family: root.font
+                      font.pixelSize: Style.font.heading
+                      elide: Text.ElideRight
+                    }
+
+                    Text {
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      text: root.sharing ? root.tr("Permission") : permRow.modelData.text
+                      color: root.sharing ? root.dim : root.fg
+                      font.family: root.font
+                      font.pixelSize: Style.font.body
+                      wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                    }
+
+                    Text {
+                      visible: !root.sharing && text !== ""
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      text: permRow.modelData.note || ""
+                      color: root.dim
+                      font.family: root.font
+                      font.pixelSize: Style.font.body
+                      wrapMode: Text.Wrap
+                    }
+
+                    Row {
+                      visible: !root.sharing
+                      topPadding: Style.space(4)
+                      spacing: Style.space(8)
+
+                      Repeater {
+                        model: [true, false]
+
+                        Button {
+                          required property bool modelData
+                          required property int index
+                          bordered: true
+                          text: modelData ? root.tr("Allow") : root.tr("Deny")
+                          fontSize: Style.font.title
+                          iconSize: Style.font.title
+                          foreground: root.fg
+                          fontFamily: root.font
+                          hasCursor: root.cursorKey === permRow.key && root.permCol === index
+                          onClicked: root.permit(permRow.modelData.id, modelData)
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+              // «Later»: deferred orders — to tell an agent when it ends its turn, to say how a PR's checks went; × or
+              // Delete cancels at once.
+              RowsCaption {
+                visible: root.laters.length > 0
+                text: root.tr("Later").toUpperCase()
+              }
+
+              Repeater {
+                model: root.laters
+
+                CursorSurface {
+                  id: laterRow
+                  required property var modelData
+                  readonly property string key: "later:" + modelData.id
+                  readonly property bool tell: modelData.kind === "tell"
+                  width: parent.width
+                  implicitHeight: Math.max(Style.space(50), laterText.implicitHeight + Style.spacing.rowPaddingX * 2)
+                  foreground: root.fg
+                  hasCursor: !root.onHead && root.cursorKey === key
+
+                  MouseArea {
+                    id: laterArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: laterRow.tell ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onPositionChanged: function(mouse) {
+                      if (pointerGate.moved(laterArea, mouse)) { root.onHead = false; root.cursorKey = laterRow.key }
+                    }
+                    onClicked: root.activateMain(laterRow.key)
+                  }
+
+                  Text {
+                    id: laterIcon
+                    x: Style.spacing.rowPaddingX - Style.space(2)
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(10)
+                    textFormat: Text.PlainText
+                    text: "\u{F0150}"
+                    color: root.dim
+                    font.family: root.font
+                    font.pixelSize: Style.font.body
+                  }
+
+                  Column {
+                    id: laterText
+                    anchors.left: laterIcon.right
+                    anchors.leftMargin: Style.space(12)
+                    anchors.right: laterCancel.left
+                    anchors.rightMargin: Style.space(10)
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(4)
+
+                    Text {
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      text: laterRow.tell ? root.tr("%1, when done", laterRow.modelData.who) : root.tr("%1: checks of PR %2", laterRow.modelData.who, laterRow.modelData.pr)
+                      color: root.fg
+                      font.family: root.font
+                      font.pixelSize: Style.font.heading
+                      elide: Text.ElideRight
+                    }
+
+                    Text {
+                      visible: laterRow.tell && !root.sharing
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      text: "«" + (laterRow.modelData.text || "") + "»"
+                      color: root.dim
+                      font.family: root.font
+                      font.pixelSize: Style.font.body
+                      wrapMode: Text.Wrap
+                      maximumLineCount: 3
+                      elide: Text.ElideRight
+                    }
+                  }
+
+                  Text {
+                    id: laterCancel
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.spacing.rowPaddingX
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: "\u{F0156}"
+                    color: cancelArea.containsMouse ? root.fg : root.dim
+                    font.family: root.font
+                    font.pixelSize: Style.font.title
+
+                    MouseArea {
+                      id: cancelArea
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(6)
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.cancelLater(laterRow.modelData.id)
+                    }
+                    PanelToolTip { visible: cancelArea.containsMouse; text: root.tr("Cancel") }
+                  }
+                }
+              }
+
+              RowsCaption {
                 visible: root.agents.length > 0
-                leftPadding: Style.spacing.rowPaddingX
-                topPadding: Style.space(6)
-                textFormat: Text.PlainText
                 text: root.tr("Agents").toUpperCase()
-                color: root.dim
-                font.family: root.font
-                font.pixelSize: Style.font.body
-                font.bold: true
-                font.letterSpacing: 1.2
               }
             }
 
@@ -677,7 +912,7 @@ Item {
               foreground: root.fg
               // The agent whose chat is open is the selected row; the cursor paints the others.
               current: root.chatKey === "agent:" + modelData.id
-              hasCursor: !root.onHead && root.cursor === index + 1 && !current
+              hasCursor: !root.onHead && root.cursorKey === "agent:" + modelData.id && !current
 
               MouseArea {
                 id: agentArea
@@ -685,7 +920,7 @@ Item {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onPositionChanged: function(mouse) {
-                  if (pointerGate.moved(agentArea, mouse)) { root.onHead = false; root.setCursor(agentRow.index + 1) }
+                  if (pointerGate.moved(agentArea, mouse)) { root.onHead = false; root.cursorKey = "agent:" + agentRow.modelData.id }
                 }
                 onClicked: root.openChat("agent:" + agentRow.modelData.id)
                 onDoubleClicked: root.jump("agent:" + agentRow.modelData.id)
@@ -914,8 +1149,14 @@ Item {
               onTextEdited: { root.setCursor(-1); root.onHead = false; root.jumpErr = "" }
               Keys.onUpPressed: root.move(0, -1)
               Keys.onDownPressed: root.move(0, 1)
-              Keys.onLeftPressed: function(event) { event.accepted = root.onHead && root.move(-1, 0) }
-              Keys.onRightPressed: function(event) { event.accepted = root.onHead && root.move(1, 0) }
+              // ←/→ — the header's buttons or a permission card's; otherwise the text's own
+              Keys.onLeftPressed: function(event) { event.accepted = (root.onHead || root.cursorKey.indexOf("perm:") === 0) && root.move(-1, 0) }
+              Keys.onRightPressed: function(event) { event.accepted = (root.onHead || root.cursorKey.indexOf("perm:") === 0) && root.move(1, 0) }
+              // Delete on a deferred order cancels it; with text in the field Delete is the text's
+              Keys.onDeletePressed: function(event) {
+                event.accepted = root.cursorKey.indexOf("later:") === 0 && field.text === ""
+                if (event.accepted) root.cancelLater(root.cursorKey.slice(6))
+              }
               Keys.onReturnPressed: function(event) { root.enterWith(event.modifiers) }
               Keys.onEnterPressed: function(event) { root.enterWith(event.modifiers) }
               Keys.onTabPressed: {}   // Tab does nothing in a centred modal
@@ -1455,6 +1696,16 @@ Item {
               }
 
               SettingRow {
+                key: "permission_buttons"
+                label: root.tr("Permission buttons")
+                ToggleSwitch {
+                  checked: root.speech.permission_buttons === true
+                  foreground: root.fg
+                  onToggled: root.step("permission_buttons", 1)
+                }
+              }
+
+              SettingRow {
                 key: "memory"
                 label: root.tr("Remember past days")
                 ToggleSwitch {
@@ -1705,5 +1956,17 @@ Item {
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(8)
     }
+  }
+
+  // A caption over the main page's rows («Permissions», «Later», «Agents»): dim bold caps.
+  component RowsCaption: Text {
+    leftPadding: Style.spacing.rowPaddingX
+    topPadding: Style.space(6)
+    textFormat: Text.PlainText
+    color: root.dim
+    font.family: root.font
+    font.pixelSize: Style.font.body
+    font.bold: true
+    font.letterSpacing: 1.2
   }
 }

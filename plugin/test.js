@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, QUIET_WHY, bubblesKept, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById, toPause, toResume, memoryRows, wheelStep, rateStep, TEMPO, level, listenLeft, seenDone, doneUnseen, NEWS_EVERY, newsEvery")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, QUIET_WHY, bubblesKept, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById, toPause, toResume, memoryRows, wheelStep, rateStep, TEMPO, level, listenLeft, seenDone, doneUnseen, NEWS_EVERY, newsEvery, topRows, permBubbles, withPerms, permit, laterCancel")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -246,6 +246,23 @@ assert.strictEqual(M.rowIndex(ags, "agent:b"), 2)
 assert.strictEqual(M.rowIndex([{ id: "b" }, { id: "c" }, { id: "a" }], "agent:b"), 1)
 assert.strictEqual(M.rowIndex(ags, "agent:gone"), -1)
 assert.strictEqual(M.rowIndex(ags, ""), -1)
+// Oma, then the permission cards, the deferred orders («Later»), then the agents (the Jarvis wave's main page)
+const top = M.topRows([{ id: "perm-1" }], [{ id: "later-2" }])
+assert.deepStrictEqual(top, ["perm:perm-1", "later:later-2"])
+assert.deepStrictEqual([-1, 0, 1, 2, 3, 5, 6].map(i => M.rowKey(ags, i, top)), ["", "general", "perm:perm-1", "later:later-2", "agent:a", "agent:c", ""])
+assert.deepStrictEqual([M.rowIndex(ags, "agent:a", top), M.rowIndex(ags, "later:later-2", top), M.rowIndex(ags, "perm:gone", top)], [3, 2, -1])
+assert.deepStrictEqual(M.topRows({ 0: { id: "p" }, length: 1 }, null), ["perm:p"], "a QML sequence is a list too")
+
+// Permission cards on the orb: built from the daemon's list, apart from the TTL'd stack — they never fade or get pushed
+// out; while the screen is shared — no command (the orb draws «Permission» and no buttons)
+const pc = (id) => ({ id, agent: "s", who: "plug", tool: "Bash", text: "cargo test", note: "Run", sub: false, since: 1 })
+assert.deepStrictEqual(M.permBubbles([pc("perm-1")], false), [{ id: "perm:perm-1", perm: "perm-1", agent: "s", who: "plug", kind: "permission", text: "Bash: cargo test", hidden: false }])
+assert.deepStrictEqual(M.permBubbles([pc("perm-1")], true).map(b => [b.text, b.hidden]), [["", true]])
+assert.deepStrictEqual(M.withPerms([{ id: "a" }, { id: "b" }, { id: "c" }], M.permBubbles([pc("perm-1")], false)).map(b => b.id), ["b", "c", "perm:perm-1"])
+assert.deepStrictEqual(M.withPerms([{ id: "a" }], M.permBubbles([pc("1"), pc("2"), pc("3"), pc("4")], false)).map(b => b.id), ["perm:2", "perm:3", "perm:4"])
+assert.deepStrictEqual(M.withPerms([{ id: "a" }], []).map(b => b.id), ["a"])
+assert.deepStrictEqual(JSON.parse(M.permit("perm-1", true)), { cmd: "permit", id: "perm-1", allow: true })
+assert.deepStrictEqual(JSON.parse(M.laterCancel("later-2")), { cmd: "later", do: "cancel", id: "later-2" })
 
 // A typed question: sent once, only while Oma takes commands; the field keeps it until her chat echoes it back
 assert.strictEqual(M.omaUp(st), true)
@@ -266,7 +283,7 @@ assert.strictEqual(M.taken("", { key: "chat:1", role: "me", text: "" }), false)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 20)
+assert.strictEqual(M.SETTINGS_ROWS.length, 21)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "kseniya", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
@@ -299,7 +316,8 @@ assert.strictEqual(M.settingStep("news_every", Object.assign({}, cfg, { news_eve
 assert.strictEqual(M.settingStep("news_every", Object.assign({}, cfg, { news_every: 7 }), 1).value, 0, "set by hand off the list — from the start")
 assert.deepStrictEqual(M.newsEvery(t => t).map(o => o.value), ["0", "2", "5", "10", "15", "30"], "the stock Dropdown keeps strings")
 assert.deepStrictEqual(M.newsEvery(ru).map(o => o.label), ["Без ограничения", "2 мин", "5 мин", "10 мин", "15 мин", "30 мин"])
-assert.deepStrictEqual(M.SETTINGS_SECTIONS[4].rows.slice(0, 3), ["agents_voice", "progress_digest", "news_every"])
+assert.deepStrictEqual(M.SETTINGS_SECTIONS[4].rows.slice(0, 4), ["agents_voice", "progress_digest", "news_every", "permission_buttons"])
+assert.deepStrictEqual(M.settingStep("permission_buttons", Object.assign({}, cfg, { permission_buttons: true }), 1), { key: "permission_buttons", value: false, sample: false })
 // «Память ›» right after its switch: a page, not a value
 assert.strictEqual(M.SETTINGS_ROWS[M.SETTINGS_ROWS.indexOf("memory") + 1], "memory_page")
 // every row steps but the hours (two dropdowns, the window walks them) and the memory page's link
