@@ -46,6 +46,9 @@ pub enum Msg {
     Summary,
     /// Колесо над орбом, пока Ома говорит: темп этого ответа на step шагов RATES (+ быстрее); config.toml не пишется.
     RateStep { step: i64 },
+    /// Слух Омы для орба: её вход (узел PipeWire; "" — вход по умолчанию), до когда она ещё слушает (эпоха, с; нет —
+    /// дуги нет) и длина этого окна, с. Шлёт при смене, отдельно от voice_state: его повтор держал бы новости и чистил очередь.
+    Ear { #[serde(default)] ear_in: String, #[serde(default)] until: Option<f64>, #[serde(default)] secs: f64 },
 }
 
 pub fn socket_path() -> PathBuf {
@@ -104,6 +107,9 @@ mod tests {
         assert!(matches!(tell, Msg::Tell { ref session, option: 1, ref expect, .. } if session == "s" && expect.is_empty()), "метка — по желанию");
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"summary\"}").unwrap(), Msg::Summary));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"rate_step\",\"step\":-1}").unwrap(), Msg::RateStep { step: -1 }));
+        let ear = serde_json::from_str::<Msg>("{\"cmd\":\"ear\",\"ear_in\":\"alsa_input.x\",\"until\":1794812345.2,\"secs\":20}").unwrap();
+        assert!(matches!(ear, Msg::Ear { ref ear_in, until: Some(u), secs } if ear_in == "alsa_input.x" && u == 1794812345.2 && secs == 20.0));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"ear\"}").unwrap(), Msg::Ear { until: None, .. }), "поля — по желанию");
     }
 
     #[test]

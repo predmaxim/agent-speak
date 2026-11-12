@@ -183,6 +183,9 @@ struct Oma {
     started: Option<Instant>,  // когда запущена нынешняя
     crashes: usize,            // падений подряд — шаг OMA_BACKOFF
     reap: Option<std::thread::JoinHandle<()>>, // прежнюю пожинают: пока не вышла, новую не поднимаем
+    ear_in: String,            // её вход (Msg::Ear): "" — вход по умолчанию
+    listen_until: Option<f64>, // до когда она слушает, эпоха, с
+    listen_secs: f64,          // длина нынешнего окна слушания, с
 }
 
 /// Пузырь, пока экран показывают: вместо текста — метка по виду, у агента — папка проекта, а не заголовок сессии
@@ -977,9 +980,9 @@ impl State {
             limit: &self.limit,
             limit_warn: self.cfg.limit_warn,
             // волна 3 (A): орб слышит
-            ear_in: "",
-            listen_until: None,
-            listen_secs: 0.0,
+            ear_in: &self.oma.ear_in,
+            listen_until: self.oma.listen_until,
+            listen_secs: self.oma.listen_secs,
             // волна 3 (A): настроение орба
             struggling: self.struggling(),
             orb_moods: self.cfg.orb_moods,
@@ -1760,6 +1763,10 @@ impl State {
             Msg::Read => self.read(),
             Msg::Summary => self.summary(),
             Msg::RateStep { step } => self.rate_step(step),
+            Msg::Ear { ear_in, until, secs } => {
+                (self.oma.ear_in, self.oma.listen_until, self.oma.listen_secs) = (ear_in, until, secs);
+                self.broadcast();
+            }
             Msg::Hook { kind, payload } => self.on_hook(&kind, &payload),
             Msg::Set { key, value } => {
                 let muted = key == "agents_voice" && value == false && self.cfg.agents_voice;
@@ -3140,6 +3147,18 @@ mod tests {
         st.oma.state = "speaking".into();
         st.on_msg(Msg::RateStep { step: -2 });
         assert_eq!(st.rate_now.as_deref(), Some("x-slow"));
+    }
+
+    #[test]
+    fn ear_line_reaches_the_orb() {
+        let mut st = test_state();
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        st.on_msg(Msg::Ear { ear_in: "alsa_input.pci".into(), until: Some(1794812345.2), secs: 20.0 });
+        let v = next(&mut r);
+        assert_eq!((v["ear_in"].as_str(), v["listen_until"].as_f64(), v["listen_secs"].as_f64()), (Some("alsa_input.pci"), Some(1794812345.2), Some(20.0)));
+        st.on_msg(Msg::Ear { ear_in: String::new(), until: None, secs: 0.0 });
+        assert!(next(&mut r)["listen_until"].is_null(), "заговорил или слух закрыт — дуги нет");
     }
 
     #[test]

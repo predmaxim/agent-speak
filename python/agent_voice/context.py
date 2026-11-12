@@ -74,14 +74,17 @@ def mic_outputs() -> list:
 
 # Имя узла записи Омы: PipeWire не отдаёт pid у pw-record, свой поток узнаём по нему.
 OWN_NODE = "oma-ear"
+# Монитор уровня оболочки (орб Омы, панель звука): поток Quickshell, имя — по версии PipeWire. То же правило, что
+# стоковое AudioNodes.isShellLevelMeter (/usr/share/omarchy/shell/Commons/AudioNodesModel.js).
+SHELL_METERS = ("quickshell", "quickshell-peak-monitor")
 
 
 def foreign_capture(outputs: list, own: set) -> bool:
-    """Микрофон слушает не виртуальный поток чужого процесса (монитор выхода — cava, OBS — не в счёт)."""
+    """Микрофон слушает не виртуальный поток чужого процесса (монитор выхода — cava, OBS — и монитор уровня оболочки не в счёт)."""
     own = {str(x) for x in own}
     for o in outputs:
         p = o.get("properties", {})
-        if o.get("corked") or "true" in (p.get("stream.monitor"), p.get("stream.capture.sink")) or p.get("node.name") == OWN_NODE:
+        if o.get("corked") or "true" in (p.get("stream.monitor"), p.get("stream.capture.sink")) or p.get("node.name") in (OWN_NODE, *SHELL_METERS):
             continue
         if p.get("node.virtual") != "true" and p.get("application.process.id") not in own:
             return True
@@ -129,6 +132,17 @@ def mic_target(run=subprocess.run, out=None) -> tuple:
         return pick_mic(q("get-default-source").strip(), q("get-default-sink").strip(), q("list", "short", "sources"), out)
     except Exception:
         return "", bool(out), ""
+
+
+def muted(target: str, run=subprocess.run) -> bool:
+    """Микрофон выключен: вход по умолчанию (его глушит клавиша mute) или вход Омы target, если он не по умолчанию
+    (без гарнитуры она пишет alsa_input в обход входа по умолчанию). Не узнать — не выключен."""
+    env = {**os.environ, "LC_ALL": "C"}  # «Mute: yes» без перевода
+    try:
+        return any(run(["pactl", "get-source-mute", s], capture_output=True, text=True, timeout=2, env=env).stdout.strip().endswith("yes")
+                   for s in ["@DEFAULT_SOURCE@"] + ([target] if target else []))
+    except Exception:
+        return False
 
 
 def locked() -> bool:

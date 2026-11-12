@@ -489,6 +489,46 @@ def test_foreign_capture_skips_monitor_streams():
     assert not foreign_capture([{"properties": {"application.process.id": "7", "stream.capture.sink": "true"}}], set())
 
 
+def test_foreign_capture_skips_shell_level_meter():
+    # монитор уровня оболочки (орб Омы, стоковая панель звука) — не чужой захват: стоковое AudioNodes.isShellLevelMeter
+    for name in ("quickshell", "quickshell-peak-monitor"):
+        assert not foreign_capture([{"properties": {"node.name": name, "application.process.id": "7"}}], {42})
+    assert foreign_capture([{"properties": {"node.name": "quickshell-x", "application.process.id": "7"}}], {42})
+
+
+def test_muted_reads_default_and_own_input():
+    # клавиша mute глушит только вход по умолчанию, а без гарнитуры Ома пишет alsa_input в обход него
+    from agent_voice import context
+    asked = []
+    def fake_run(args, **kw):
+        asked.append(args[-1])
+        assert kw["env"]["LC_ALL"] == "C", "ответ pactl — без перевода"
+        return SimpleNamespace(stdout={"@DEFAULT_SOURCE@": "Mute: no\n", "alsa_input.pci": "Mute: yes\n"}[args[-1]])
+    assert context.muted("alsa_input.pci", fake_run) and asked == ["@DEFAULT_SOURCE@", "alsa_input.pci"]
+    asked.clear()
+    assert not context.muted("", fake_run) and asked == ["@DEFAULT_SOURCE@"], "вход по умолчанию — один вопрос"
+    def boom(args, **kw):
+        raise FileNotFoundError("pactl")
+    assert not context.muted("", boom), "не узнать — не выключен: слух работает, как раньше"
+
+
+def test_ear_start_on_muted_mic_drops_frames_from_the_first():
+    from agent_voice.ear import Ear
+    asked = []
+    e = Ear(asyncio.Queue(), Whisper(load=lambda: "m"), cmd=["sleep", "60"], vad_load=lambda: None,
+            mic=lambda: ("alsa_input.pci", False, ""), muted=lambda t: asked.append(t) or True)
+
+    async def go():
+        await e.start()
+        assert e.paused and e.target == "alsa_input.pci" and asked == ["alsa_input.pci"]
+        await e.stop()
+        e.paused, e._muted = False, lambda t: False
+        await e.start()
+        assert not e.paused, "включён — слушает"
+        await e.stop()
+    run(go())
+
+
 def test_on_ac_usb_counts(tmp_path):
     for n, typ, on in (("A", "Mains", "0"), ("U", "USB", "1")):
         (tmp_path / n).mkdir()
@@ -532,7 +572,7 @@ def _ear(cmd):
     from agent_voice.ear import Ear
     out = asyncio.Queue()
     # VAD подменён заглушкой, кадры не подаются; микрофон и модель не трогаем
-    return out, Ear(out, Whisper(load=lambda: "m"), cmd=cmd, vad_load=lambda: None, mic=lambda: "")
+    return out, Ear(out, Whisper(load=lambda: "m"), cmd=cmd, vad_load=lambda: None, mic=lambda: "", muted=lambda t: False)
 
 
 def test_ear_start_stop_single_process_and_interleave():
@@ -793,7 +833,7 @@ from agent_voice.__main__ import Oma
 from agent_voice.link import watch
 
 
-def _oma(sent, emitted):
+def _oma(sent, emitted, ears=None):
     class FakeEar:
         open, pid = False, 1
         async def start(self): self.open = True
@@ -809,7 +849,8 @@ def _oma(sent, emitted):
 
     clk = Clock()
     oma = Oma(Conversation(clock=clk), FakeEar(), FakeBrain(), SimpleNamespace(ready=True),
-              send=lambda c: (emitted if c["cmd"] == "emit" else sent).append(c), turn_end=SimpleNamespace(complete=lambda pcm: None))
+              send=lambda c: (emitted if c["cmd"] == "emit" else (ears if ears is not None else []) if c["cmd"] == "ear" else sent).append(c),
+              turn_end=SimpleNamespace(complete=lambda pcm: None))
     return clk, oma
 
 
@@ -848,6 +889,28 @@ def test_oma_routes_talk_draft_tick_and_quiet_answer():
         assert any(e["line"].get("bubble", {}).get("kind") == "oma" for e in emitted)
 
     asyncio.run(run())
+
+
+def test_oma_tells_the_orb_its_ear_and_how_long_it_listens():
+    sent, emitted, ears = [], [], []
+    clk, oma = _oma(sent, emitted, ears)
+    oma.ear.target = "alsa_input.pci"
+
+    async def go():
+        await oma.command({"do": "talk"})
+        assert ears[-1]["ear_in"] == "alsa_input.pci" and ears[-1]["secs"] == SILENCE_END
+        assert abs(ears[-1]["until"] - (time.time() + SILENCE_END)) < 1
+        n = len(ears)
+        await oma.event(("tick",))
+        assert len(ears) == n, "ничего не сменилось — строки нет"
+        await oma.event(("start", 1))
+        assert ears[-1]["until"] is None, "заговорил — дуга гаснет"
+        await oma.event(("phrase", "э", 1))
+        assert ears[-1]["until"] is not None and ears[-1]["secs"] == SILENCE_END, "после фразы — снова, полная"
+        await oma.command({"do": "talk"})
+        assert ears[-1]["until"] is None, "разговор кончился"
+
+    asyncio.run(go())
 
 
 def test_oma_locked_ends_conversation():
@@ -1239,7 +1302,7 @@ def _numbered_ear(monkeypatch, whisper):
     vad = lambda x, rate: SimpleNamespace(item=lambda: next(probs))
     monkeypatch.setattr(earmod, "transcribe", lambda m, pcm: "слово")
     out = asyncio.Queue()
-    return out, Ear(out, whisper, cmd=["sh", "-c", f"head -c {64 * 1024} /dev/zero; sleep 60"], vad_load=lambda: vad, mic=lambda: "")
+    return out, Ear(out, whisper, cmd=["sh", "-c", f"head -c {64 * 1024} /dev/zero; sleep 60"], vad_load=lambda: vad, mic=lambda: "", muted=lambda t: False)
 
 
 def _drain(out, kinds):
@@ -1277,7 +1340,7 @@ def test_ear_dates_speech_onset_by_sound_not_by_reading(monkeypatch):
     src = ("import sys, time\nt = time.monotonic()\nfor i in range(80):\n    sys.stdout.buffer.write(bytes(1024)); sys.stdout.flush()\n"
            "    time.sleep(max(0, t + (i + 1) * 0.032 - time.monotonic()))\ntime.sleep(60)")
     out = asyncio.Queue()
-    e = Ear(out, Whisper(load=lambda: "m"), cmd=[sys.executable, "-c", src], vad_load=lambda: vad, mic=lambda: "")
+    e = Ear(out, Whisper(load=lambda: "m"), cmd=[sys.executable, "-c", src], vad_load=lambda: vad, mic=lambda: "", muted=lambda t: False)
 
     async def go():
         await e.start()
@@ -1323,7 +1386,7 @@ def test_ear_warm_loads_vad_once():
     loads = []
 
     async def run():
-        e = Ear(asyncio.Queue(), Whisper(load=lambda: "m"), cmd=["sleep", "60"], vad_load=lambda: loads.append(1) or "vad", mic=lambda: "")
+        e = Ear(asyncio.Queue(), Whisper(load=lambda: "m"), cmd=["sleep", "60"], vad_load=lambda: loads.append(1) or "vad", mic=lambda: "", muted=lambda t: False)
         await e.warm()
         await e.start()
         await e.stop()
@@ -2051,7 +2114,7 @@ def test_ear_hears_echo_cancelled_stream_while_oma_speaks(monkeypatch):
     script = 'if [ "$1" = mic_aec ]; then c=B; else c=A; fi; yes $c | tr -d "\\n" | head -c 65536; sleep 60'
     out = asyncio.Queue()
     e = Ear(out, Whisper(load=lambda: "m"), cmd=["sh", "-c", script, "sh"], vad_load=lambda: vad,
-            mic=lambda: ("", True, "mic_aec"))
+            mic=lambda: ("", True, "mic_aec"), muted=lambda t: False)
     e.speaking = True
 
     async def go():
@@ -2071,7 +2134,7 @@ def test_ear_stop_does_not_hang_on_unread_stream():
     from agent_voice.ear import Ear
     script = 'if [ "$1" = mic_aec ]; then exec sleep 60; else exec cat /dev/zero; fi'
     e = Ear(asyncio.Queue(), Whisper(load=lambda: "m"), cmd=["sh", "-c", script, "sh"], vad_load=lambda: None,
-            mic=lambda: ("", True, "mic_aec"))
+            mic=lambda: ("", True, "mic_aec"), muted=lambda t: False)
 
     async def go():
         await e.start()
