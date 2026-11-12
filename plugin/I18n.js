@@ -22,6 +22,7 @@ var TABLES = {
     "Orb": "Орб", "Over fullscreen windows": "Над полноэкранными окнами", "Agent satellites": "Спутники агентов", "%1 more": "ещё %1",
     "Agents": "Агенты", "General chat": "Общий чат", "Copy": "Копировать", "Copied": "Скопировано", "Retell progress": "Пересказывать промежуточное",
     "Warn about the limit": "Предупреждать о лимите",
+    "Remember past days": "Помнить прошлые дни",
     "Watch agents": "Следить за агентами", "Oma is off": "Ома выключена", "Turn Oma on": "Включить Ому", "Turn Oma off": "Выключить Ому",
     "Turn sound off": "Выключить звук", "Turn sound on": "Включить звук", "Oma: sound off": "Ома: звук выключен",
     "Quiet: screen sharing": "Тихо: показ экрана", "Quiet: do not disturb": "Тихо: не беспокоить",

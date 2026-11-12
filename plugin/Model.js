@@ -333,7 +333,7 @@ var SETTINGS_SECTIONS = [
   { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours", "screencast_privacy", "hush_summary"] },
   { title: "Hearing", rows: ["music_pause"] },
   { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites"] },
-  { title: "Agents", rows: ["agents_voice", "progress_digest", "limit_warn"] }
+  { title: "Agents", rows: ["agents_voice", "progress_digest", "memory", "limit_warn"] }
 ]
 
 // The rows in that order: a row's place on the page (the key cursor) is its index here.
@@ -352,6 +352,7 @@ function settingStep(row, st, dx) {
   if (row === "screencast_privacy" || row === "hush_summary") return { key: row, value: !st[row], sample: false }
   if (row === "music_pause") return { key: row, value: !st.music_pause, sample: false }
   if (row === "limit_warn") return { key: row, value: !st.limit_warn, sample: false }
+  if (row === "memory") return { key: row, value: !st.memory, sample: false }
   var sec = sections(function(t) { return t }).filter(function(x) { return x.key === row })[0]
   if (!sec) return null
   var values = sec.options.map(function(o) { return o.value })

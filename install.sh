@@ -12,6 +12,8 @@ ln -sfn "$PWD/python/silero_tts.py" "$DATA/silero_tts.py"
 [[ -f $DATA/terms.tsv ]] || cp data/terms.tsv "$DATA/terms.tsv"
 # копия, не ссылка: `systemctl disable` (agent-speak off) снимает ссылку на юнит вместе с автозапуском
 install -m644 systemd/agent-speakd.service ~/.config/systemd/user/agent-speakd.service
+# память Омы между днями: сжатие прошлого дня в 05:00 (README, «Память»)
+install -m644 systemd/agent-speak-memory.service systemd/agent-speak-memory.timer ~/.config/systemd/user/
 # Плагин Omarchy — панель Омы (орб и окно); включается: omarchy plugin enable predmaxim.agent-speak
 mkdir -p ~/.config/omarchy/plugins
 ln -sfn "$PWD/plugin" ~/.config/omarchy/plugins/predmaxim.agent-speak
@@ -44,5 +46,5 @@ ST=$DATA/smart-turn-v3.2-cpu.onnx
 } || { rm -f "$ST.tmp"; echo "Smart Turn не скачался — Ома будет ждать паузу" >&2; }
 
 systemctl --user daemon-reload
-systemctl --user enable --now agent-speakd.service
+systemctl --user enable --now agent-speakd.service agent-speak-memory.timer
 systemctl --user restart agent-speakd.service

@@ -40,6 +40,8 @@ pub struct Config {
     pub limit_warn: bool,
     /// процент окна лимита, с которого Ома предупреждает пользователя; только config.toml
     pub limit_warn_at: u64,
+    /// память между днями: служба пишет пересказы дня, таймер сжимает день, мозг получает заметки и свой файл «Помню»
+    pub memory: bool,
 }
 
 impl Default for Config {
@@ -48,7 +50,7 @@ impl Default for Config {
             orb_satellites: true,
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: true, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
             orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95, screencast_privacy: true, hush_summary: true, music_pause: true,
-            limit_warn: true, limit_warn_at: 90 }
+            limit_warn: true, limit_warn_at: 90, memory: true }
     }
 }
 
@@ -124,6 +126,7 @@ impl Config {
             "music_pause" if value.is_boolean() => self.music_pause = value.as_bool().unwrap(),
             "limit_warn" if value.is_boolean() => self.limit_warn = value.as_bool().unwrap(),
             "limit_warn_at" if in_range(value, 50, 100) => self.limit_warn_at = value.as_u64().unwrap(),
+            "memory" if value.is_boolean() => self.memory = value.as_bool().unwrap(),
             _ => return false,
         }
         true
@@ -235,6 +238,10 @@ mod tests {
         assert!(c.orb_satellites && c.set("orb_satellites", &json!(false)) && !c.orb_satellites);
         assert!(!c.set("orb_satellites", &json!("false")));
         assert!(parse("speaker = \"baya\"").unwrap().orb_satellites, "старый файл без ключа — спутники есть");
+        // память между днями — по умолчанию вкл (дизайн «Джарвис»); старый файл без ключа — тоже вкл
+        assert!(c.memory && c.set("memory", &json!(false)) && !c.memory);
+        assert!(!c.set("memory", &json!("false")));
+        assert!(parse("speaker = \"baya\"").unwrap().memory);
     }
 
     #[test]

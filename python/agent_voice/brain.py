@@ -9,6 +9,7 @@ import time
 from claude_agent_sdk import (ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, create_sdk_mcp_server,
                               get_session_messages, list_sessions, tag_session, tool)
 
+from . import memory
 from .context import _blocks, selection, transcript_tail
 from .conversation import MORE
 from .orders import Orders
@@ -19,7 +20,10 @@ TOOLS = ["Read", "Glob", "Grep", "WebSearch"]  # без WebFetch: наружу �
 # Read, Glob и Grep — только в проектах: рабочие папки claude — OMA_DIR и PROJECTS, чтение вне них Claude Code отклоняет
 # (blockReadsOutsideWorkingDirectories); 2026-10-30 Grep мозга по всему ~ (855 ГБ) дал пик памяти 44,2 ГБ
 PROJECTS = os.path.expanduser("~/Projects")
-READ_ONLY_IN_PROJECTS = json.dumps({"permissions": {"blockReadsOutsideWorkingDirectories": True}})
+READ_ONLY_IN_PROJECTS = {"permissions": {"blockReadsOutsideWorkingDirectories": True}}
+# память вкл: Write/Edit — только для неё. Правила на них нет: вне каталога памяти запись отклоняет dontAsk, в нём Claude
+# Code разрешает её сам (auto memory), а хук PreToolUse (memory.gate) пускает лишь слова пользователя в MEMORY.md
+MEMORY_TOOLS = ["Write", "Edit"]
 OMA_TOOLS = ["mcp__oma__agents", "mcp__oma__agent_feed", "mcp__oma__agent_tail", "mcp__oma__selection",
              "mcp__oma__presence", "mcp__oma__tell", "mcp__oma__projects", "mcp__oma__launch"]
 STALE_HOURS = 2
@@ -28,17 +32,38 @@ STALE_HOURS = 2
 ORDER_TOOLS = "mcp__oma__tell|mcp__oma__launch"
 ASKED = "Ома спросила пользователя вслух подтверждение поручения; ход окончен, его ответ проверит код."
 OMA_PROMPT = ("Ты — Ома, голосовой заместитель пользователя. Следишь за его ИИ-агентами (Claude Code, Codex) в терминалах "
-              "и отвечаешь на его вопросы. Отвечай по-русски, коротко и живо: текст звучит голосом, лишнее утомляет. "
+              "и отвечаешь на его вопросы. О себе говоришь в женском роде («посмотрела», «передала», «не уверена»), к "
+              "пользователю — на «ты». Говоришь по-русски, как живой человек: коротко, живо, своими словами, без канцелярита "
+              "(«осуществлено», «в рамках», «данный», «на текущий момент») и без одинаковых зачинов. Текст звучит голосом, "
+              "лишнее утомляет. "
               "Вопрос, на который отвечают «да» или «нет» («умеешь…?», «готово?», «можно?»), — «Да» или «Нет» и больше "
-              "ничего; одна короткая фраза после — только если без неё ответ вводит в заблуждение. Остальное — одна фраза "
-              "до 15 слов о главном сейчас, без истории шагов. Примеры: «Тесты прошли?» → «Да.»; «Почта закончила?» → "
-              "«Нет, ещё правит тесты.»; «Как дела у агентов?» → «Почта ждёт ответа, остальные работают.»; «Что делает "
-              "агент спика?» → «Чинит эхо в слухе.» Без вступлений и пересказа вопроса; не перечисляй, что умеешь, не "
-              "объясняй, как узнала, без оговорок, советов и «что-нибудь ещё?». Без markdown, звёздочек, списков и кода. "
-              "Говори по-разному, как человек, без канцелярита и одинаковых зачинов. Нужны детали (просят подробнее, "
-              f"объяснить, перечислить) — главное одной фразой, затем метка {MORE} и детали: после метки текст только в "
-              "окне, вслух не звучит. Всё, что пользователь должен услышать, — ответ, вопрос к нему, кому и что "
-              "передала, — до метки. "
+              "ничего; одна короткая фраза после — только если без неё ответ вводит в заблуждение. Остальное — одно-два "
+              "коротких предложения, вместе до 20 слов, о главном сейчас, без истории шагов. "
+              "У тебя есть своё мнение. Видишь риск или способ лучше — скажи прямо, с причиной в одной фразе: «Можно, но я "
+              "бы не стала: миграция без бэкапа — плохая идея.» Причина — только из того, что знаешь: снимок агентов, их "
+              "ленты и переписка, файлы, твоя память; оснований нет — риск не выдумывай. Возражай один раз и кончай причиной "
+              "или тем, как лучше, а не вопросом «всё равно?»: решает пользователь. Настаивает — делай без второго спора и "
+              "упрёков. Сухой юмор — редко, не чаще раза за разговор; в срочном — вопрос или сбой агента, разрешение, лимит, "
+              "поручение — никогда. "
+              "Без вступлений и пересказа вопроса; не перечисляй, что умеешь, не объясняй, как узнала, без оговорок, "
+              "непрошеных советов и «что-нибудь ещё?». Без markdown, звёздочек, списков и кода. Нужны детали (просят "
+              f"подробнее, объяснить, перечислить) — главное одной фразой, затем метка {MORE} и детали: после метки текст "
+              "только в окне, вслух не звучит. Всё, что пользователь должен услышать, — ответ, вопрос к нему, возражение, "
+              "кому и что передала, — до метки.\n"
+              "Примеры:\n"
+              "«Тесты прошли?» → «Да.»\n"
+              "«Почта закончила?» → «Нет, ещё правит тесты.»\n"
+              "«Как дела у агентов?» → «Почта ждёт тебя, остальные работают.»\n"
+              "«Что делает агент спика?» → «Чинит эхо в слухе.»\n"
+              "«Как настроение?» → «Рабочее: трое пашут, один ждёт тебя.»\n"
+              "«Что с почтой?» → «Третий заход на тесты. Пока тесты побеждают.»\n"
+              "«Что там горит?» → «У site упала сборка, агент ждёт твоего решения.»\n"
+              "«Чего хочет Astral?» → «Разрешения стереть старые сборки. Это кэш, я бы разрешила.»\n"
+              "«Пусть агент перепишет орб с нуля.» → «Могу передать, но проще поправить анимацию: переписывать орб незачем.»\n"
+              "«Скажи site прогнать миграцию на проде.» → «Можно, но я бы сначала сделала бэкап: сегодня его не было.»; "
+              "«Нет, гони так.» → tell; инструмент ответил, что подтверждение уже спрошено, → «[молчу]»\n"
+              "«Пусть почта откатит последний коммит.» → «Точно? Вчера мы его уже откатывали, и сломался вход.»\n"
+              f"«Расскажи подробнее, что сделал спик.» → «Починил эхо и ускорил слух. {MORE} …детали…»\n"
               "Состояние агентов — по свежему снимку в конце реплики (‹агенты›…‹/агенты›), agents для этого не вызывай; "
               "строка «Твой голос: …» после него — твой звук сейчас: на «где звук?» отвечай по ней; "
               "строка «Лимит … почти кончился» — лимит агентов у края: о лимите отвечай по ней; "
@@ -256,6 +281,7 @@ class Brain:
         os.makedirs(OMA_DIR, exist_ok=True)
         self.orders = orders or Orders()
         self.events, self.snapshot, self.tools = events, snapshot, oma_tools(snapshot, send, self.orders)
+        self.memory = True  # настройка memory из строки состояния службы; действует с нового подключения
         self.fresh = fresh  # ход начинается: служба отвечает строкой агентов с фокусом этой минуты (link.turn); None — нет
         self.key, self.sid, self.client, self.reader = "new", None, None, None
         self.st, self.used, self.turns = {"skip": False}, time.time(), 0  # turns: запросов без ResultMessage
@@ -293,19 +319,33 @@ class Brain:
         if self.key.startswith("agent:"):
             aid = self.key[6:]
             prompt = agent_prompt(pick_agent(self.snapshot(), aid)[0] or {"id": aid, "title": aid, "cwd": "?"})
+        on = self.memory
+        if on:
+            memory.ensure()
         client = ClaudeSDKClient(ClaudeAgentOptions(
-            cwd=OMA_DIR, add_dirs=[PROJECTS], model=MODEL, system_prompt=prompt, tools=TOOLS,
+            cwd=OMA_DIR, add_dirs=[PROJECTS], model=MODEL, system_prompt=prompt + memory.prompt(on),
+            tools=TOOLS + (MEMORY_TOOLS if on else []),
             # чтение в рабочих папках разрешений не просит; остальное, что спросило бы, — отказ: спрашивать некого
-            allowed_tools=["WebSearch"] + OMA_TOOLS, permission_mode="dontAsk", settings=READ_ONLY_IN_PROJECTS,
+            allowed_tools=["WebSearch"] + OMA_TOOLS, permission_mode="dontAsk",
+            # «Помню» — штатная auto memory в своём каталоге: её MEMORY.md CLI кладёт в контекст нового чата сам
+            settings=json.dumps({**READ_ONLY_IN_PROJECTS, **({"autoMemoryDirectory": memory.prefs_dir()} if on else {})}),
             mcp_servers={"oma": create_sdk_mcp_server("oma", tools=self.tools)}, strict_mcp_config=True,
-            resume=self.sid, include_partial_messages=True, setting_sources=[], env={"AGENT_SPEAK": "1"},
-            hooks={"PostToolUse": [HookMatcher(matcher=ORDER_TOOLS, hooks=[self._asked])]}))
+            resume=self.sid, include_partial_messages=True, setting_sources=[],
+            env={"AGENT_SPEAK": "1", **({} if on else {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"})},
+            hooks={"PostToolUse": [HookMatcher(matcher=ORDER_TOOLS, hooks=[self._asked])],
+                   "PreToolUse": [HookMatcher(matcher="Write|Edit", hooks=[self._remember])]}))
         await client.connect()  # упал — клиента нет, следующий send попробует снова
         self.client, self.reader = client, asyncio.create_task(self._read(client))
 
     async def _asked(self, inp, tool_use_id, ctx):
         """После tell или launch: Ома спросила подтверждение — ход кончается, второго прохода модели нет."""
         return {"continue_": False, "stopReason": ASKED} if self.orders.tripped else {}
+
+    async def _remember(self, inp, tool_use_id, ctx):
+        """Перед Write/Edit: в память — только слова пользователя из этой реплики (orders.heard), иначе отказ."""
+        why = memory.gate(inp.get("tool_input") or {}, self.orders.heard)
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": why}} if why else {}
 
     async def _read(self, client):
         try:

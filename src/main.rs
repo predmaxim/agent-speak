@@ -8,6 +8,7 @@ mod focus;
 mod ipc;
 mod learn;
 mod limits;
+mod memory;
 mod news;
 mod mux;
 mod notice;
