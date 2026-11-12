@@ -573,7 +573,7 @@ fn agent_facts(e: &Entry, activity: u64) -> Facts {
     f
 }
 
-/// Известные уведомления Claude Code по-русски. Незнакомые — как есть (транслитом):
+/// Известные уведомления Claude Code по-русски, с того, что нужно от пользователя (проект перед ними ставит речь). Незнакомые — как есть (транслитом):
 /// так слышно, что текст новый и его пора добавить сюда.
 /// Общий «Claude needs your permission» шлётся на любой диалог, даже на вопрос, — что именно ждёт,
 /// видно по последнему инструменту в транскрипте (`last_tool`).
@@ -584,9 +584,9 @@ fn notification_text(msg: &str, last_tool: impl FnOnce() -> Option<String>) -> S
     };
     if let Some(tool) = tool {
         return match tool.as_str() {
-            "AskUserQuestion" => "Клод задал вопрос".into(),
-            "ExitPlanMode" => "Клоду нужно одобрение плана".into(),
-            t => format!("Клоду нужно разрешение на {}", match t {
+            "AskUserQuestion" => "вопрос к тебе".into(),
+            "ExitPlanMode" => "нужно одобрить план".into(),
+            t => format!("нужно разрешение на {}", match t {
                 "Bash" => "команду",
                 "Edit" | "MultiEdit" => "правку файла",
                 "Write" => "запись файла",
@@ -604,15 +604,15 @@ fn notification_text(msg: &str, last_tool: impl FnOnce() -> Option<String>) -> S
         };
     }
     if let Some(what) = msg.strip_prefix("Claude needs your permission to reply to comments on ") {
-        return format!("Клоду нужно разрешение ответить на комментарии в {what}");
+        return format!("нужно разрешение ответить на комментарии в {what}");
     }
     match msg {
-        "" => "Клод ждёт ответа",
-        "Claude is waiting for your input" => "Клод ждёт ответа",
-        "Claude needs your input" | "Claude Code needs your input" => "Клоду нужен ответ",
-        "Claude needs your permission" => "Клоду нужно разрешение",
-        "Claude Code needs your approval for the plan" => "Клоду нужно одобрение плана",
-        "Claude needs your approval for a review artifact" => "Клоду нужно одобрение артефакта",
+        "" => "ждёт ответа",
+        "Claude is waiting for your input" => "ждёт ответа",
+        "Claude needs your input" | "Claude Code needs your input" => "нужен ответ",
+        "Claude needs your permission" => "нужно разрешение",
+        "Claude Code needs your approval for the plan" => "нужно одобрить план",
+        "Claude needs your approval for a review artifact" => "нужно одобрить артефакт",
         _ => msg,
     }
     .into()
@@ -3052,17 +3052,17 @@ mod tests {
     fn notification_text_is_russian() {
         let t = |m: &str| notification_text(m, || None);
         let with = |tool: &str| notification_text("Claude needs your permission", || Some(tool.into()));
-        assert_eq!(with("AskUserQuestion"), "Клод задал вопрос");
-        assert_eq!(with("ExitPlanMode"), "Клоду нужно одобрение плана");
-        assert_eq!(with("Edit"), "Клоду нужно разрешение на правку файла");
-        assert_eq!(t("Claude needs your permission"), "Клоду нужно разрешение");
-        assert_eq!(t("Claude needs your permission to use AskUserQuestion"), "Клод задал вопрос");
-        assert_eq!(t("Claude needs your permission to use Bash"), "Клоду нужно разрешение на команду");
-        assert_eq!(t("Claude needs your permission to use mcp__srv__query"), "Клоду нужно разрешение на query");
-        assert_eq!(t("Claude is waiting for your input"), "Клод ждёт ответа");
-        assert_eq!(t("Claude Code needs your approval for the plan"), "Клоду нужно одобрение плана");
-        assert_eq!(t("Claude Code needs your input"), "Клоду нужен ответ");
-        assert_eq!(t(""), "Клод ждёт ответа");
+        assert_eq!(with("AskUserQuestion"), "вопрос к тебе");
+        assert_eq!(with("ExitPlanMode"), "нужно одобрить план");
+        assert_eq!(with("Edit"), "нужно разрешение на правку файла");
+        assert_eq!(t("Claude needs your permission"), "нужно разрешение");
+        assert_eq!(t("Claude needs your permission to use AskUserQuestion"), "вопрос к тебе");
+        assert_eq!(t("Claude needs your permission to use Bash"), "нужно разрешение на команду");
+        assert_eq!(t("Claude needs your permission to use mcp__srv__query"), "нужно разрешение на query");
+        assert_eq!(t("Claude is waiting for your input"), "ждёт ответа");
+        assert_eq!(t("Claude Code needs your approval for the plan"), "нужно одобрить план");
+        assert_eq!(t("Claude Code needs your input"), "нужен ответ");
+        assert_eq!(t(""), "ждёт ответа");
         assert_eq!(t("Something new"), "Something new"); // незнакомое — транслитом
     }
 
@@ -3322,7 +3322,7 @@ mod tests {
         st.on_hook("notification", &serde_json::json!({"session_id": "s", "message": "Claude needs your permission to use Bash", "transcript_path": "/nonexistent", "cwd": "/x/plug"}));
         let job = rx.try_recv().unwrap();
         assert_eq!(job.ask, Ask::Question);
-        assert_eq!(job.fallback.as_deref(), Some("Клоду нужно разрешение на команду"));
+        assert_eq!(job.fallback.as_deref(), Some("нужно разрешение на команду"));
         assert!(texts(&st).is_empty());
         assert!(bubbles(&mut r).is_empty(), "пузырь — из пересказа");
         assert_eq!(st.registry.waiting(), 1);
@@ -3672,7 +3672,7 @@ mod tests {
         st.on_hook("notification", &serde_json::json!({"session_id": "s", "message": "Claude needs your permission", "transcript_path": path, "cwd": "/p/s"}));
         let job = rx.try_recv().unwrap();
         assert_eq!(job.text, "Сборка устарела.\n\nЖдёт ответа на Bash: Чищу сборку: rm -rf build");
-        assert_eq!(job.fallback.as_deref(), Some("Клоду нужно разрешение на команду"));
+        assert_eq!(job.fallback.as_deref(), Some("нужно разрешение на команду"));
         assert_eq!(st.registry.get("s").unwrap().ask, job.text, "мозг Омы видит то же, что пересказ");
         let _ = std::fs::remove_dir_all(dir);
     }
