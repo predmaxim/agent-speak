@@ -269,7 +269,7 @@ pub fn run() {
     let tts = Tts::new(
         data.join("venv/bin/python"),
         data.join("silero_tts.py"),
-        data.join("v5_ru.pt"),
+        data.join(crate::tts::MODEL),
         runtime.join("agent-speak-tts.sock"),
     );
     {

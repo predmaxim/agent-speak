@@ -6,6 +6,9 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+/// Файл модели Silero в ~/.local/share/agent-speak; его качает install.sh.
+pub const MODEL: &str = "v5_6_ru.pt";
+
 pub struct Tts {
     python: PathBuf,
     script: PathBuf,
@@ -133,7 +136,7 @@ mod tests {
         let mut t = Tts::new(
             data.join("venv/bin/python"),
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/silero_tts.py"),
-            data.join("v5_ru.pt"),
+            data.join(MODEL),
             sock,
         );
         assert!(t.synth("Проверка связи.", "xenia", "medium").unwrap().len() > 48000);

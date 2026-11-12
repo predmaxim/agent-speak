@@ -4,6 +4,10 @@ import json, os, socket, struct, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.expanduser("~/.local/share/agent-speak")
 SOCK = "/tmp/agent-speak-tts-test.sock"
+MODEL = f"{DATA}/v5_6_ru.pt"
+if not os.path.exists(MODEL) and __name__ != "__main__":
+    import pytest  # модель ставит install.sh; без неё pytest пропускает проверку, а запуск скриптом падает
+    pytest.skip(f"нет {MODEL}: сначала ./install.sh", allow_module_level=True)
 
 
 def ask(req):
@@ -28,7 +32,7 @@ assert struct.unpack("<3h", pcm16(torch.tensor([1.2, -1.3, 0.5]))) == (32767, -3
 
 if os.path.exists(SOCK):
     os.unlink(SOCK)
-p = subprocess.Popen([f"{DATA}/venv/bin/python", f"{HERE}/silero_tts.py", f"{DATA}/v5_ru.pt", SOCK])
+p = subprocess.Popen([f"{DATA}/venv/bin/python", f"{HERE}/silero_tts.py", MODEL, SOCK])
 try:
     for _ in range(100):
         if os.path.exists(SOCK):
