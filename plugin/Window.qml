@@ -1112,6 +1112,16 @@ Item {
                   onToggled: root.step("progress_digest", 1)
                 }
               }
+
+              SettingRow {
+                key: "limit_warn"
+                label: root.tr("Warn about the limit")
+                ToggleSwitch {
+                  checked: root.speech.limit_warn === true
+                  foreground: root.fg
+                  onToggled: root.step("limit_warn", 1)
+                }
+              }
             }
           }
         }

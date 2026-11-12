@@ -61,7 +61,10 @@ function orbTip(st) {
   var why = st && QUIET_WHY[st.quiet_why]
   var lines = mode === "trouble" ? [["%1 need help", st.trouble]] : mode === "waiting" ? [["%1 waiting", st.waiting]]
     : mode === "quiet" && !st.quiet && why ? [] : [[tips[mode], ""]]   // quiet by reason only: the reason is the line
-  return why ? lines.concat([[why, ""]]) : lines
+  if (why) lines.push([why, ""])
+  // a limit window near its end: the daemon's phrase, already Russian, so no tr line — it passes tr() as is
+  if (st && st.limit) lines.push([st.limit, ""])
+  return lines
 }
 
 // An agent's dot (the window's, the orb's card and satellites): its state; the watch's word (orange) is above any but
@@ -330,7 +333,7 @@ var SETTINGS_SECTIONS = [
   { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours", "screencast_privacy", "hush_summary"] },
   { title: "Hearing", rows: ["music_pause"] },
   { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites"] },
-  { title: "Agents", rows: ["agents_voice", "progress_digest"] }
+  { title: "Agents", rows: ["agents_voice", "progress_digest", "limit_warn"] }
 ]
 
 // The rows in that order: a row's place on the page (the key cursor) is its index here.
@@ -348,6 +351,7 @@ function settingStep(row, st, dx) {
   if (row === "agents_voice") return { key: row, value: !st.agents_voice, sample: false }
   if (row === "screencast_privacy" || row === "hush_summary") return { key: row, value: !st[row], sample: false }
   if (row === "music_pause") return { key: row, value: !st.music_pause, sample: false }
+  if (row === "limit_warn") return { key: row, value: !st.limit_warn, sample: false }
   var sec = sections(function(t) { return t }).filter(function(x) { return x.key === row })[0]
   if (!sec) return null
   var values = sec.options.map(function(o) { return o.value })

@@ -48,7 +48,10 @@ def status_events(d, last):
         if last.get(field) != v:
             evs.append((field, v))
         last[field] = v
-    last.update(speaking=speaking, voiced=voiced, user_paused=user_paused)
+    limit = d.get("limit") or ""  # фраза «лимит почти кончился»; нет поля (старая служба) — как пустая
+    if last.get("limit", "") != limit:
+        evs.append(("limit", limit))
+    last.update(speaking=speaking, voiced=voiced, user_paused=user_paused, limit=limit)
     return evs
 
 
@@ -87,6 +90,7 @@ class Oma:
         # и в строке состояния вместо счёта (потеря одной самоисправится на следующей)
         self.out = None    # куда идёт её голос (out службы): speakers | headphones
         self.why = ""      # причина тишины (quiet_why службы): "" | dnd | screencast
+        self.limit = ""    # фраза службы «лимит почти кончился» (limit); "" — окна у порога нет
         self.notified = (None, 0.0)  # последнее уведомление: текст, время
         self.ask_id = None  # id набранной реплики из окна, пока команда ask идёт: её строка в чате вернётся с ним
 
@@ -295,6 +299,8 @@ class Oma:
             self.out = ev[1]
         elif kind == "quiet_why":
             self.why = ev[1]
+        elif kind == "limit":
+            self.limit = ev[1]
         elif kind == "mic":
             self.ear.paused = ev[1]  # микрофон пишет другой (voxtype и т. п.) — кадры не слушаем
             await self.act(c.mic_busy(ev[1]))
@@ -348,12 +354,15 @@ class Oma:
 
     def _sound(self):
         """Её звук одной строкой для мозга: тихий режим, его причина и куда идёт голос — из строки состояния службы
-        (quiet, quiet_why, out): мозг не выдумывает причину молчания."""
+        (quiet, quiet_why, out): мозг не выдумывает причину молчания; окно лимита у порога — следующей строкой фраза
+        службы (limit)."""
         if self.conv.quiet:
             why = {"screencast": "показ экрана", "dnd": "не беспокоить"}.get(self.why, "тихий режим")
-            return f"Твой голос: выключен ({why}), ответы только текстом в окне."
-        where = {"speakers": "в динамиках", "headphones": "в наушниках"}.get(self.out)
-        return f"Твой голос: включён, звучит {where}." if where else "Твой голос: включён."
+            sound = f"Твой голос: выключен ({why}), ответы только текстом в окне."
+        else:
+            where = {"speakers": "в динамиках", "headphones": "в наушниках"}.get(self.out)
+            sound = f"Твой голос: включён, звучит {where}." if where else "Твой голос: включён."
+        return f"{sound}\n{self.limit}" if self.limit else sound
 
     async def _deliver(self, text, ctx, voiced, parts, pre, sound, n, id=None):
         """Реплика мозгу или подтверждение поручения, которое передаёт код, — в очереди к мозгу; n — номер её хода,
