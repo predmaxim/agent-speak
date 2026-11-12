@@ -28,13 +28,15 @@ pub struct Config {
     pub hung_after: u64,
     /// процент лимита, с которого Ома считает прогноз и подсказывает агентам
     pub limit_threshold: u64,
+    /// память между днями: служба пишет пересказы дня, таймер сжимает день, мозг получает заметки и свой файл «Помню»
+    pub memory: bool,
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config { speaker: "xenia".into(), rate: "medium".into(),
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: true, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
-            orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95 }
+            orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95, memory: true }
     }
 }
 
@@ -104,6 +106,7 @@ impl Config {
             "watch_every" if in_range(value, 15, 3600) => self.watch_every = value.as_u64().unwrap(),
             "hung_after" if in_range(value, 2, 240) => self.hung_after = value.as_u64().unwrap(),
             "limit_threshold" if in_range(value, 50, 100) => self.limit_threshold = value.as_u64().unwrap(),
+            "memory" if value.is_boolean() => self.memory = value.as_bool().unwrap(),
             _ => return false,
         }
         true
@@ -212,6 +215,10 @@ mod tests {
         assert!(!c.set("progress_digest", &json!("true")));
         assert!(c.orb_over_fullscreen && c.set("orb_over_fullscreen", &json!(false)) && !c.orb_over_fullscreen);
         assert!(!c.set("orb_corner", &json!("top-left")));
+        // память между днями — по умолчанию вкл (дизайн «Джарвис»); старый файл без ключа — тоже вкл
+        assert!(c.memory && c.set("memory", &json!(false)) && !c.memory);
+        assert!(!c.set("memory", &json!("false")));
+        assert!(parse("speaker = \"baya\"").unwrap().memory);
     }
 
     #[test]

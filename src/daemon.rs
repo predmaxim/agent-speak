@@ -245,6 +245,7 @@ struct State {
     next_watch: Instant,
     activity: HashMap<String, u64>, // сессия → последний хук, с
     hints: PathBuf,                  // подсказки агентам про лимит для хука PostToolUse
+    memory_dir: PathBuf,             // память Омы между днями (memory.rs); в тестах — временный каталог
     facts_of: Box<dyn Fn(&Entry, u64) -> Facts>, // факты об агенте для сторожа; в тестах — подделка
     screen: fn(&Pane) -> Option<String>,         // экран терминала — в отдельном потоке, CLI не держит цикл
     shell_idle: Box<dyn Fn(u32) -> bool>,       // оболочка жива и ничего не запускает
@@ -439,6 +440,7 @@ pub fn run() {
         next_watch: Instant::now(),
         activity: HashMap::new(),
         hints: limits::hints_dir(),
+        memory_dir: data.join("memory"),
         facts_of: Box::new(agent_facts),
         screen: |p| mux::screen(p).ok(),
         shell_idle: Box::new(shell_idle),
@@ -900,7 +902,7 @@ impl State {
             wake: "off",
             wake_word: false,
             // память между днями
-            memory: false,
+            memory: self.cfg.memory,
         };
         format!("{}\n", serde_json::to_string(&st).unwrap())
     }
@@ -1060,6 +1062,9 @@ impl State {
         }
         let who = e.title.clone();
         eprintln!("agent-speak: пересказ {:?} {} ({}): {}", d.ask, e.project, &d.session[..8.min(d.session.len())], d.say);
+        if self.cfg.memory && (matches!(d.ask, Ask::Final | Ask::Question) || d.ask == Ask::Step && d.important) {
+            crate::memory::log_news(&self.memory_dir, (self.now_secs)(), &e.project, &format!("{:?}", d.ask), &d.say);
+        }
         self.registry.summary(&d.session, &d.say);
         let kind = match d.ask {
             Ask::Final | Ask::Summary => Some("final"),
@@ -1977,6 +1982,7 @@ mod tests {
             next_watch: Instant::now() + Duration::from_secs(86_400), // tick сторожа не зовёт: тесты зовут watch_tick сами
             activity: HashMap::new(),
             hints: std::env::temp_dir().join(format!("agent-speak-hints-{}-{}", std::process::id(), HINTS_N.fetch_add(1, Ordering::SeqCst))),
+            memory_dir: std::env::temp_dir().join(format!("agent-speak-memory-{}-{}", std::process::id(), HINTS_N.fetch_add(1, Ordering::SeqCst))),
             facts_of: Box::new(blank_facts),
             screen: |_| None,
             shell_idle: Box::new(|_| false),
@@ -3311,6 +3317,24 @@ mod tests {
         assert_eq!(b.len(), 1);
         assert_eq!((b[0]["kind"].as_str(), b[0]["text"].as_str(), b[0]["who"].as_str()), (Some("final"), Some("Фича готова."), Some("T-s")));
         assert_eq!(pop1(&st), "плуг: Фича готова.", "звучит сразу, а не со следующим тиком");
+    }
+
+    #[test]
+    fn digest_logged_for_memory_only_when_on() {
+        // память между днями: итоги, вопросы и важные шаги — в news/<день>.jsonl; промежуточное — нет; память выкл — ничего
+        let mut st = test_state();
+        with_agents(&mut st, &["s", "t"]);
+        st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
+        st.on_digest(dg("t", Ask::Step, false, "Шаг помощника."));
+        st.on_digest(dg("t", Ask::Step, true, "Важный шаг."));
+        let f = st.memory_dir.join("news").join(format!("{}.jsonl", crate::memory::day(1000)));
+        let says: Vec<String> = std::fs::read_to_string(&f).unwrap().lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["say"].as_str().unwrap().to_string()).collect();
+        assert_eq!(says, ["Фича готова.", "Важный шаг."]);
+        st.cfg.memory = false;
+        st.on_digest(dg("s", Ask::Final, false, "Ещё одна."));
+        assert_eq!(std::fs::read_to_string(&f).unwrap().lines().count(), 2);
+        let _ = std::fs::remove_dir_all(&st.memory_dir);
     }
 
     #[test]
