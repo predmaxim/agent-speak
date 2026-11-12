@@ -6,6 +6,7 @@
 - `orca chat --help` перечисляет одну команду: `rename`.
 - `orca terminal show` и `terminal switch` принимают только `--terminal <handle>`. В гайде `orca skills get orca-cli` сказано: «A chat tab has no terminal handle».
 - `orca agent-context --json` (326 команд) не содержит команды, которая назвала бы видимый чат.
+- Нужное Orca уже знает. У процесса чата есть переменная `ORCA_AGENT_SESSION_ID` (`claude_…`, видно в `/proc/<pid>/environ`), но в документации её нет, и agent-speak на неё не опирается. `orca chat rename`, запущенная внутри чата без `--session`, сама находит свой чат («Run inside a chat, it defaults to that chat», `agent-context --json`).
 
 После того как Orca даст такой способ, agent-speak считает «занятым» только видимый чат, а не все чаты окна Orca.
 
@@ -27,3 +28,5 @@ Request: a documented way to read the visible chat, for example:
 - or a subscribable event when the visible tab changes.
 
 It also helps if a chat agent process can tell its own session id (the one `chat rename --session` takes) through a documented environment variable. Then a tool can match the visible chat to a running process.
+
+Orca seems to have this information already. Chat processes already get `ORCA_AGENT_SESSION_ID` (for example `claude_dff6a67c_…`), but the variable is not documented, so tools should not rely on it. `orca chat rename` run inside a chat without `--session` finds that chat by itself ("Run inside a chat, it defaults to that chat"). Documenting the variable and exposing the visible chat would be enough.
