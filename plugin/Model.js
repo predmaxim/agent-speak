@@ -62,9 +62,25 @@ function orbTip(st) {
   var lines = mode === "trouble" ? [["%1 need help", st.trouble]] : mode === "waiting" ? [["%1 waiting", st.waiting]]
     : mode === "quiet" && !st.quiet && why ? [] : [[tips[mode], ""]]   // quiet by reason only: the reason is the line
   if (why) lines.push([why, ""])
+  // the wheel's tempo of this answer (the daemon's rate_now): until the answer ends
+  if (st && TEMPO[st.rate_now]) lines.push([TEMPO[st.rate_now], ""])
   // a limit window near its end: the daemon's phrase, already Russian, so no tr line — it passes tr() as is
   if (st && st.limit) lines.push([st.limit, ""])
   return lines
+}
+
+// The tempo line by the daemon's rate (RATES in src/config.rs).
+var TEMPO = { "x-slow": "Tempo: very slow", slow: "Tempo: slow", medium: "Tempo: normal", fast: "Tempo: fast", "x-fast": "Tempo: very fast" }
+
+// The wheel over the orb: angleDelta.y piles up in `acc`, a step per ±120 (a notch; a touchpad sends many small ones —
+// stepping on each, as the stock PanelSlider does, would jump), the rest is kept for the next turn.
+function wheelStep(acc, dy) {
+  var a = acc + dy, n = Math.trunc(a / 120) || 0   // || 0: no -0
+  return { steps: n, acc: a - n * 120 }
+}
+
+function rateStep(step) {
+  return JSON.stringify({ cmd: "rate_step", step: step }) + "\n"
 }
 
 // An agent's dot (the window's, the orb's card and satellites): its state; the watch's word (orange) is above any but

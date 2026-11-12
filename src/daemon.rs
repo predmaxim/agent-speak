@@ -299,6 +299,7 @@ struct State {
     trouble_sent: usize,                         // trouble последней разосланной строки состояния
     voices: u64,     // реплик Омы (`voice`) с запуска службы — номер последней
     voice_base: u64, // столько их было до запуска нынешней Омы: voiced считается от него
+    rate_now: Option<String>, // темп этого ответа с колеса над орбом; None — из настроек
 }
 
 fn home() -> PathBuf {
@@ -503,6 +504,7 @@ pub fn run() {
         trouble_sent: 0,
         voices: 0,
         voice_base: 0,
+        rate_now: None,
     };
     {
         let tx = tx.clone();
@@ -916,7 +918,8 @@ impl State {
 
     /// Настройки → поток воспроизведения и очередь, затем — подписчикам.
     fn apply(&mut self) {
-        *self.shared.voice.lock().unwrap() = (self.cfg.speaker.clone(), self.cfg.rate.clone());
+        let rate = self.rate_now.clone().unwrap_or_else(|| self.cfg.rate.clone());
+        *self.shared.voice.lock().unwrap() = (self.cfg.speaker.clone(), rate);
         if !self.cfg.agents_voice {
             limits::clear_hints(&self.hints, |_| false); // не следим — и подсказок агентам нет
             self.limits_bad = false;
@@ -980,7 +983,7 @@ impl State {
             orb_moods: self.cfg.orb_moods,
             orb_idle_motion: self.cfg.orb_idle_motion,
             // волна 3 (A): колесо над орбом
-            rate_now: "",
+            rate_now: self.rate_now.as_deref().unwrap_or_default(),
             // волна 3 (B): полосы, знаки, интонация
             news_every: 0,
             earcons: false,
@@ -1308,7 +1311,28 @@ impl State {
     }
 
     /// Заговорила или смолкла (поток воспроизведения).
+    /// Колесо над орбом: темп звучащего ответа на step шагов RATES, на краях упирается. Звучит со следующей фразы:
+    /// темп читается на каждую фразу. Ничего не звучит — колесо ничего не делает.
+    fn rate_step(&mut self, step: i64) {
+        if !self.shared.busy.load(Ordering::SeqCst) && self.oma.state != "speaking" {
+            return;
+        }
+        let rates = crate::config::RATES;
+        let now = self.rate_now.as_deref().unwrap_or(&self.cfg.rate);
+        let i = rates.iter().position(|r| *r == now).unwrap_or(2) as i64;
+        let rate = rates[(i + step).clamp(0, rates.len() as i64 - 1) as usize].to_string();
+        self.shared.voice.lock().unwrap().1 = rate.clone();
+        self.rate_now = Some(rate);
+        self.broadcast();
+    }
+
     fn on_busy(&mut self) {
+        // ответ кончился: всё смолкло и удержания нет (оно стоит, пока Ома думает или говорит, — паузы между её фразами
+        // темп не сбрасывают) — темп из настроек; до speak_news: накопленные новости — уже обычным темпом
+        if self.rate_now.is_some() && self.silent() && !self.shared.queue.lock().unwrap().held() {
+            self.rate_now = None;
+            self.shared.voice.lock().unwrap().1 = self.cfg.rate.clone();
+        }
         // смолкла — накопленное встаёт в очередь сейчас, а не со следующим tick: музыка не вклинивается на 0–1 с
         self.speak_news();
         self.broadcast();
@@ -1709,10 +1733,14 @@ impl State {
             }
             Msg::Read => self.read(),
             Msg::Summary => self.summary(),
+            Msg::RateStep { step } => self.rate_step(step),
             Msg::Hook { kind, payload } => self.on_hook(&kind, &payload),
             Msg::Set { key, value } => {
                 let muted = key == "agents_voice" && value == false && self.cfg.agents_voice;
                 if self.cfg.set(&key, &value) {
+                    if key == "rate" {
+                        self.rate_now = None; // темп выбран в окне — колесо этого ответа он перекрывает
+                    }
                     self.cfg.save();
                     if muted {
                         self.stop(); // выключили озвучку — и то, что звучит, обрываем, а не ждём конца фразы
@@ -2209,6 +2237,7 @@ mod tests {
             trouble_sent: 0,
             voices: 0,
             voice_base: 0,
+            rate_now: None,
         }
     }
 
@@ -3051,6 +3080,46 @@ mod tests {
         let mut l = String::new();
         assert!(r.read_line(&mut l).is_err(), "неверный set ничего не рассылает: {l}");
         assert_eq!((st.cfg.speaker.as_str(), st.cfg.agents_voice), ("baya", true));
+    }
+
+    #[test]
+    fn wheel_sets_rate_of_this_answer_only() {
+        let mut st = test_state();
+        let rate_now = |st: &State| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["rate_now"].clone();
+        st.on_msg(Msg::RateStep { step: 1 });
+        assert_eq!(st.rate_now, None, "ничего не звучит — колесо ничего не делает");
+        st.shared.busy.store(true, Ordering::SeqCst);
+        st.on_msg(Msg::RateStep { step: 1 });
+        assert_eq!((st.rate_now.as_deref(), st.shared.voice.lock().unwrap().1.as_str()), (Some("fast"), "fast"));
+        st.on_msg(Msg::RateStep { step: 5 });
+        assert_eq!(st.rate_now.as_deref(), Some("x-fast"), "на краю упирается");
+        assert_eq!((rate_now(&st), st.cfg.rate.as_str()), ("x-fast".into(), "medium"), "config.toml не пишется");
+        // смолкла между фразами, а удержание стоит (Ома думает или говорит) — темп держится
+        st.shared.busy.store(false, Ordering::SeqCst);
+        st.hold(true);
+        st.on_busy();
+        assert_eq!(st.rate_now.as_deref(), Some("x-fast"));
+        // ответ кончился — темп из настроек
+        st.hold(false);
+        st.on_busy();
+        assert_eq!((st.rate_now.as_deref(), st.shared.voice.lock().unwrap().1.as_str()), (None, "medium"));
+        assert_eq!(rate_now(&st), "");
+        // её речь (oma speaking) без звука службы — колесо работает
+        st.oma.state = "speaking".into();
+        st.on_msg(Msg::RateStep { step: -2 });
+        assert_eq!(st.rate_now.as_deref(), Some("x-slow"));
+    }
+
+    #[test]
+    fn set_rate_drops_wheel_rate() {
+        let _home = TempHome::new("rate-now");
+        let mut st = test_state();
+        st.shared.busy.store(true, Ordering::SeqCst);
+        st.on_msg(Msg::RateStep { step: -1 });
+        st.on_msg(Msg::Set { key: "speaker".into(), value: serde_json::json!("baya") });
+        assert_eq!(st.shared.voice.lock().unwrap().clone(), ("baya".into(), "slow".into()), "другая настройка темп этого ответа не сбрасывает");
+        st.on_msg(Msg::Set { key: "rate".into(), value: serde_json::json!("fast") });
+        assert_eq!((st.rate_now.as_deref(), st.shared.voice.lock().unwrap().1.as_str()), (None, "fast"));
     }
 
     #[test]

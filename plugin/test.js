@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, QUIET_WHY, bubblesKept, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById, toPause, toResume")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, QUIET_WHY, bubblesKept, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById, toPause, toResume, wheelStep, rateStep, TEMPO")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -68,6 +68,17 @@ assert.strictEqual(M.bubblesKept(M.OFFLINE), false)
 assert.deepStrictEqual(M.orbTip(Object.assign({}, st, { waiting: 1, limit: "Лимит Claude почти кончился, сброс в 17:40." })),
   [["%1 waiting", 1], ["Лимит Claude почти кончился, сброс в 17:40.", ""]])
 assert.strictEqual(ru(...M.orbTip(Object.assign({}, st, { limit: "Лимит Codex почти кончился, сброс в 21:00." }))[1]), "Лимит Codex почти кончился, сброс в 21:00.")
+// The wheel over the orb: a step per ±120 of angleDelta (a touchpad sends many small ones), the rest kept
+assert.deepStrictEqual(M.wheelStep(0, 120), { steps: 1, acc: 0 })
+assert.deepStrictEqual(M.wheelStep(0, 40), { steps: 0, acc: 40 })
+assert.deepStrictEqual(M.wheelStep(100, 40), { steps: 1, acc: 20 })
+assert.deepStrictEqual(M.wheelStep(-100, -150), { steps: -2, acc: -10 })
+assert.deepStrictEqual(M.wheelStep(60, -100), { steps: 0, acc: -40 })
+assert.strictEqual(M.rateStep(-1), '{"cmd":"rate_step","step":-1}\n')
+// the wheel's tempo of this answer: one more tooltip line (and the card's), none without it
+assert.deepStrictEqual(M.orbTip(Object.assign({}, st, { oma: "speaking", rate_now: "fast" })), [["Oma is speaking", ""], ["Tempo: fast", ""]])
+assert.deepStrictEqual(M.orbTip(Object.assign({}, st, { oma: "speaking", rate_now: "" })), [["Oma is speaking", ""]])
+assert.deepStrictEqual(Object.keys(M.TEMPO), ["x-slow", "slow", "medium", "fast", "x-fast"])
 let s = []
 for (const id of ["a", "b", "c", "d"]) s = M.pushBubble(s, { id, who: "T", text: id, kind: "status" }, 1000)
 assert.deepStrictEqual(s.map(b => b.id), ["b", "c", "d"])
@@ -147,6 +158,7 @@ for (const oma of ["off", "idle", "loading", "listening", "thinking", "speaking"
   for (const waiting of [0, 2]) for (const quiet of [false, true]) for (const quiet_why of ["", ...Object.keys(M.QUIET_WHY)])
     for (const l of M.orbTip(Object.assign({}, st, { oma, waiting, quiet, quiet_why }))) keys.add(l[0])
 for (const l of M.orbTip(M.OFFLINE)) keys.add(l[0])
+for (const r of Object.keys(M.TEMPO)) keys.add(M.TEMPO[r])
 for (const n of [0, 100, 600, 7300, 3 * 86400]) keys.add(M.ago(0, n)[0])
 for (const a of ["working", "waiting", "done", "idle", "?"]) keys.add(M.stateLabel(a))
 for (const k of keys) assert.ok(Object.prototype.hasOwnProperty.call(I.TABLES.ru, k), "no ru for " + k)

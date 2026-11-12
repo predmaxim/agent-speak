@@ -184,6 +184,21 @@ PanelWindow {
         else if (mouse.button === Qt.MiddleButton && win.link.speech.agents_voice === true) win.link.send(Model.cmd("summary"))
       }
       onCanceled: win.dragging = false
+
+      // The wheel while she speaks: the tempo of this answer (the daemon's rate_now, back to the setting after the
+      // answer), a step per notch; otherwise the wheel passes.
+      property real wheelAcc: 0
+      onWheel: function(wheel) {
+        var st = win.link.speech
+        if (!(st.speaking || st.oma === "speaking")) {
+          wheelAcc = 0
+          wheel.accepted = false
+          return
+        }
+        var w = Model.wheelStep(wheelAcc, wheel.angleDelta.y)
+        wheelAcc = w.acc
+        if (w.steps) win.link.send(Model.rateStep(w.steps))
+      }
     }
   }
 
