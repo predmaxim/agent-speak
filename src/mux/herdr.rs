@@ -126,9 +126,11 @@ fn focused_pane(out: &str) -> Option<String> {
     panes.iter().find(|p| p["focused"] == true)?["pane_id"].as_str().map(str::to_string)
 }
 
-/// Поле ввода Claude Code на экране с цветами (`pane read --format ansi`): строки между двумя последними рамками «────»,
-/// первая — с «❯». Набранное — буквы без своего цвета и не под курсором (инверсия): серую подсказку и заглушку Claude
-/// Code рисует цветом (`38;2;…`), как и Orca их отделяет. Поля на экране нет (меню) — пусто.
+/// Поле ввода Claude Code на экране с атрибутами (`pane read --format ansi`): строки между двумя последними рамками
+/// «────», первая — с «❯». Набранное — буквы не dim и не под курсором (инверсия): серую подсказку и заглушку Claude Code
+/// рисует через dim (первую букву заглушки — инверсией, это курсор), и Orca так же отделяет набранное (`cell.isDim()`,
+/// `terminal-cursor-line-context.js`). Цвет не в счёт: `/команда` и `@файл` Claude подсвечивает цветом. Поля на экране
+/// нет (меню) — пусто.
 fn composer_text(ansi: &str) -> String {
     let rows: Vec<&str> = ansi.lines().collect();
     let plain = |l: &str| strip(l).0;
@@ -143,44 +145,52 @@ fn composer_text(ansi: &str) -> String {
     joined.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Строка с цветами → (весь текст, только буквы без своего цвета и не в инверсии).
+/// Строка с управляющими последовательностями → (весь текст, только буквы не dim и не в инверсии). CSI — до конечного
+/// байта `@`…`~`, OSC (`ESC ]`, ссылки) — до BEL или `ESC \`, их содержимое — не текст.
 fn strip(line: &str) -> (String, String) {
     let (mut all, mut typed) = (String::new(), String::new());
-    let (mut colored, mut inverse) = (false, false);
+    let (mut dim, mut inverse) = (false, false);
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            if chars.next_if_eq(&'[').is_none() {
-                continue;
-            }
-            let mut params = String::new();
-            let mut end = ' ';
-            for p in chars.by_ref() {
-                if p.is_ascii_alphabetic() || p == '~' {
-                    end = p;
-                    break;
-                }
-                params.push(p);
-            }
-            if end == 'm' {
-                let codes: Vec<&str> = params.split(';').collect();
-                let mut i = 0;
-                while i < codes.len() {
-                    match codes[i] {
-                        "" | "0" => (colored, inverse) = (false, false),
-                        "7" => inverse = true,
-                        "27" => inverse = false,
-                        "39" => colored = false,
-                        // цвет текста, фона, подчёркивания: числа после них — его параметры, а не коды
-                        x @ ("38" | "48" | "58") => {
-                            colored |= x == "38";
-                            i += if codes.get(i + 1) == Some(&"2") { 4 } else { 2 };
+            match chars.next() {
+                Some('[') => {
+                    let mut params = String::new();
+                    let mut end = ' ';
+                    for p in chars.by_ref() {
+                        if ('@'..='~').contains(&p) {
+                            end = p;
+                            break;
                         }
-                        c if c.len() == 2 && (c.starts_with('3') || c.starts_with('9')) && c != "39" => colored = true,
-                        _ => {}
+                        params.push(p);
                     }
-                    i += 1;
+                    if end == 'm' {
+                        let codes: Vec<&str> = params.split(';').collect();
+                        let mut i = 0;
+                        while i < codes.len() {
+                            match codes[i] {
+                                "" | "0" => (dim, inverse) = (false, false),
+                                "2" => dim = true,
+                                "22" => dim = false,
+                                "7" => inverse = true,
+                                "27" => inverse = false,
+                                // цвет текста, фона, подчёркивания: числа после них — его параметры, а не коды («2» — не dim)
+                                "38" | "48" | "58" => i += if codes.get(i + 1) == Some(&"2") { 4 } else { 2 },
+                                _ => {}
+                            }
+                            i += 1;
+                        }
+                    }
                 }
+                Some(']') => {
+                    while let Some(p) = chars.next() {
+                        if p == '\x07' || (p == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                Some('(' | ')') => drop(chars.next()), // выбор набора символов: ESC ( B
+                _ => {}
             }
             continue;
         }
@@ -188,7 +198,7 @@ fn strip(line: &str) -> (String, String) {
             continue;
         }
         all.push(c);
-        typed.push(if colored || inverse { ' ' } else { c });
+        typed.push(if dim || inverse { ' ' } else { c });
     }
     (all, typed)
 }
@@ -268,10 +278,14 @@ mod tests {
         let screen = |rows: &[&str]| format!("  ✻ готово\r\n{frame}\n{}\n{frame}\n  \x1b[0m\x1b[38;2;129;131;135m⏸ manual mode on\x1b[0m", rows.join("\n"));
         assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[0m\x1b[7m \x1b[0m\r"])), "", "пустое поле, курсор");
         assert_eq!(composer_text(&screen(&["❯\u{a0}печатаю\x1b[0m\x1b[7m \x1b[0m\r"])), "печатаю");
-        assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[48;2;30;35;97mна фоне\x1b[0m\r"])), "на фоне", "параметры фона — не цвет текста");
+        assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[48;2;2;35;97mна фоне\x1b[0m\r"])), "на фоне", "«2» в параметрах цвета — не dim");
+        assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[38;2;177;185;249m/review\x1b[0m и ещё\r"])), "/review и ещё", "цветное набранное — набранное");
+        assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b]8;;http://x\x07ссылка\x1b]8;;\x1b\\ тут\x1b[1@!\r"])), "ссылка тут!", "OSC и CSI с «@» — не текст");
         assert_eq!(composer_text(&screen(&["❯\u{a0}слово слово\r", "  слово конец\x1b[0m\x1b[7m \x1b[0m\r"])), "слово слово слово конец", "перенос строк");
-        // серая подсказка после хода: курсор на первой букве, остальное серым (вживую не снята — по разбору Orca)
-        assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[7mп\x1b[0m\x1b[38;2;129;131;135mродолжай\x1b[0m\r"])), "");
+        // серая подсказка и заглушка: курсор (инверсия) на первой букве, остальное dim — как рисует Claude Code 2.1.322
+        // (`m(t[0])+we.dim(t.slice(1))`); вживую в herdr не снята — у проб подсказки не было
+        assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[7mп\x1b[0m\x1b[2mродолжай\x1b[22m\r"])), "");
+        assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[7mп\x1b[27m\x1b[2;38;2;129;131;135mродолжай\x1b[0m\r"])), "");
         let menu = " Do you want to proceed?\r\n ❯ 1. Yes\r\n   2. No\r\n Esc to cancel";
         assert_eq!(composer_text(menu), "", "меню — поля нет");
         assert_eq!(composer_text(&format!("{frame}\n ❯ 1. Yes\n{frame}")), "1. Yes", "рамки с «❯» внутри — поле; меню рамками «────» не обводится");

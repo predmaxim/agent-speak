@@ -45,14 +45,15 @@ fn main() {
         // stdout — метка нажатого пункта меню с экрана (одобрение плана включает и auto mode — Ома её зачитывает)
         // --keep: в поле ввода агента есть текст, его сохранить (stash) и вернуть после отправки; без него такой текст — отказ
         Some("tell") if matches!(args.len(), 4..=6) => {
-            let keep = args.iter().any(|a| a == "--keep");
-            let a: Vec<&String> = args.iter().filter(|a| *a != "--keep").collect();
+            let keep = args[1] == "--keep"; // только сразу после tell: текст «--keep» — текст
+            let a = &args[usize::from(keep)..];
             if !matches!(a.len(), 4 | 5) {
                 eprintln!("agent-speak tell [--keep] <session> <option> <text> [метка варианта]");
                 std::process::exit(2);
             }
             let told = a[2].parse().map_err(|_| "option — число".to_string()).and_then(|option| {
-                ipc::request(&Msg::Tell { session: a[1].clone(), option, text: a[3].clone(), expect: a.get(4).map(|s| s.to_string()).unwrap_or_default(), keep })
+                let (session, text, expect) = (a[1].clone(), a[3].clone(), a.get(4).cloned().unwrap_or_default());
+                ipc::request(&if keep { Msg::TellKeep { session, option, text, expect } } else { Msg::Tell { session, option, text, expect } })
             });
             return done(told.map(|chosen| if !chosen.is_empty() { println!("{chosen}") }));
         }

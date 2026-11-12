@@ -860,14 +860,19 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
         match serde_json::from_str::<Msg>(&line) {
             // ответ лёг бы между строками рассылки, а его таймаут записи (общий у клонов сокета) — на подписчика:
             // запрос не исполняется, отказ пишется с таймаутом подписки
-            Ok(Msg::Tell { .. } | Msg::Draft { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. }) if subscribed => {
+            Ok(Msg::Tell { .. } | Msg::TellKeep { .. } | Msg::Draft { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. }) if subscribed => {
                 let err = serde_json::json!({"err": "запрос — отдельным соединением: это подписано на рассылку"});
                 if (&conn).write_all(format!("{err}\n").as_bytes()).is_err() {
                     break;
                 }
             }
-            Ok(Msg::Tell { session, option, text, expect, keep }) => {
-                if !queued(&tx, &conn, move || crate::orders::tell(&session, option, &text, &expect, keep)) {
+            Ok(Msg::Tell { session, option, text, expect }) => {
+                if !queued(&tx, &conn, move || crate::orders::tell(&session, option, &text, &expect, false)) {
+                    break;
+                }
+            }
+            Ok(Msg::TellKeep { session, option, text, expect }) => {
+                if !queued(&tx, &conn, move || crate::orders::tell(&session, option, &text, &expect, true)) {
                     break;
                 }
             }
@@ -2100,8 +2105,8 @@ impl State {
                     eprintln!("agent-speak: later: {e}");
                 }
             }
-            // приходят как Event::Subscribe, Tell (и Draft), Turn, Show, Note и Permission (с подписанного соединения запрос не держится)
-            Msg::Subscribe | Msg::Tell { .. } | Msg::Draft { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. } | Msg::Permission { .. } => {}
+            // приходят как Event::Subscribe, Tell (и TellKeep, Draft), Turn, Show, Note и Permission (с подписанного соединения запрос не держится)
+            Msg::Subscribe | Msg::Tell { .. } | Msg::TellKeep { .. } | Msg::Draft { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. } | Msg::Permission { .. } => {}
         }
         if changes {
             self.broadcast();

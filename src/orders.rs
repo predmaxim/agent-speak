@@ -205,6 +205,10 @@ pub fn tell(session: &str, option: usize, text: &str, expect: &str, keep: bool) 
             if !keep {
                 return Err(format!("{INPUT_BUSY}: «{}»", typed.chars().take(200).collect::<String>()));
             }
+            // stash Claude Code возвращает только после обычного сообщения, не после «/команды» (2.1.322)
+            if one_line(text).starts_with('/') {
+                return Err("после «/команды» Claude Code не вернёт текст из поля (stash возвращается только после обычного сообщения) — сначала разберись с текстом в поле".into());
+            }
             steps.insert(0, Step::Key(Key::CtrlS));
         }
     }
