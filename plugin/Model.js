@@ -21,7 +21,7 @@ function parseLine(line) {
   try { s = JSON.parse(line) } catch (e) { return null }
   if (!s || typeof s !== "object") return null
   if (typeof s.running === "boolean") return { type: "state", value: s }
-  var types = ["agents", "bubble", "chat", "chat_delta", "chats", "ripple", "permissions", "later"]
+  var types = ["agents", "bubble", "chat", "chat_delta", "chats", "ripple", "permissions", "later", "memory"]
   var lists = ["agents", "chats", "permissions", "later"]
   for (var i = 0; i < types.length; i++)
     if (s[types[i]] !== undefined) {
@@ -333,7 +333,7 @@ var SETTINGS_SECTIONS = [
   { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours", "screencast_privacy", "hush_summary"] },
   { title: "Hearing", rows: ["music_pause"] },
   { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites"] },
-  { title: "Agents", rows: ["agents_voice", "progress_digest", "memory", "limit_warn"] }
+  { title: "Agents", rows: ["agents_voice", "progress_digest", "memory", "memory_page", "limit_warn"] }
 ]
 
 // The rows in that order: a row's place on the page (the key cursor) is its index here.
@@ -358,6 +358,17 @@ function settingStep(row, st, dx) {
   var values = sec.options.map(function(o) { return o.value })
   var n = values.length, i = values.indexOf(st[row])
   return { key: row, value: values[i < 0 ? 0 : ((i + dx) % n + n) % n], sample: sec.sample }
+}
+
+// The memory page's rows, top to bottom: the «I remember» lines (as in MEMORY.md, a line is its own id), the day
+// notes (the freshest first, id — the date), «Forget everything»; none before Oma's answer.
+function memoryRows(mem) {
+  if (!mem) return []
+  // through a QML signal the arrays arrive as array-like sequences
+  var list = function(x) { return Array.prototype.slice.call(x || []) }
+  return list(mem.prefs).map(function(p) { return { kind: "pref", id: p, text: p } })
+    .concat(list(mem.days).map(function(d) { return { kind: "day", id: d.id, text: d.text } }))
+    .concat([{ kind: "all", id: "", text: "" }])
 }
 
 // Music pause: Oma took the sound (the daemon's media_hold) — the MPRIS players to pause: playing ones that can pause.

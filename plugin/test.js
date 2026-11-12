@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, QUIET_WHY, bubblesKept, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById, toPause, toResume")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, QUIET_WHY, bubblesKept, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById, toPause, toResume, memoryRows")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -22,6 +22,8 @@ assert.deepStrictEqual(M.parseLine('{"permissions":[{"id":"perm-7"}]}'), { type:
 assert.deepStrictEqual(M.parseLine('{"later":[]}'), { type: "later", value: [] })
 assert.deepStrictEqual(M.parseLine('{"permissions":null}').value, [])
 assert.deepStrictEqual(M.parseLine('{"later":"x"}').value, [])
+// The memory page's answer from Oma: an object, not a list
+assert.deepStrictEqual(M.parseLine('{"memory":{"prefs":[],"days":[]}}'), { type: "memory", value: { prefs: [], days: [] } })
 assert.strictEqual(M.parseLine("{broken"), null)
 assert.strictEqual(M.parseLine("null"), null)
 assert.strictEqual(M.orbMode(M.OFFLINE), "off")
@@ -217,7 +219,7 @@ assert.strictEqual(M.taken("", { key: "chat:1", role: "me", text: "" }), false)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 14)
+assert.strictEqual(M.SETTINGS_ROWS.length, 15)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "kseniya", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
@@ -236,8 +238,10 @@ assert.deepStrictEqual(M.SETTINGS_SECTIONS.find(s => s.title === "Hearing").rows
 assert.deepStrictEqual(M.settingStep("limit_warn", Object.assign({}, cfg, { limit_warn: true }), 1), { key: "limit_warn", value: false, sample: false })
 assert.strictEqual(M.SETTINGS_SECTIONS[4].rows[M.SETTINGS_SECTIONS[4].rows.length - 1], "limit_warn", "«Предупреждать о лимите» — последняя в агентах")
 assert.deepStrictEqual(M.settingStep("memory", Object.assign({}, cfg, { memory: true }), 1), { key: "memory", value: false, sample: false })
-// every row steps but the hours (two dropdowns, the window walks them)
-for (const r of M.SETTINGS_ROWS) assert.strictEqual(M.settingStep(r, cfg, 1) === null, r === "quiet_hours", r)
+// «Память ›» right after its switch: a page, not a value
+assert.strictEqual(M.SETTINGS_ROWS[M.SETTINGS_ROWS.indexOf("memory") + 1], "memory_page")
+// every row steps but the hours (two dropdowns, the window walks them) and the memory page's link
+for (const r of M.SETTINGS_ROWS) assert.strictEqual(M.settingStep(r, cfg, 1) === null, r === "quiet_hours" || r === "memory_page", r)
 
 // The settings page: one fixed order of sections (the Jarvis wave's design); SETTINGS_ROWS are their rows in it
 assert.deepStrictEqual(M.SETTINGS_SECTIONS.map(s => s.title), ["", "Quiet mode", "Hearing", "Orb", "Agents"])
@@ -303,6 +307,15 @@ assert.deepStrictEqual(M.toResume([pl("a", false), pl("b", false), pl("c", false
 assert.deepStrictEqual(M.toResume([pl("a", false, { playbackState: 0 })], ["a"], PAUSED), [], "stopped by the user: not played again")
 assert.deepStrictEqual(M.toResume([pl("a", false), pl("x", true)], ["a"], PAUSED), [], "something plays already: nothing resumes")
 assert.deepStrictEqual(M.toResume([pl("a", true)], ["a"], PAUSED), [], "the user resumed it himself")
+
+// The memory page's rows: «I remember» lines, the days (as Oma sent them, the freshest first), «Forget everything»;
+// nothing before her answer; a QML signal's sequences are lists too
+const mem = { prefs: ["2026-11-10 · «говори короче»"], days: [{ id: "2026-11-11", text: "Агенты: почта — готово." }] }
+assert.deepStrictEqual(M.memoryRows(mem), [{ kind: "pref", id: "2026-11-10 · «говори короче»", text: "2026-11-10 · «говори короче»" },
+  { kind: "day", id: "2026-11-11", text: "Агенты: почта — готово." }, { kind: "all", id: "", text: "" }])
+assert.deepStrictEqual(M.memoryRows({ prefs: { 0: "a", length: 1 }, days: null }).map(r => r.kind), ["pref", "all"])
+assert.deepStrictEqual(M.memoryRows({}).map(r => r.kind), ["all"])
+assert.deepStrictEqual(M.memoryRows(null), [])
 
 // Russian plural forms
 assert.deepStrictEqual([1, 2, 5, 11, 12, 21, 22, 25, 111, 0].map(n => ru("%1 agents", n)),
