@@ -3471,6 +3471,28 @@ def test_auto_memory_reaches_context_and_gate_holds_on_bundled_cli(monkeypatch, 
     assert open(prefs).read() == old + "2026-11-12 · «не напоминай про тесты в site»\n"
 
 
+def test_memory_haiku_call_on_bundled_cli(monkeypatch, tmp_path, capsys):
+    # вызов сжатия — тот же встроенный CLI против поддельного API: Haiku без инструментов и без сессии, цена — в журнал
+    import claude_agent_sdk
+    memory = _mem(monkeypatch, tmp_path)
+    if not os.path.exists(os.path.join(os.path.dirname(claude_agent_sdk.__file__), "_bundled", "claude")):
+        pytest.skip("нет встроенного CLI SDK")
+    memory.ensure()
+    srv, bodies = _fake_api([])
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", f"http://127.0.0.1:{srv.server_address[1]}")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    try:
+        assert run(memory.haiku("Разговоры:\nя: привет")) == "ok"
+    finally:
+        srv.shutdown()
+    (req,) = [b for b in bodies if "привет" in json.dumps(b, ensure_ascii=False)]
+    assert "haiku" in req["model"] and not req.get("tools")
+    assert not os.path.exists(tmp_path / "claude" / "projects"), "сессия не сохраняется"
+    assert "сжатие: вход" in capsys.readouterr().err
+
+
 def test_memory_compress_deletes_old_days_and_stale_news(monkeypatch, tmp_path):
     today = _local(2026, 11, 12, 12)
     memory, _ = _compress_env(monkeypatch, tmp_path, [], {})

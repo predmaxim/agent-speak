@@ -1,0 +1,10 @@
+[Unit]
+Description=agent-speak: память Омы — сжатие дня в 05:00
+
+[Timer]
+# день Омы — с 05:00 до 05:00; пропущенный запуск (выключен, спал) догоняется при включении
+OnCalendar=*-*-* 05:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
