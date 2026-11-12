@@ -176,6 +176,11 @@ impl Presence {
         if self.last_input == 0 { now } else { self.last_input }
     }
 
+    /// Играло ли видео по последнему снимку.
+    pub fn video(&self) -> bool {
+        self.facts.as_ref().is_some_and(|f| f.video)
+    }
+
     pub fn buds(&self) -> Buds {
         self.facts.as_ref().map_or(Buds::Unknown, |f| f.buds)
     }

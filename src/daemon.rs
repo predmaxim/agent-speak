@@ -1757,7 +1757,7 @@ impl State {
 
     /// Снимок сервиса присутствия; битый пропускаем — прежние факты в силе.
     fn on_presence(&mut self, text: &str) {
-        let Some(f) = presence::parse_facts(text) else { return };
+        let Some(mut f) = presence::parse_facts(text) else { return };
         let now = (self.now_secs)();
         // журнал: смена фактов и перерыв в снимках — по ним видно, почему Ома решила «он тут»
         // момент простоя сдвигает каждый ввод — смена фактов без него, в журнале он есть
@@ -1772,6 +1772,9 @@ impl State {
             eprintln!("agent-speak: снимок присутствия: {idle}, {rest}");
         }
         (self.presence_at, self.presence_seen) = (f.at, facts);
+        // видео на паузе от нашей же паузы музыки — не факт о пользователе: пока держим звук, конец видео не «он тут» и
+        // не конец занятости; после паузы правит следующий снимок
+        f.video |= self.cfg.music_pause && self.media_hold() && self.presence.video();
         let back = self.presence.apply(f, now);
         self.on_back(back);
         self.route();
@@ -4086,6 +4089,43 @@ mod tests {
         st.tick();
         let h = holds(&mut r);
         assert!(!h.is_empty() && !h.contains(&false), "музыка не вклинивается: {h:?}");
+    }
+
+    /// Видео играет, итог ждёт; кликом поговорил с Омой, а снимок за разговор — без видео. Что прозвучало к концу разговора.
+    fn video_stopped_during_talk(music_pause: bool) -> (Vec<String>, State, Arc<Mutex<u64>>) {
+        let (mut st, now) = presence_state(1000);
+        st.cfg.music_pause = music_pause;
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 990, "video": true}));
+        final_s(&mut st);
+        st.tick();
+        assert!(texts(&st).is_empty(), "при видео новости молчат");
+        st.on_msg(Msg::VoiceState { state: "listening".into(), talking: true });
+        *now.lock().unwrap() = 1020;
+        snap(&mut st, serde_json::json!({"at": 1020, "idle_since": 1010, "video": false}));
+        st.on_msg(Msg::VoiceState { state: "idle".into(), talking: false });
+        st.tick();
+        (texts(&st), st, now)
+    }
+
+    #[test]
+    fn video_paused_by_media_hold_is_not_user_here() {
+        // видео на паузе от нашей же паузы музыки: его конец — не «он тут», новости ждут конца видео (правило 7)
+        let (said, mut st, now) = video_stopped_during_talk(true);
+        assert!(said.is_empty() && !st.media_hold(), "разговор кончился, пауза снята — новости всё ещё ждут видео");
+        assert_eq!(st.presence.mode(1020), Mode::Busy);
+        snap(&mut st, serde_json::json!({"at": 1025, "idle_since": 1010, "video": true})); // плеер продолжил
+        st.tick();
+        assert!(texts(&st).is_empty());
+        *now.lock().unwrap() = 1100;
+        snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 1010, "video": false})); // видео кончилось само
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."], "после паузы — обычные правила присутствия");
+    }
+
+    #[test]
+    fn video_stopped_without_music_pause_is_user_here() {
+        // пауза музыки выключена: видео за разговор остановил сам пользователь — он тут
+        assert_eq!(video_stopped_during_talk(false).0, ["плуг: Фича готова."]);
     }
 
     #[test]
