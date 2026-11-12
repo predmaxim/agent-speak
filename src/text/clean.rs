@@ -140,24 +140,28 @@ fn mask_keys(w: &str) -> String {
     out
 }
 
-/// Префикс, который остаётся от ключа; не ключ — None. Тело ключа — от 16 знаков и с цифрой: npm_config_cache, sk-learn — не ключи.
+/// Префикс, который остаётся от ключа; не ключ — None. Тело ключа — от 16 знаков и с цифрой: npm_config_cache, sk-learn — не ключи;
+/// у ключа AWS (AKIA, ASIA) — ровно 16 знаков [A-Z2-7], как в правиле gitleaks: цифры в нём может не быть.
 fn key_prefix(token: &str) -> Option<&'static str> {
     if token.starts_with("eyJ") && token.split('.').count() >= 3 && token.split('.').all(|s| !s.is_empty()) {
         return Some("eyJ");
     }
     KEY_PREFIXES.into_iter().find(|p| token.starts_with(p)).filter(|p| {
         let body = &token[p.len()..];
+        if matches!(*p, "AKIA" | "ASIA") {
+            return body.len() == 16 && body.bytes().all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b));
+        }
         body.len() >= 16 && body.bytes().any(|b| b.is_ascii_digit())
     })
 }
 
-/// Блок «-----BEGIN … PRIVATE KEY-----» и всё после него → заголовок и «…».
+/// Блок «-----BEGIN … PRIVATE KEY-----» (и PGP «… PRIVATE KEY BLOCK-----») и всё после него → заголовок и «…».
 fn cut_private_key(text: &str) -> String {
     const BEGIN: &str = "-----BEGIN ";
     let mut from = 0;
     while let Some(i) = text[from..].find(BEGIN) {
         let head = from + i + BEGIN.len();
-        if let Some(j) = text[head..].find("-----").filter(|&j| text[head..head + j].ends_with("PRIVATE KEY")) {
+        if let Some(j) = text[head..].find("-----").filter(|&j| text[head..head + j].trim_end_matches(" BLOCK").ends_with("PRIVATE KEY")) {
             return format!("{}…", &text[..head + j + 5]);
         }
         from = head;
@@ -464,6 +468,9 @@ mod tests {
             ("api_key = abc123 GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789", "api_key = ••• GITHUB_TOKEN=•••"),
             (r#"{"token": "xyz", "x": 1} и https://h.io/cb?token=abc&next=1"#, r#"{"token": ••• "x": 1} и https://h.io/cb?token=•••"#),
             ("вот: -----BEGIN OPENSSH PRIVATE KEY----- b3BlbnNzaC1rZXk -----END OPENSSH PRIVATE KEY----- всё", "вот: -----BEGIN OPENSSH PRIVATE KEY-----…"),
+            ("-----BEGIN PGP PRIVATE KEY BLOCK----- lQOYBGM -----END PGP PRIVATE KEY BLOCK-----", "-----BEGIN PGP PRIVATE KEY BLOCK-----…"),
+            // ключ AWS — ровно 16 знаков [A-Z2-7] после AKIA/ASIA, цифры может не быть
+            ("AKIAABCDEFGHIJKLMNOP и ASIAQRSTUVWXYZ234567", "AKIA… и ASIA…"),
         ] {
             assert_eq!(mask_secrets(raw), want, "{raw}");
         }
@@ -473,6 +480,7 @@ mod tests {
             "id 123e4567-e89b-12d3-a456-426614174000",
             "/home/u/.cache/hf_hub_2024_models_files/x и ./sk-learn-0123456789abcdef",
             "npm_config_cache_directory sk-learn ASIA AKIA max_tokens: 500 token_count=5",
+            "ASIAPACIFICREGIONS AKIAABCDEFGHIJKLMNOPQ ASIA_PACIFIC_REGION_NAMES",
             "-----BEGIN CERTIFICATE----- MIIB -----END CERTIFICATE-----",
             "eyJhbGciOiJIUzI1NiJ9 без подписи",
         ] {

@@ -271,6 +271,7 @@ struct State {
     night_keep: bool,           // тишина настала, пока пользователя нет: накопленное ждёт утра
     quiet_why: QuietWhy,        // тишина по причине: Ома молчит, новости копятся
     quiet_over: bool,           // была тишина по причине: когда снимутся все причины — сводка «Пока было тихо»
+    oma_bubble: (String, String), // пузырь ответа Омы, который приходит кусками: id и весь его текст до сих пор
     facts_src: Box<dyn Fn() -> Option<String>>, // снимок присутствия при старте; в тестах — подделка
     speakers: String,     // динамики ноутбука для Омы, пока наушники вынуты (Event::Outs)
     default_sink: String, // выход звука по умолчанию (Event::Outs); bluez_… — Bluetooth-наушники
@@ -474,6 +475,7 @@ pub fn run() {
         night_keep: false,
         quiet_why: QuietWhy::default(),
         quiet_over: false,
+        oma_bubble: Default::default(),
         facts_src: Box::new(move || std::fs::read_to_string(&facts).ok()),
         speakers: String::new(),
         default_sink: String::new(),
@@ -849,6 +851,9 @@ impl State {
         eprintln!("agent-speak: показ экрана: {why}");
         self.quiet_why.screencast = on;
         self.quiet_over |= on;
+        if !self.quiet_why.any() {
+            self.quiet_over &= !self.board.is_empty(); // за тишину ничего не накопилось — сводки не будет, дальше обычные новости
+        }
         true
     }
 
@@ -1657,7 +1662,22 @@ impl State {
             Msg::Emit { mut line } => {
                 // пузырь орба — простой текст, как у пузырей агентов; чат окна разметку рисует и получает её как есть
                 if let Some(t) = line["bubble"]["text"].as_str() {
-                    line["bubble"]["text"] = clean::mask_secrets(&clean::plain(t)).into();
+                    // ответ Омы приходит кусками (chunker режет и по строкам): блок ключа, «password:» и значение, код в ```
+                    // бывают в разных кусках — маска и разметка судят ответ целиком, пузырь заменяется всем текстом
+                    let whole = if line["bubble"]["append"] == true {
+                        let id = line["bubble"]["id"].as_str().unwrap_or_default();
+                        if self.oma_bubble.0 == id {
+                            self.oma_bubble.1.push('\n');
+                        } else {
+                            self.oma_bubble = (id.into(), String::new());
+                        }
+                        self.oma_bubble.1.push_str(t);
+                        line["bubble"]["append"] = false.into();
+                        self.oma_bubble.1.clone()
+                    } else {
+                        t.to_string()
+                    };
+                    line["bubble"]["text"] = clean::mask_secrets(&clean::plain(&whole)).into();
                     if self.quiet_why.screencast {
                         private_bubble(&mut line["bubble"], None);
                     }
@@ -2145,6 +2165,7 @@ mod tests {
             night_keep: false,
             quiet_why: QuietWhy::default(),
             quiet_over: false,
+            oma_bubble: Default::default(),
             facts_src: Box::new(|| None), // снимка нет — как без сервиса присутствия
             speakers: "speakers".into(),
             default_sink: String::new(),
@@ -2770,7 +2791,7 @@ mod tests {
         // пузырь орба рисуется простым текстом: звёздочки markdown из ответа мозга ему не нужны; чат окна — с разметкой
         st.on_msg(Msg::Emit { line: serde_json::json!({"bubble": {"id": "oma-1", "who": "Ома", "text": "* **Тесты** прошли", "kind": "oma", "append": true}}) });
         let b = next(&mut r);
-        assert_eq!((b["bubble"]["text"].as_str(), b["bubble"]["append"].as_bool()), (Some("Тесты прошли"), Some(true)));
+        assert_eq!((b["bubble"]["text"].as_str(), b["bubble"]["append"].as_bool()), (Some("Тесты прошли"), Some(false)), "пузырь — весь ответ");
         st.on_msg(Msg::Emit { line: serde_json::json!({"chat_delta": {"text": "**жирный**"}}) });
         assert_eq!(next(&mut r)["chat_delta"]["text"], "**жирный**");
     }
@@ -2785,6 +2806,29 @@ mod tests {
         st.on_msg(Msg::Emit { line: serde_json::json!({"bubble": {"id": "oma-1", "who": "Ома", "text": "Вписала password=hunter2", "kind": "oma", "append": true}}) });
         let b = bubbles(&mut r);
         assert_eq!(b.iter().map(|b| b["text"].as_str().unwrap()).collect::<Vec<_>>(), ["Нужен токен ghp_…, дать доступ?", "Вписала password=•••"]);
+    }
+
+    #[test]
+    fn oma_bubble_masks_secrets_across_chunks() {
+        // ответ Омы приходит в пузырь кусками (chunker режет и по строкам): маска и разметка судят ответ целиком
+        let mut st = test_state();
+        let mut r = sub(&mut st);
+        let chunk = |st: &mut State, id: &str, t: &str| {
+            st.on_msg(Msg::Emit { line: serde_json::json!({"bubble": {"id": id, "who": "Ома", "text": t, "kind": "oma", "append": true}}) })
+        };
+        chunk(&mut st, "oma-1", "Вот ключ:");
+        chunk(&mut st, "oma-1", "-----BEGIN OPENSSH PRIVATE KEY-----");
+        chunk(&mut st, "oma-1", "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ");
+        chunk(&mut st, "oma-1", "-----END OPENSSH PRIVATE KEY-----");
+        chunk(&mut st, "oma-2", "Пароль базы password:");
+        chunk(&mut st, "oma-2", "hunter2, а код:");
+        chunk(&mut st, "oma-2", "```");
+        chunk(&mut st, "oma-2", "let x = 1;");
+        let b = bubbles(&mut r);
+        let shown: Vec<(&str, &str, bool)> = b.iter().map(|b| (b["id"].as_str().unwrap(), b["text"].as_str().unwrap(), b["append"].as_bool().unwrap())).collect();
+        assert!(shown.iter().all(|(_, t, append)| !t.contains("b3Blbn") && !t.contains("hunter2") && !t.contains("let x") && !append), "{shown:?}");
+        assert_eq!(shown[3], ("oma-1", "Вот ключ: -----BEGIN OPENSSH PRIVATE KEY-----…", false), "пузырь — весь ответ до сих пор");
+        assert_eq!(shown.last().unwrap().1, "Пароль базы password: ••• а код:");
     }
 
     #[test]
@@ -4855,6 +4899,23 @@ mod tests {
         sharing(&mut st, 1030, false);
         st.tick();
         assert!(texts(&st).is_empty() && !st.quiet_over, "ничего не копилось — Ома молчит, сводка не ждёт следующих новостей");
+    }
+
+    #[test]
+    fn nothing_kept_while_busy_no_summary_later() {
+        // показ при созвоне: показ кончился с пустой доской, созвон идёт дальше — итог после созвона звучит как есть
+        let (mut st, now) = presence_state(1000);
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 0, "screencast": true, "mic": true}));
+        *now.lock().unwrap() = 1030;
+        snap(&mut st, serde_json::json!({"at": 1030, "idle_since": 0, "mic": true}));
+        st.tick();
+        assert!(!st.quiet_over, "ничего не копилось — сводки не будет");
+        *now.lock().unwrap() = 1500;
+        final_s(&mut st);
+        st.tick();
+        snap(&mut st, serde_json::json!({"at": 1500, "idle_since": 0}));
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
     }
 
     #[test]
