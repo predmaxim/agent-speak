@@ -47,6 +47,17 @@ ST=$DATA/smart-turn-v3.2-cpu.onnx
     echo "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f  $ST.tmp" | sha256sum -c --quiet && mv "$ST.tmp" "$ST"
 } || { rm -f "$ST.tmp"; echo "Smart Turn не скачался — Ома будет ждать паузу" >&2; }
 
+# Слово-побудка «Ома», первая ступень: Vosk small-ru 0.22 (alphacephei.com/vosk/models, Apache 2.0), 45 МБ; имя
+# каталога — MODEL в python/agent_voice/wake.py. Нет модели — побудки нет (в окне «нет модели»), остальное работает.
+# Распаковка — zipfile из voice-venv (пути вне каталога он не пишет), во временный каталог и затем на место
+VM=$DATA/vosk-model-small-ru-0.22
+[[ -d $VM ]] || {
+  rm -rf "$VM.tmp" && curl -fsSL -o "$VM.zip.tmp" https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip &&
+    echo "961d5ff98a17f4aa6de69864d0aa71fa5bac682301d2b5d17a3f24c5c99a46d4  $VM.zip.tmp" | sha256sum -c --quiet &&
+    "$DATA/voice-venv/bin/python" -I -m zipfile -e "$VM.zip.tmp" "$VM.tmp" && mv "$VM.tmp/vosk-model-small-ru-0.22" "$VM" &&
+    rm -rf "$VM.tmp" "$VM.zip.tmp"
+} || { rm -rf "$VM.tmp" "$VM.zip.tmp"; echo "модель Vosk не скачалась или не та (sha256) — слова «Ома» не будет" >&2; }
+
 # Хуки Claude Code, которые install.sh ставит сам (README, «Хуки»): «вызов инструмента не отработал» — орб «поник»;
 # «запрос разрешения» — карточка с кнопками в окне и пузыре Омы (хук держит запрос, пока он жив, до timeout);
 # SessionStart — строка агенту, как писать Оме (`agent-speak note`). Каждый дописывается один раз: есть команда этого

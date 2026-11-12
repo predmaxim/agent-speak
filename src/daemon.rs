@@ -202,6 +202,8 @@ struct Oma {
     ear_in: String,            // её вход (Msg::Ear): "" — вход по умолчанию
     listen_until: Option<f64>, // до когда она слушает, эпоха, с
     listen_secs: f64,          // длина нынешнего окна слушания, с
+    wake: String,              // слово-побудка у неё (Msg::Ear): "" — ещё не сказала
+    wake_sent: bool,           // последнее {"do":"wake"} ей; новая Ома начинает без побудки — как false
 }
 
 /// Пузырь, пока экран показывают: вместо текста — метка по виду, у агента — папка проекта, а не заголовок сессии
@@ -954,6 +956,33 @@ impl State {
         self.quiet() || self.quiet_why.any()
     }
 
+    /// Слово-побудка разрешена: настройка, не тихо (и по причине) и экран не заблокирован; остальное (сеть, mute, микрофон) — у Омы.
+    fn wake_on(&self) -> bool {
+        self.cfg.wake_word && !self.muted() && !self.presence.locked((self.now_secs)())
+    }
+
+    /// Побудка для строки состояния: выключена, тихо — от службы; иначе — что сказала Ома (on или почему нет).
+    fn wake(&self) -> &str {
+        if !self.cfg.wake_word {
+            "off"
+        } else if self.muted() {
+            "quiet"
+        } else if self.oma.wake.is_empty() {
+            "off"
+        } else {
+            &self.oma.wake
+        }
+    }
+
+    /// Разрешение побудки — Оме при смене (из tick: настройка, тишина, блокировка); новой — первое «можно».
+    fn sync_wake(&mut self) {
+        let on = self.wake_on();
+        if self.oma.stdin.is_some() && self.oma.wake_sent != on {
+            self.oma.wake_sent = on;
+            self.oma_send(&serde_json::json!({"do": "wake", "on": on}));
+        }
+    }
+
     /// Причины тишины — по фактам: показ экрана из свежего снимка присутствия, если включена приватность.
     /// Сменилась — true: очередь и подписчики — за вызывающим.
     fn sync_quiet_why(&mut self) -> bool {
@@ -1119,8 +1148,8 @@ impl State {
             permission_buttons: self.cfg.permission_buttons,
             agent_inbox: self.cfg.agent_inbox,
             // волна 5: слово-побудка
-            wake: "off",
-            wake_word: false,
+            wake: self.wake(),
+            wake_word: self.cfg.wake_word,
             // память между днями
             memory: self.cfg.memory,
             // волна 5: кнопка наушников
@@ -1744,6 +1773,7 @@ impl State {
         self.oma.talking = false;
         // её слуха нет; новая начинает строку ear с этих же пустых значений
         (self.oma.ear_in, self.oma.listen_until, self.oma.listen_secs) = (String::new(), None, 0.0);
+        (self.oma.wake, self.oma.wake_sent) = (String::new(), false);
         self.listen_sent = false; // ответа на listen от упавшей не будет
         self.hold(false);
         self.purge();
@@ -1870,6 +1900,7 @@ impl State {
         if self.media_hold() != self.hold_sent {
             self.broadcast();
         }
+        self.sync_wake();
     }
 
     fn on_msg(&mut self, m: Msg) {
@@ -1946,8 +1977,8 @@ impl State {
             Msg::Read => self.read(),
             Msg::Summary => self.summary(),
             Msg::RateStep { step } => self.rate_step(step),
-            Msg::Ear { ear_in, until, secs } => {
-                (self.oma.ear_in, self.oma.listen_until, self.oma.listen_secs) = (ear_in, until, secs);
+            Msg::Ear { ear_in, until, secs, wake } => {
+                (self.oma.ear_in, self.oma.listen_until, self.oma.listen_secs, self.oma.wake) = (ear_in, until, secs, wake);
                 self.broadcast();
             }
             Msg::Hook { kind, payload } => self.on_hook(&kind, &payload),
@@ -2030,7 +2061,11 @@ impl State {
         // видео на паузе от нашей же паузы музыки — не факт о пользователе: пока держим звук, конец видео не «он тут» и
         // не конец занятости; после паузы правит следующий снимок
         f.video |= self.cfg.music_pause && self.media_hold() && self.presence.video();
+        let buds = self.presence.buds();
         let back = self.presence.apply(f, now);
+        if self.presence.buds() != buds && self.oma.stdin.is_some() {
+            self.oma_send(&serde_json::json!({"do": "rewire"})); // в динамиках её голос побудкой не слушается — пересчитать
+        }
         self.on_back(back);
         self.route();
         if self.sync_quiet_why() {
@@ -2690,7 +2725,8 @@ mod tests {
         let shared = Arc::new(Shared::new(Queue::new(), "xenia".into(), "medium".into()));
         State {
             // без бюджета пачки: тесты речи — по порядку новостей; бюджет проверяют свои тесты (news_every)
-            cfg: Config { news_every: 0, ..Config::default() },
+            // без побудки: тесты слушания сверяют строки Оме дословно; побудку проверяют свои тесты (wake_word)
+            cfg: Config { news_every: 0, wake_word: false, ..Config::default() },
             shared,
             terms: Arc::new(Mutex::new(Terms::from_str(""))),
             learn: mpsc::channel().0,
@@ -3794,16 +3830,75 @@ mod tests {
         let mut st = test_state();
         let mut r = sub(&mut st);
         hello(&mut r);
-        st.on_msg(Msg::Ear { ear_in: "alsa_input.pci".into(), until: Some(1794812345.2), secs: 20.0 });
+        st.on_msg(Msg::Ear { ear_in: "alsa_input.pci".into(), until: Some(1794812345.2), secs: 20.0, wake: String::new() });
         let v = next(&mut r);
         assert_eq!((v["ear_in"].as_str(), v["listen_until"].as_f64(), v["listen_secs"].as_f64()), (Some("alsa_input.pci"), Some(1794812345.2), Some(20.0)));
-        st.on_msg(Msg::Ear { ear_in: String::new(), until: None, secs: 0.0 });
+        st.on_msg(Msg::Ear { ear_in: String::new(), until: None, secs: 0.0, wake: String::new() });
         assert!(next(&mut r)["listen_until"].is_null(), "заговорил или слух закрыт — дуги нет");
         // упала посреди слушания — её слуха нет: новая Ома начинает с тех же пустых значений, что и служба
-        st.on_msg(Msg::Ear { ear_in: "alsa_input.pci".into(), until: Some(1794812345.2), secs: 20.0 });
+        st.on_msg(Msg::Ear { ear_in: "alsa_input.pci".into(), until: Some(1794812345.2), secs: 20.0, wake: String::new() });
         st.oma_down();
         let v = serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap();
         assert_eq!((v["ear_in"].as_str(), v["listen_until"].is_null(), v["listen_secs"].as_f64()), (Some(""), true, Some(0.0)));
+    }
+
+    #[test]
+    fn wake_word_follows_setting_quiet_and_lock() {
+        // разрешение побудки — Оме: нынешней первый раз, затем только при смене (настройка, тишина, блокировка);
+        // наушники вставили или вынули — rewire
+        let h = TempHome::new("oma-wake");
+        std::fs::create_dir_all(&h.dir).unwrap();
+        let out = h.dir.join("in.txt");
+        let mut st = test_state();
+        st.cfg.wake_word = true;
+        st.voice_cmd = vec!["sh".into(), "-c".into(), format!("cat > {}", out.display())];
+        st.oma_spawn();
+        st.tick();
+        st.tick();
+        st.on_msg(Msg::Set { key: "quiet_override".into(), value: serde_json::json!("on") });
+        st.tick();
+        st.on_msg(Msg::Set { key: "quiet_override".into(), value: serde_json::json!("") });
+        st.tick();
+        snap(&mut st, serde_json::json!({"at": 1000, "locked": true, "buds": "in"}));
+        st.tick();
+        snap(&mut st, serde_json::json!({"at": 1000, "locked": false, "buds": "out"}));
+        st.tick();
+        st.on_msg(Msg::Set { key: "wake_word".into(), value: false.into() });
+        st.tick();
+        drop(st);
+        let want = ["on", "off", "on", "rewire", "off", "rewire", "on", "off"]; // первый снимок с наушниками — тоже смена
+        let end = Instant::now() + Duration::from_secs(2);
+        let sent = || -> Vec<String> {
+            std::fs::read_to_string(&out).unwrap_or_default().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter_map(|v| match v["do"].as_str() {
+                    Some("wake") => Some(if v["on"] == true { "on" } else { "off" }.to_string()),
+                    Some("rewire") => Some("rewire".into()),
+                    _ => None,
+                })
+                .collect()
+        };
+        while sent().len() < want.len() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(sent(), want);
+    }
+
+    #[test]
+    fn status_line_names_why_no_wake() {
+        let mut st = test_state();
+        st.cfg.wake_word = true;
+        assert_eq!((status_json(&st)["wake"].as_str(), status_json(&st)["wake_word"].as_bool()), (Some("off"), Some(true)), "Ома не сказала — off");
+        st.on_msg(Msg::Ear { ear_in: "alsa_input.pci".into(), until: None, secs: 0.0, wake: "battery".into() });
+        assert_eq!(status_json(&st)["wake"], "battery");
+        st.cfg.quiet_override = "on".into();
+        assert_eq!(status_json(&st)["wake"], "quiet", "тихо — причина у службы, Ома ещё могла не ответить");
+        st.cfg.quiet_override.clear();
+        st.cfg.wake_word = false;
+        assert_eq!((status_json(&st)["wake"].as_str(), status_json(&st)["wake_word"].as_bool()), (Some("off"), Some(false)));
+        st.cfg.wake_word = true;
+        st.oma_down();
+        assert_eq!(status_json(&st)["wake"], "off", "упала — побудки нет; новой разрешение пошлют заново");
+        assert!(!st.oma.wake_sent);
     }
 
     #[test]

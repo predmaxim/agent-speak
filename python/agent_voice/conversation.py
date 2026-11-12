@@ -13,6 +13,7 @@ import re
 import time
 
 from .chunker import Chunker
+from .wake import strip_wake
 
 SEND_PAUSE = 1.3   # с от прихода фразы до отправки (VAD уже ждал свою паузу)
 # Smart Turn (turn.py) — договорил ли: уверен — сразу; оборвал на полуслове — ждать продолжения дольше; не знает — как было
@@ -280,11 +281,24 @@ class Conversation:
         self.quiet_at = self.window["until"]  # после _to: окно — ровно secs, а не WINDOW_END
         return acts
 
+    def wake(self, rest):
+        """Слово-побудка в покое; rest — что после «Ома» во второй ступени. «Тут», «да» — «я на месте» без разговора;
+        иначе — разговор, как по клику, но слух уже открыт (его вход не меняется). Только имя — щелчок «слушаю»;
+        с продолжением — без щелчка: фразу целиком распознает слух, и она уйдёт, как после клика."""
+        if self.active or self.quiet or self.mic:
+            return []
+        if is_yes(rest):
+            return [("presence", "here"), ("chime",)]
+        acts = self._stop_turn()  # «Ома, стоп» под новости в наушниках — как клик: звук обрывается
+        self.active = True
+        return acts + ([] if rest.strip() else [("chime",)]) + self._to("listening")
+
     def end(self, stop=True):
         """Конец разговора: оборвать ход (stop), выбросить черновик, закрыть слух."""
         acts = (self._stop_turn() if stop else []) + self._drop()
         self.quiet_at = None
         self.window = None
+        self.mic = False  # занятость микрофона — для разговора: следующий узнает её заново (Oma.mic_now)
         if self.active:
             self.active = False
             acts.append(("ear", False))
@@ -360,7 +374,7 @@ class Conversation:
             pre = self._barge() if self.state == "speaking" else self._stop_turn() + self._to("listening")
         if n <= self.cut or self.state != "listening":
             return pre
-        t = text.strip()
+        t = strip_wake(text)  # «Ома, …» — обращение, не реплика: в окне «Ты тут?» «Ома, тут» — это «тут»
         if len(t) < 2 or is_noise(t):
             return [("draft", self.draft, self.hearing)] if self.draft or self.hearing else [("drop_draft",)]
         self.draft = f"{self.draft} {t}".strip()

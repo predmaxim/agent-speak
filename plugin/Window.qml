@@ -1628,6 +1628,18 @@ Item {
                 }
               }
 
+              SettingRow {
+                key: "wake_word"
+                label: root.tr("Answer to «Oma»")
+                // on, but not hearing now (battery, the mic, no model): the note says why
+                note: Model.wakeNote(root.speech) ? root.tr(Model.wakeNote(root.speech)) : ""
+                ToggleSwitch {
+                  checked: root.speech.wake_word === true
+                  foreground: root.fg
+                  onToggled: root.step("wake_word", 1)
+                }
+              }
+
               PanelSectionHeader {
                 leftPadding: Style.spacing.rowPaddingX
                 topPadding: Style.space(14)

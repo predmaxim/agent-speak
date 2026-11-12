@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, QUIET_WHY, bubblesKept, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById, toPause, toResume, memoryRows, wheelStep, rateStep, TEMPO, level, listenLeft, seenDone, doneUnseen, NEWS_EVERY, newsEvery, topRows, permBubbles, withPerms, permit, laterCancel, dropText, attachText")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, QUIET_WHY, bubblesKept, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById, toPause, toResume, memoryRows, wheelStep, rateStep, TEMPO, level, listenLeft, seenDone, doneUnseen, NEWS_EVERY, newsEvery, topRows, permBubbles, withPerms, permit, laterCancel, dropText, attachText, WAKE, wakeNote")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -187,6 +187,18 @@ const status = /struct Status<'a> \{([\s\S]*?)\n\}/.exec(fs.readFileSync(__dirna
 assert.deepStrictEqual(Object.keys(M.OFFLINE), [...status.matchAll(/^\s*(\w+):/gm)].map(m => m[1]))
 assert.strictEqual(M.OFFLINE.listen_until, null)
 assert.strictEqual(M.OFFLINE.wake, "off")
+// The wake word: at rest the orb stands still (§9), its tooltip says «hears its name» or why not; nothing while she
+// listens, quiet (the quiet line says it) or the setting is off
+assert.deepStrictEqual(M.orbTip(Object.assign({}, st, { wake: "on" })), [["Oma", ""], ["Hears its name", ""]])
+assert.deepStrictEqual(M.orbTip(Object.assign({}, st, { wake: "battery" })), [["Oma", ""], ["Not hearing its name: on battery", ""]])
+assert.deepStrictEqual(M.orbTip(Object.assign({}, st, { wake: "on", waiting: 1 })), [["%1 waiting", 1], ["Hears its name", ""]])
+for (const wake of ["off", "quiet", ""]) assert.deepStrictEqual(M.orbTip(Object.assign({}, st, { wake })), [["Oma", ""]], wake)
+assert.deepStrictEqual(M.orbTip(Object.assign({}, st, { wake: "on", oma: "listening" })), [["Oma is listening", ""]])
+assert.deepStrictEqual(Object.keys(M.WAKE), ["on", "battery", "muted", "busy", "no_model", "no_mic"])
+assert.strictEqual(ru(...M.orbTip(Object.assign({}, st, { wake: "battery" }))[1]), "Не слышит имя: от батареи")
+assert.strictEqual(M.wakeNote(Object.assign({}, st, { wake_word: true, wake: "no_mic" })), "Not hearing its name: no built-in mic")
+assert.strictEqual(M.wakeNote(Object.assign({}, st, { wake_word: true, wake: "on" })), "", "works — no note")
+assert.strictEqual(M.wakeNote(Object.assign({}, st, { wake_word: false, wake: "battery" })), "", "off — no note")
 
 // Every key from orbTip, ago and stateLabel has a Russian line
 const keys = new Set()
@@ -196,6 +208,7 @@ for (const oma of ["off", "idle", "loading", "listening", "thinking", "speaking"
 for (const l of M.orbTip(M.OFFLINE)) keys.add(l[0])
 for (const l of M.orbTip(Object.assign({}, st, { oma: "listening" }), true)) keys.add(l[0])
 for (const r of Object.keys(M.TEMPO)) keys.add(M.TEMPO[r])
+for (const w of Object.keys(M.WAKE)) keys.add(M.WAKE[w])
 for (const n of [0, 100, 600, 7300, 3 * 86400]) keys.add(M.ago(0, n)[0])
 for (const a of ["working", "waiting", "done", "idle", "?"]) keys.add(M.stateLabel(a))
 for (const k of keys) assert.ok(Object.prototype.hasOwnProperty.call(I.TABLES.ru, k), "no ru for " + k)
@@ -287,7 +300,7 @@ assert.strictEqual(M.taken("", { key: "chat:1", role: "me", text: "" }), false)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 24)
+assert.strictEqual(M.SETTINGS_ROWS.length, 25)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "kseniya", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
@@ -306,8 +319,9 @@ assert.deepStrictEqual(M.settingStep("agents_voice", Object.assign({}, cfg, { ag
 assert.deepStrictEqual(M.settingStep("screencast_privacy", Object.assign({}, cfg, { screencast_privacy: true }), 1), { key: "screencast_privacy", value: false, sample: false })
 assert.deepStrictEqual(M.settingStep("hush_summary", cfg, 1), { key: "hush_summary", value: true, sample: false })
 assert.deepStrictEqual(M.settingStep("music_pause", Object.assign({}, cfg, { music_pause: true }), 1), { key: "music_pause", value: false, sample: false })
-assert.deepStrictEqual(M.SETTINGS_SECTIONS.find(s => s.title === "Hearing").rows, ["music_pause", "headset_button"])
+assert.deepStrictEqual(M.SETTINGS_SECTIONS.find(s => s.title === "Hearing").rows, ["music_pause", "headset_button", "wake_word"])
 assert.deepStrictEqual(M.settingStep("headset_button", Object.assign({}, cfg, { headset_button: true }), 1), { key: "headset_button", value: false, sample: false })
+assert.deepStrictEqual(M.settingStep("wake_word", Object.assign({}, cfg, { wake_word: true }), 1), { key: "wake_word", value: false, sample: false })
 assert.deepStrictEqual(M.settingStep("limit_warn", Object.assign({}, cfg, { limit_warn: true }), 1), { key: "limit_warn", value: false, sample: false })
 assert.strictEqual(M.SETTINGS_SECTIONS[4].rows[M.SETTINGS_SECTIONS[4].rows.length - 1], "limit_warn", "«Предупреждать о лимите» — последняя в агентах")
 assert.deepStrictEqual(M.settingStep("memory", Object.assign({}, cfg, { memory: true }), 1), { key: "memory", value: false, sample: false })

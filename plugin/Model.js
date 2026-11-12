@@ -65,11 +65,22 @@ function orbTip(st, muted) {
   var lines = mode === "trouble" ? [["%1 need help", st.trouble]] : mode === "waiting" ? [["%1 waiting", st.waiting]]
     : mode === "quiet" && !st.quiet && why ? [] : [[tips[mode], ""]]   // quiet by reason only: the reason is the line
   if (why) lines.push([why, ""])
+  // the wake word at rest: «hears its name» or why not; she listens, quiet or the setting is off — no line (README)
+  if (st && WAKE[st.wake] && ["idle", "waiting", "trouble"].indexOf(mode) >= 0) lines.push([WAKE[st.wake], ""])
   // the wheel's tempo of this answer (the daemon's rate_now): until the answer ends
   if (st && TEMPO[st.rate_now]) lines.push([TEMPO[st.rate_now], ""])
   // a limit window near its end: the daemon's phrase, already Russian, so no tr line — it passes tr() as is
   if (st && st.limit) lines.push([st.limit, ""])
   return lines
+}
+
+// The wake word (the daemon's wake) -> its line; "off" (the setting, a lock, no answer yet) and "quiet" have none.
+var WAKE = { on: "Hears its name", battery: "Not hearing its name: on battery", muted: "Not hearing its name: mic is off",
+  busy: "Not hearing its name: mic is busy", no_model: "Not hearing its name: no model", no_mic: "Not hearing its name: no built-in mic" }
+
+// The note under «Answer to «Oma»»: why it does not work now; "" — it works or is switched off.
+function wakeNote(st) {
+  return st && st.wake_word === true && st.wake !== "on" && WAKE[st.wake] ? WAKE[st.wake] : ""
 }
 
 // The ear meter: PwNodePeakMonitor's peak (linear 0..1) in decibels, −50 dB → 0 … −10 dB → 1 (a calibration for the
@@ -439,7 +450,7 @@ function sections(tr) {
 var SETTINGS_SECTIONS = [
   { title: "", rows: ["speaker", "rate", "intonation", "earcons"] },
   { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours", "screencast_privacy", "hush_summary"] },
-  { title: "Hearing", rows: ["music_pause", "headset_button"] },
+  { title: "Hearing", rows: ["music_pause", "headset_button", "wake_word"] },
   { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites", "orb_moods", "orb_idle_motion"] },
   { title: "Agents", rows: ["agents_voice", "progress_digest", "news_every", "done_facts", "permission_buttons", "memory", "memory_page", "agent_inbox", "limit_warn"] }
 ]
@@ -466,7 +477,7 @@ function settingStep(row, st, dx) {
   if (row === "progress_digest") return { key: row, value: !st.progress_digest, sample: false }
   if (row === "agents_voice") return { key: row, value: !st.agents_voice, sample: false }
   if (row === "screencast_privacy" || row === "hush_summary") return { key: row, value: !st[row], sample: false }
-  if (row === "music_pause" || row === "headset_button") return { key: row, value: !st[row], sample: false }
+  if (row === "music_pause" || row === "headset_button" || row === "wake_word") return { key: row, value: !st[row], sample: false }
   if (row === "limit_warn" || row === "agent_inbox") return { key: row, value: !st[row], sample: false }
   if (row === "memory") return { key: row, value: !st.memory, sample: false }
   if (row === "intonation" || row === "earcons" || row === "permission_buttons") return { key: row, value: !st[row], sample: false }

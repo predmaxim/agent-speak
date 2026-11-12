@@ -4,8 +4,9 @@ from collections import deque
 
 
 class Segmenter:
-    def __init__(self, start_frames=8, end_frames=22, preroll=16, threshold=0.5):
+    def __init__(self, start_frames=8, end_frames=22, preroll=16, threshold=0.5, keep=None):
         self.start_frames, self.end_frames, self.threshold = start_frames, end_frames, threshold
+        self.keep = keep                   # кадров идущей фразы не больше (None — все): слух на «Ома» под телевизором
         self.pre = deque(maxlen=preroll)   # тишина до речи: начало слова не обрезается; 512 мс — VAD под шумом «мигает» на первом слоге
         self.run = []                      # кадры кандидата в речь
         self.buf = None                    # идущая фраза
@@ -21,7 +22,7 @@ class Segmenter:
             self.run.append(frame)
             if len(self.run) < self.start_frames:
                 return []
-            self.buf = list(self.pre) + self.run
+            self.buf = deque(list(self.pre) + self.run, maxlen=self.keep)
             self.pre.clear()
             self.run, self.silence = [], 0
             return [("start",)]
