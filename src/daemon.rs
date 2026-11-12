@@ -258,6 +258,7 @@ struct State {
     subs: Vec<UnixStream>,
     projects: HashMap<String, String>, // сессия → имя папки проекта (из хуков и окна в фокусе)
     helper_turn: HashMap<String, bool>, // ход начал отчёт помощника (true), пока пользователь в нём не писал
+    turn_at: HashMap<String, u64>, // сессия → время последнего промпта пользователя, эпоха с: начало хода фактам git (лента в FEED_MAX строк его теряет)
     oma: Oma,
     oma_paused: bool, // очередь на паузе по перебиву Омы, а не по кнопке: снимает она сама или конец разговора
     voice_cmd: Vec<String>, // запуск Омы; в тестах — заглушка
@@ -467,6 +468,7 @@ pub fn run() {
         subs: Vec::new(),
         projects: HashMap::new(),
         helper_turn: HashMap::new(),
+        turn_at: HashMap::new(),
         oma: Oma { state: "off".into(), ..Default::default() },
         oma_paused: false,
         voice_cmd: vec![
@@ -1241,7 +1243,7 @@ impl State {
 
     /// Задание на пересказ; сессии не из реестра (не пользователя) не пересказываем. fallback — фраза без модели;
     /// у Ask::Final её всегда ставит круг DONE, вызывающий передаёт None. cwd — папка агента из хука Stop: итогу Claude
-    /// воркер добавит факты git с его последнего промпта (done_facts).
+    /// воркер добавит факты git с его последнего промпта (done_facts; время промпта — turn_at, без него — лента).
     fn ask(&mut self, session: &str, ask: Ask, text: &str, fallback: Option<String>, cwd: Option<&str>) {
         debug_assert!(ask != Ask::Final || fallback.is_none(), "запасную фразу итога ставит круг DONE");
         if !self.cfg.agents_voice {
@@ -1253,8 +1255,8 @@ impl State {
         let context = prompt.chars().skip(skip).collect();
         // итог без модели — «готово» по кругу; круг идёт, только когда пересказ правда заказан
         let fallback = if ask == Ask::Final { Some(self.rotor.next(phrases::DONE).into()) } else { fallback };
-        // ход — с промпта пользователя (у Codex хука промпта нет: без него и фактов нет)
-        let since = e.feed.iter().rev().find(|l| l.kind == "prompt").map_or(0, |l| l.at);
+        // ход — с промпта пользователя (у Codex хука промпта нет: без него и фактов нет); промпт до перезапуска службы — из ленты
+        let since = self.turn_at.get(session).copied().or_else(|| e.feed.iter().rev().find(|l| l.kind == "prompt").map(|l| l.at)).unwrap_or(0);
         let cwd = cwd.filter(|_| ask == Ask::Final && self.cfg.done_facts && since > 0).map(String::from);
         let job = Job { session: session.to_string(), project: e.project.clone(), ask, text: text.to_string(), context, fallback, cwd, since };
         let _ = self.digest.send(job);
@@ -2171,6 +2173,9 @@ impl State {
                 // отчёт помощника под видом промпта: ход оркестратора с его помощниками; слово пользователя в ходе — ход его
                 let by_helper = agents::technical(prompt);
                 *self.helper_turn.entry(session.clone()).or_insert(by_helper) &= by_helper;
+                if !by_helper {
+                    self.turn_at.insert(session.clone(), now);
+                }
                 self.registry.prompt(&session, prompt, now);
                 // ответили в терминале — Оме спрашивать нечего, и «нужно» агента снято; отчёт помощника — не ответ пользователя
                 if by_helper { self.board.answered(&session) } else { self.board.prompted(&session) }
@@ -2628,6 +2633,7 @@ mod tests {
             subs: Vec::new(),
             projects: HashMap::new(),
             helper_turn: HashMap::new(),
+            turn_at: HashMap::new(),
             oma: Oma { state: "off".into(), ..Default::default() },
             oma_paused: false,
             voice_cmd: vec!["sh".into(), "-c".into(), "sleep 30".into(), "x".into()],
@@ -4740,6 +4746,20 @@ mod tests {
         st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s", "prompt": "ещё"}));
         stop(&mut st);
         assert_eq!(rx.try_recv().unwrap().cwd, None, "«Факты git в итогах» выключено");
+    }
+
+    #[test]
+    fn turn_start_for_git_facts_survives_long_turn() {
+        let mut st = test_state();
+        with_agents(&mut st, &["s"]);
+        let rx = jobs(&mut st);
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s", "prompt": "сделай фичу"}));
+        for i in 0..crate::agents::FEED_MAX + 5 {
+            st.registry.status("s", &format!("Шаг {i}."), 1001); // реплик в ходе больше, чем строк ленты: промпт из неё выпал
+        }
+        st.on_hook("stop", &serde_json::json!({"session_id": "s", "transcript_path": "/nonexistent", "last_assistant_message": "Сделал.", "cwd": "/p/s"}));
+        let job = rx.try_recv().unwrap();
+        assert_eq!((job.cwd.as_deref(), job.since), (Some("/p/s"), 1000), "начало хода — с промпта, а не из ленты");
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 /// Срок каждой команды git.
 const TIMEOUT: Duration = Duration::from_secs(5);
-/// Больше строк status — «много незакоммиченных файлов», без stat каждого.
+/// Больше тронутых в ходе файлов — «много незакоммиченных файлов».
 pub const MANY: usize = 500;
 /// Запас на часы и округление mtime: файл, тронутый за пару секунд до промпта, — тоже ход.
 const SLACK: u64 = 2;
@@ -18,7 +18,7 @@ const SLACK: u64 = 2;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Facts {
     pub commits: usize,          // коммитов за ход
-    pub dirty: usize,            // незакоммиченных файлов, тронутых в ходе; больше MANY — все строки status
+    pub dirty: usize,            // незакоммиченных файлов, тронутых в ходе
     pub unpushed: Option<usize>, // коммитов ветки не в upstream; None — upstream нет
 }
 
@@ -63,7 +63,7 @@ impl Facts {
 }
 
 /// Строки `git status --porcelain -z`: (путь от корня репозитория, файла там больше нет). У переименования и копии
-/// за новым путём идёт старый — он пропускается; переименование — как удаление: mtime файла оно не меняет.
+/// за новым путём идёт старый — он пропускается; переименование — как удаление: mtime файла оно не меняет, только папки.
 pub fn parse(out: &str) -> Vec<(&str, bool)> {
     let mut fields = out.split('\0').filter(|f| !f.is_empty());
     let mut got = Vec::new();
@@ -78,7 +78,8 @@ pub fn parse(out: &str) -> Vec<(&str, bool)> {
 }
 
 /// Факты хода в папке cwd с промпта since (эпоха, с). Не репозиторий, ошибка или таймаут git — None и строка в журнал.
-/// «Изменён в ходе» — удалён или mtime не раньше since − SLACK: чужие правки, сделанные до хода, не в счёт.
+/// «Изменён в ходе» — mtime не раньше since − SLACK (у удалённого и переименованного — mtime папки, где он был или стал):
+/// чужие правки, сделанные до хода, не в счёт; и при больших списках status — тоже по mtime.
 pub fn collect(cwd: &Path, since: u64) -> Option<Facts> {
     let git = |args: &[&str]| mux::run(Command::new("git").arg("--no-optional-locks").arg("-C").arg(cwd).args(args), TIMEOUT);
     let facts = || -> Result<Facts, String> {
@@ -86,12 +87,10 @@ pub fn collect(cwd: &Path, since: u64) -> Option<Facts> {
         let top = Path::new(top.trim_end_matches('\n'));
         // shortcut: путь не в UTF-8 обрывает чтение вывода (mux::run читает строку) — тогда ошибка и без фактов
         let status = git(&["status", "--porcelain", "-z", "--untracked-files=all"])?;
-        let files = parse(&status);
-        let dirty = if files.len() > MANY {
-            files.len()
-        } else {
-            files.iter().filter(|(p, gone)| *gone || mtime(&top.join(p)).is_none_or(|t| t + SLACK >= since)).count()
-        };
+        // удаление и переименование меняют mtime папки, а не файла: у них — ближайшая существующая папка-предок
+        let dirty = parse(&status).iter()
+            .filter(|(p, gone)| top.join(p).ancestors().skip(*gone as usize).find_map(mtime).is_none_or(|t| t + SLACK >= since))
+            .count();
         let commits = git(&["rev-list", "--count", &format!("--since=@{since}"), "HEAD"])?;
         let commits = commits.trim().parse().map_err(|e| format!("rev-list: {e}"))?;
         // нет upstream — git отвечает ошибкой: «не запушено» не знаем
@@ -182,6 +181,34 @@ pub mod tests {
         let f = collect(&dir, since).unwrap();
         assert_eq!((f.commits, f.dirty, f.unpushed), (1, 0, Some(1)));
         assert_eq!((f.voice().as_str(), f.window().as_str()), ("Закоммичено.", "закоммичено · не запушено: 1"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deleted_and_renamed_before_the_turn_are_not_its_facts() {
+        let dir = repo("before");
+        let since = now() + 3600; // ход начнётся через час: всё, что ниже, — до него
+        std::fs::remove_file(dir.join("b")).unwrap();
+        git(&dir, 1_000_000_000, &["mv", "sub/x", "sub/y"]);
+        // удаление и переименование меняют mtime папки, а не файла: папки — тоже до хода
+        for d in [dir.clone(), dir.join("sub")] {
+            std::fs::File::open(&d).unwrap().set_modified(UNIX_EPOCH + Duration::from_secs(since - 1000)).unwrap();
+        }
+        assert_eq!(collect(&dir, since), Some(Facts::default()), "старое удаление и git mv — не этот ход");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn many_untracked_files_from_before_the_turn_are_not_its_facts() {
+        let dir = repo("many");
+        let since = now();
+        for i in 0..=MANY {
+            let f = std::fs::File::create(dir.join(format!("old{i}"))).unwrap();
+            f.set_modified(UNIX_EPOCH + Duration::from_secs(since - 1000)).unwrap();
+        }
+        assert_eq!(collect(&dir, since).map(|f| f.dirty), Some(0), "больше MANY строк status — всё равно по mtime");
+        std::fs::write(dir.join("new"), "1").unwrap();
+        assert_eq!(collect(&dir, since).map(|f| f.voice()).as_deref(), Some("Не закоммичен 1 файл."));
         let _ = std::fs::remove_dir_all(dir);
     }
 

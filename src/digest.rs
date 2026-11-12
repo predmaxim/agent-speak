@@ -64,9 +64,10 @@ const COMMON: &str = "Ты — Ома и рассказываешь пользо
 В словах, где ударение легко прочесть неверно, — омографы (замо́к и за́мок), редкие слова, имена и названия — ставь знак ударения U+0301 сразу после ударной гласной. \
 Без markdown и списков. Ответ — строго одна строка JSON: {\"say\": \"…\", \"important\": true или false}.";
 
-pub fn prompt(job: &Job) -> String {
+/// git — у итога есть факты git: о коммитах и пуше скажет код, модель молчит.
+pub fn prompt(job: &Job, git: bool) -> String {
     let kind = match job.ask {
-        Ask::Final if job.cwd.is_some() => "Агент закончил ход. Одной фразой, не длиннее 20 слов: что сделано и что требует внимания пользователя — оставшиеся проблемы, советы агента, что не проверено. О коммитах и пуше не говори — это скажет код. important — true, если пользователю нужно что-то решить или сделать.",
+        Ask::Final if git => "Агент закончил ход. Одной фразой, не длиннее 20 слов: что сделано и что требует внимания пользователя — оставшиеся проблемы, советы агента, что не проверено. О коммитах и пуше, в том числе «не запушено» из рисков выше, не говори — это скажет код. important — true, если пользователю нужно что-то решить или сделать.",
         Ask::Final => "Агент закончил ход. Одной фразой, не длиннее 20 слов: что сделано и что требует внимания пользователя — оставшиеся проблемы, советы агента, что не запушено или не проверено. important — true, если пользователю нужно что-то решить или сделать.",
         Ask::Step => "Агент закончил ход, который начал не пользователь, а отчёт его помощника: это переписка агента со своими помощниками. Одной фразой, не длиннее 20 слов: что сделано. important — true, только если вся работа, о которой просил пользователь, закончена или агент прямо обращается к пользователю (решить, ответить, проверить, ошибка, которую он не обойдёт); ход переписки с помощниками («ревьювер принял ответ», «исполнитель закрывает находку», «отправил на ревью») — false.",
         Ask::Question => "Агент ждёт ответа пользователя. Одной фразой, не длиннее 25 слов. Начни с того, что нужно решить: «нужен ответ: …» — суть вопроса общими словами; совет агента, если он есть, — после. Варианты ответа не перечисляй. Вопросов несколько — их число и суть каждого в двух-трёх словах. Вопрос важный (архитектура, данные, деньги, необратимые действия) — в тех же 25 словах, как агент предлагает это сделать. important — true.",
@@ -105,17 +106,18 @@ fn clip(say: &str, max: usize) -> String {
 }
 
 pub fn digest(job: Job, ask: impl Fn(&str) -> Option<String>) -> Option<Digest> {
+    // факты git — кодом, без модели, до неё: за 5–15 с ответа модели пользователь может начать новый ход, его правки — не этого;
+    // вне цикла событий: git в большом репозитории — сотни мс
+    let facts = job.cwd.as_deref().and_then(|c| gitfacts::collect(std::path::Path::new(c), job.since));
     // пустой текст пересказывать нечего — модель не зовём
-    let said = if job.text.trim().is_empty() { None } else { ask(&prompt(&job)).and_then(|o| parse(&o, if job.ask == Ask::Summary { MAX_SUMMARY_WORDS } else { MAX_SAY_WORDS })) };
+    let said = if job.text.trim().is_empty() { None } else { ask(&prompt(&job, facts.is_some())).and_then(|o| parse(&o, if job.ask == Ask::Summary { MAX_SUMMARY_WORDS } else { MAX_SAY_WORDS })) };
     // сломанный claude (вход, PATH, лимит) иначе виден только по запасным фразам
     if said.is_none() && !job.text.trim().is_empty() {
         eprintln!("agent-speak: пересказ не удался ({}): {}", job.session, if job.fallback.is_some() { "запасная фраза" } else { "молчу" });
     }
-    // факты git — кодом, без модели; ход кончился, вне цикла событий: git в большом репозитории — сотни мс
-    let facts = job.cwd.as_deref().and_then(|c| gitfacts::collect(std::path::Path::new(c), job.since)).unwrap_or_default();
     // вопрос важен и без модели: пользователя ждут
     let (important, say) = said.or_else(|| job.fallback.map(|f| (job.ask == Ask::Question, f)))?;
-    Some(Digest { session: job.session, project: job.project, ask: job.ask, important, say, facts })
+    Some(Digest { session: job.session, project: job.project, ask: job.ask, important, say, facts: facts.unwrap_or_default() })
 }
 
 pub fn spawn(out: Sender<Digest>) -> Sender<Job> {
@@ -145,7 +147,7 @@ mod tests {
     #[test]
     fn helper_step_prompt_silences_chatter() {
         let job = Job { session: "s".into(), project: "p".into(), ask: Ask::Step, text: "Ревьювер принял ответ.".into(), context: String::new(), fallback: None, cwd: None, since: 0 };
-        let p = prompt(&job);
+        let p = prompt(&job, false);
         assert!(p.contains("помощник") && p.contains("false"), "переписку с помощниками модель не считает важной");
     }
 
@@ -159,19 +161,19 @@ mod tests {
 
     #[test]
     fn prompt_forbids_inventing_user_wait() {
-        assert!(prompt(&job(Ask::Final, "Жду ревью 7.", None)).contains("Не приписывай пользователю действий"));
+        assert!(prompt(&job(Ask::Final, "Жду ревью 7.", None), false).contains("Не приписывай пользователю действий"));
     }
 
     #[test]
     fn prompt_starts_with_result_in_omas_tone() {
         // в журнале 2026-10-25…11-12 треть фраз — «проект: Агент сделал…»: новость с результата, не с «агента»
-        let p = prompt(&job(Ask::Final, "Готово.", None));
+        let p = prompt(&job(Ask::Final, "Готово.", None), false);
         assert!(p.contains("Начинай с результата") && !p.contains("(«агент сделал»)"), "{p}");
         assert!(p.contains("всё влито, нужны решения по выкатке") && p.contains("не «я сделал» и не «ты сделал»"));
         assert!(p.contains("без канцелярита") && p.contains("не придумывай") && p.contains("о себе — в женском роде"));
         assert!(p.contains("Без шуток"), "юмора в новостях нет: Haiku повторяет одни приёмы");
-        assert!(prompt(&job(Ask::Question, "x", None)).contains("Начни с того, что нужно решить"));
-        assert!(prompt(&job(Ask::Summary, "a: x", None)).contains("«проект — итог»"));
+        assert!(prompt(&job(Ask::Question, "x", None), false).contains("Начни с того, что нужно решить"));
+        assert!(prompt(&job(Ask::Summary, "a: x", None), false).contains("«проект — итог»"));
     }
 
     /// Последние ответы агентов из транскриптов Claude Code этой машины (только чтение): не в репозитории — это чужая работа.
@@ -207,7 +209,7 @@ mod tests {
 
     #[test]
     fn prompt_asks_for_stress_marks() {
-        assert!(prompt(&job(Ask::Final, "Готово.", None)).contains("U+0301"));
+        assert!(prompt(&job(Ask::Final, "Готово.", None), false).contains("U+0301"));
     }
 
     #[test]
@@ -225,16 +227,16 @@ mod tests {
     #[test]
     fn prompt_has_rules_context_and_tail() {
         let long = format!("{}КОНЕЦ", "а".repeat(MAX_INPUT * 2));
-        let p = prompt(&job(Ask::Final, &long, None));
+        let p = prompt(&job(Ask::Final, &long, None), false);
         assert!(p.contains("Не называй переменные"));
         assert!(p.contains("\"say\"") && p.contains("\"important\""));
         assert!(p.contains("почини орб"));
         assert!(p.contains("КОНЕЦ"));                       // хвост, а не начало
         assert!(p.chars().count() < MAX_INPUT + 3000);  // правила — около 2,5 тыс. знаков, текст агента — только хвост
-        assert!(prompt(&job(Ask::Question, "x", None)).contains("ждёт ответа"));
-        assert!(prompt(&job(Ask::Progress, "x", None)).contains("какой шаг закрыт"));
+        assert!(prompt(&job(Ask::Question, "x", None), false).contains("ждёт ответа"));
+        assert!(prompt(&job(Ask::Progress, "x", None), false).contains("какой шаг закрыт"));
         assert!(p.contains("не длиннее 20 слов") && p.contains("без родовых окончаний"));
-        assert!(prompt(&job(Ask::Question, "x", None)).contains("Варианты ответа не перечисляй"));
+        assert!(prompt(&job(Ask::Question, "x", None), false).contains("Варианты ответа не перечисляй"));
     }
 
     #[test]
@@ -268,12 +270,35 @@ mod tests {
         let dir = gitfacts::tests::repo("digest");
         std::fs::write(dir.join("a"), "2").unwrap();
         let j = |cwd: Option<&std::path::Path>| Job { cwd: cwd.map(|c| c.to_string_lossy().into()), since: gitfacts::tests::now() - 100, ..job(Ask::Final, "Сделал.", Some("готово")) };
-        assert!(prompt(&j(Some(&dir))).contains("О коммитах и пуше не говори — это скажет код") && !prompt(&j(Some(&dir))).contains("что не запушено"));
-        assert!(prompt(&j(None)).contains("что не запушено"), "без фактов — как раньше");
+        let git = prompt(&j(Some(&dir)), true);
+        assert!(git.contains("О коммитах и пуше, в том числе «не запушено» из рисков выше, не говори — это скажет код") && !git.contains("что не запушено"), "{git}");
+        assert!(prompt(&j(None), false).contains("что не запушено"), "без фактов — как раньше");
         let ok = |_: &str| Some("{\"say\":\"Фича готова.\"}".to_string());
         assert_eq!(digest(j(Some(&dir)), ok).unwrap().facts.voice(), "Не закоммичен 1 файл.");
         assert_eq!(digest(j(None), ok).unwrap().facts, Facts::default());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn git_facts_are_taken_before_the_model_and_choose_its_prompt() {
+        let dir = gitfacts::tests::repo("before-model");
+        let j = |cwd: &std::path::Path| Job { cwd: Some(cwd.to_string_lossy().into()), since: gitfacts::tests::now() - 100, ..job(Ask::Final, "Сделал.", None) };
+        // пока модель думает, пользователь начал новый ход: его правка — не факт прошлого
+        let d = digest(j(&dir), |p| {
+            assert!(p.contains("это скажет код"), "факты есть — о пуше говорит код");
+            std::fs::write(dir.join("новый ход"), "1").unwrap();
+            Some("{\"say\":\"Фича готова.\"}".into())
+        }).unwrap();
+        assert_eq!(d.facts, Facts::default(), "git опрошен до модели");
+        // не репозиторий — фактов нет: «не запушено» остаётся модели
+        let none = std::env::temp_dir().join(format!("oma-digest-norepo-{}", std::process::id()));
+        std::fs::create_dir_all(&none).unwrap();
+        let d = digest(j(&none), |p| {
+            assert!(p.contains("что не запушено") && !p.contains("это скажет код"), "{p}");
+            Some("{\"say\":\"Фича готова.\"}".into())
+        }).unwrap();
+        assert_eq!(d.facts, Facts::default());
+        let _ = (std::fs::remove_dir_all(dir), std::fs::remove_dir_all(none));
     }
 
     #[test]
@@ -288,7 +313,7 @@ mod tests {
 
     #[test]
     fn summary_prompt_lists_finals() {
-        let p = prompt(&job(Ask::Summary, "plug: Фича готова.\nsite: Тесты упали.", None));
+        let p = prompt(&job(Ask::Summary, "plug: Фича готова.\nsite: Тесты упали.", None), false);
         assert!(p.contains("Сожми их в две-три фразы") && p.contains("plug: Фича готова.") && p.contains("site: Тесты упали."));
     }
 
@@ -324,7 +349,7 @@ mod tests {
 
     #[test]
     fn hung_prompt_asks_hang_verdict() {
-        let p = prompt(&job(Ask::Hung, "Тишина 12 мин. Вызов: Bash sleep 600.", None));
+        let p = prompt(&job(Ask::Hung, "Тишина 12 мин. Вызов: Bash sleep 600.", None), false);
         assert!(p.contains("похоже на зависание") && p.contains("Тишина 12 мин"), "{p}");
     }
 }
