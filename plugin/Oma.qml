@@ -16,6 +16,9 @@ Item {
   // Esc is Oma's while a phrase can be cancelled and a second after a cancel.
   readonly property bool escWanted: Model.escWanted(root.draft, link.speech, escHold.running)
   onEscWantedChanged: escBind.apply()
+  // The screen is being shared: the bubbles already up go (the daemon sends the new ones without their text).
+  readonly property bool sharing: link.speech.quiet_why === "screencast"
+  onSharingChanged: if (sharing) { root.bubbles = []; root.draft = null }
 
   // The open window shows it all itself: no bubbles show or pile up meanwhile.
   Plugin.Link {
@@ -28,13 +31,13 @@ Item {
     onSpeechChanged: if (link.speech.oma === "off") root.draft = null
   }
 
-  // The stack goes as a whole BUBBLE_TTL after its newest bubble; quiet mode keeps it.
+  // The stack goes as a whole BUBBLE_TTL after its newest bubble; quiet mode keeps it, unless the screen is shared.
   Timer {
     interval: 1000
     repeat: true
     running: root.bubbles.length > 0
     onTriggered: {
-      var kept = Model.expire(root.bubbles, Date.now(), link.speech.quiet)
+      var kept = Model.expire(root.bubbles, Date.now(), Model.bubblesKept(link.speech))
       if (kept !== root.bubbles) root.bubbles = kept
     }
   }

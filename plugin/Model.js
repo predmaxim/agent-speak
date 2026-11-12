@@ -40,8 +40,11 @@ function orbMode(st) {
   if (st.trouble > 0 && st.agents_voice !== false) return "trouble"   // the watch needs the user, above waiting
   if (st.waiting > 0 && st.agents_voice !== false) return "waiting"   // not watching: no red
   if (st.oma === "off") return "off"
-  return st.quiet ? "quiet" : "idle"
+  return st.quiet || QUIET_WHY[st.quiet_why] ? "quiet" : "idle"
 }
+
+// Quiet by reason (the daemon's quiet_why) -> its tooltip line; "dnd" waits for Omarchy's signal (README).
+var QUIET_WHY = { dnd: "Quiet: do not disturb", screencast: "Quiet: screen sharing" }
 
 // The window header's items, left to right; the power switch is at the edge.
 // Oma off: nothing but the switch works; a page has only Back.
@@ -55,8 +58,10 @@ function orbTip(st) {
   var mode = orbMode(st)
   var tips = { off: "Oma is not running", loading: "Oma is loading", listening: "Oma is listening", thinking: "Oma is thinking",
     speaking: "Oma is speaking", paused: "Paused", quiet: "Quiet mode", idle: "Oma" }
-  if (mode === "trouble") return [["%1 need help", st.trouble]]
-  return [mode === "waiting" ? ["%1 waiting", st.waiting] : [tips[mode], ""]]
+  var why = st && QUIET_WHY[st.quiet_why]
+  var lines = mode === "trouble" ? [["%1 need help", st.trouble]] : mode === "waiting" ? [["%1 waiting", st.waiting]]
+    : mode === "quiet" && !st.quiet && why ? [] : [[tips[mode], ""]]   // quiet by reason only: the reason is the line
+  return why ? lines.concat([[why, ""]]) : lines
 }
 
 // An agent's dot (the window's, the orb's card and satellites): its state; the watch's word (orange) is above any but
@@ -146,6 +151,11 @@ function pushBubble(stack, b, now) {
   if (b.text !== undefined) text = old && b.append ? old.text + " " + b.text : b.text
   var nb = Object.assign({}, old || {}, b, { text: text, at: now })
   return rest.concat([nb]).slice(-BUBBLES_MAX)
+}
+
+// Quiet mode keeps the bubbles until dismissed; while the screen is shared they fade as usual: they must not hang on someone else's screen.
+function bubblesKept(st) {
+  return !!st && st.quiet === true && st.quiet_why !== "screencast"
 }
 
 // Everything goes once the newest bubble is old enough; quiet mode keeps them.
@@ -317,7 +327,7 @@ function sections(tr) {
 // a section's header is drawn once it has rows.
 var SETTINGS_SECTIONS = [
   { title: "", rows: ["speaker", "rate"] },
-  { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours"] },
+  { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours", "screencast_privacy", "hush_summary"] },
   { title: "Hearing", rows: [] },
   { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites"] },
   { title: "Agents", rows: ["agents_voice", "progress_digest"] }
@@ -336,6 +346,7 @@ function settingStep(row, st, dx) {
   if (row === "orb_satellites") return { key: row, value: !st.orb_satellites, sample: false }
   if (row === "progress_digest") return { key: row, value: !st.progress_digest, sample: false }
   if (row === "agents_voice") return { key: row, value: !st.agents_voice, sample: false }
+  if (row === "screencast_privacy" || row === "hush_summary") return { key: row, value: !st[row], sample: false }
   var sec = sections(function(t) { return t }).filter(function(x) { return x.key === row })[0]
   if (!sec) return null
   var values = sec.options.map(function(o) { return o.value })

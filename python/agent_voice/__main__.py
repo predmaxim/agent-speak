@@ -43,10 +43,12 @@ def status_events(d, last):
     speaking, played, voiced, user_paused = bool(d.get("speaking")), d.get("played_at"), d.get("voiced"), bool(d.get("user_paused"))
     evs = [("audio", speaking, played, voiced, user_paused)] if last.get("speaking") != speaking or (
         not speaking and (last.get("voiced"), last.get("user_paused")) != (voiced, user_paused)) else []
-    for field, v in (("quiet", bool(d.get("quiet"))), ("out", d.get("out"))):
+    why = d.get("quiet_why") or ""  # тишина по причине (показ экрана): для разговора — тоже тишина
+    for field, v in (("quiet", bool(d.get("quiet")) or bool(why)), ("quiet_why", why), ("out", d.get("out"))):
         if last.get(field) != v:
             evs.append((field, v))
-    last.update(speaking=speaking, voiced=voiced, user_paused=user_paused, quiet=bool(d.get("quiet")), out=d.get("out"))
+        last[field] = v
+    last.update(speaking=speaking, voiced=voiced, user_paused=user_paused)
     return evs
 
 
@@ -84,6 +86,7 @@ class Oma:
         # до перезапуска Омы каждый ответ держит её в «говорю», пока его не оборвут (Esc, клик, пауза, перебив); случится — номер последней реплики в voice
         # и в строке состояния вместо счёта (потеря одной самоисправится на следующей)
         self.out = None    # куда идёт её голос (out службы): speakers | headphones
+        self.why = ""      # причина тишины (quiet_why службы): "" | dnd | screencast
         self.notified = (None, 0.0)  # последнее уведомление: текст, время
         self.ask_id = None  # id набранной реплики из окна, пока команда ask идёт: её строка в чате вернётся с ним
 
@@ -285,6 +288,8 @@ class Oma:
             await self.act(c.set_quiet(ev[1]))
         elif kind == "out":
             self.out = ev[1]
+        elif kind == "quiet_why":
+            self.why = ev[1]
         elif kind == "mic":
             self.ear.paused = ev[1]  # микрофон пишет другой (voxtype и т. п.) — кадры не слушаем
             await self.act(c.mic_busy(ev[1]))
@@ -337,9 +342,11 @@ class Oma:
         return whole or text
 
     def _sound(self):
-        """Её звук одной строкой для мозга: тихий режим и куда идёт голос — из строки состояния службы (quiet, out)."""
+        """Её звук одной строкой для мозга: тихий режим, его причина и куда идёт голос — из строки состояния службы
+        (quiet, quiet_why, out): мозг не выдумывает причину молчания."""
         if self.conv.quiet:
-            return "Твой голос: выключен (тихий режим), ответы только текстом в окне."
+            why = {"screencast": "показ экрана", "dnd": "не беспокоить"}.get(self.why, "тихий режим")
+            return f"Твой голос: выключен ({why}), ответы только текстом в окне."
         where = {"speakers": "в динамиках", "headphones": "в наушниках"}.get(self.out)
         return f"Твой голос: включён, звучит {where}." if where else "Твой голос: включён."
 

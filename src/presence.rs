@@ -48,8 +48,7 @@ pub struct Facts {
     pub video: bool,
     #[serde(deserialize_with = "buds_from")]
     pub buds: Buds,
-    /// Экран показывают (поток показа портала: Video/Source без device.id). Пока только читается — тишину по показу
-    /// строит волна 2 (A) дизайна «Джарвис».
+    /// Экран показывают (поток показа портала: Video/Source без device.id) — Ома молчит, пузыри без текста.
     pub screencast: bool,
 }
 
@@ -181,6 +180,11 @@ impl Presence {
         self.facts.as_ref().map_or(Buds::Unknown, |f| f.buds)
     }
 
+    /// Показывают ли экран; None — снимка нет или он старше STALE_AFTER: фактов нет.
+    pub fn screencast(&self, now: u64) -> Option<bool> {
+        self.facts.as_ref().filter(|f| now.saturating_sub(f.at) <= STALE_AFTER).map(|f| f.screencast)
+    }
+
 }
 
 #[cfg(test)]
@@ -201,6 +205,16 @@ mod tests {
         // показ экрана (волна «Джарвис»): в старом снимке поля нет — не показывают
         assert!(parse_facts(r#"{"screencast":true}"#).unwrap().screencast);
         assert!(!parse_facts(r#"{"at":1}"#).unwrap().screencast);
+    }
+
+    #[test]
+    fn screencast_only_from_fresh_snapshot() {
+        let mut p = Presence::default();
+        assert_eq!(p.screencast(1000), None, "снимка нет");
+        p.apply(Facts { at: 1000, screencast: true, ..Default::default() }, 1000);
+        assert_eq!([p.screencast(1000 + STALE_AFTER), p.screencast(1001 + STALE_AFTER)], [Some(true), None]);
+        p.apply(facts(1100, 0), 1100);
+        assert_eq!(p.screencast(1100), Some(false));
     }
 
     #[test]

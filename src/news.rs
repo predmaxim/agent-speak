@@ -165,8 +165,8 @@ impl Board {
         }
     }
 
-    /// «Пока тебя не было: …» — по счётчикам доски; пусто — None.
-    pub fn overview(&self) -> Option<String> {
+    /// «<prefix>: …» («Пока тебя не было», «Пока было тихо») — по счётчикам доски; пусто — None.
+    pub fn overview(&self, prefix: &str) -> Option<String> {
         let mut done: Vec<&str> = self.items.iter().filter(|i| i.class == Class::Final).map(|i| i.session.as_str()).collect();
         done.sort_unstable();
         done.dedup();
@@ -178,7 +178,7 @@ impl Board {
         if w > 0 {
             parts.push(format!("{w} {} ответа", plural(w, ["ждёт", "ждут", "ждут"])));
         }
-        if parts.is_empty() { None } else { Some(format!("Пока тебя не было: {}.", parts.join(", "))) }
+        if parts.is_empty() { None } else { Some(format!("{prefix}: {}.", parts.join(", "))) }
     }
 
     /// Только срочное — пока пользователь занят; в журнал: не услышал — повторится по возвращении.
@@ -377,15 +377,15 @@ mod tests {
     #[test]
     fn overview_counts_and_plurals() {
         let mut b = Board::default();
-        assert_eq!(b.overview(), None);
+        assert_eq!(b.overview("Пока тебя не было"), None);
         b.push(n("a", Class::Final, "x", 1));
-        assert_eq!(b.overview().unwrap(), "Пока тебя не было: 1 проект закончил.");
+        assert_eq!(b.overview("Пока тебя не было").unwrap(), "Пока тебя не было: 1 проект закончил.");
         b.push(n("b", Class::Final, "x", 1));
         b.push(n("q", Class::Question, "Q?", 1));
-        assert_eq!(b.overview().unwrap(), "Пока тебя не было: 2 проекта закончили, 1 ждёт ответа.");
+        assert_eq!(b.overview("Пока было тихо").unwrap(), "Пока было тихо: 2 проекта закончили, 1 ждёт ответа.");
         for s in ["c", "d", "e"] { b.push(n(s, Class::Final, "x", 1)); }
         b.push(n("r", Class::Question, "R?", 1));
-        assert_eq!(b.overview().unwrap(), "Пока тебя не было: 5 проектов закончили, 2 ждут ответа.");
+        assert_eq!(b.overview("Пока тебя не было").unwrap(), "Пока тебя не было: 5 проектов закончили, 2 ждут ответа.");
         assert_eq!(b.finals(), 5);
     }
 

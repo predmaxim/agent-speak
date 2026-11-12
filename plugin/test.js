@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, QUIET_WHY, bubblesKept, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -51,6 +51,19 @@ assert.strictEqual(M.OFFLINE.trouble, 0)
 // The tooltip is a list of lines [key, arg]: the orb's tooltip and the window header draw them all (one line today)
 assert.deepStrictEqual(M.orbTip(Object.assign({}, st, { trouble: 1 })), [["%1 need help", 1]])
 assert.deepStrictEqual(M.orbTip(st), [["Oma", ""]])
+// Quiet by reason (screen sharing): the orb is the quiet moon, the tooltip names the reason; a waiting agent still turns it red
+const sharing = Object.assign({}, st, { quiet_why: "screencast" })
+assert.strictEqual(M.orbMode(sharing), "quiet")
+assert.deepStrictEqual(M.orbTip(sharing), [["Quiet: screen sharing", ""]])
+assert.deepStrictEqual(M.orbTip(Object.assign({}, sharing, { quiet: true })), [["Quiet mode", ""], ["Quiet: screen sharing", ""]])
+assert.strictEqual(M.orbMode(Object.assign({}, sharing, { waiting: 1 })), "waiting")
+assert.deepStrictEqual(M.orbTip(Object.assign({}, sharing, { waiting: 1 })), [["%1 waiting", 1], ["Quiet: screen sharing", ""]])
+assert.strictEqual(ru(...M.orbTip(sharing)[0]), "Тихо: показ экрана")
+// Quiet mode keeps the bubbles; while the screen is shared they fade as usual: they must not hang on someone else's screen
+assert.strictEqual(M.bubblesKept(Object.assign({}, st, { quiet: true })), true)
+assert.strictEqual(M.bubblesKept(Object.assign({}, sharing, { quiet: true })), false)
+assert.strictEqual(M.bubblesKept(sharing), false)
+assert.strictEqual(M.bubblesKept(M.OFFLINE), false)
 let s = []
 for (const id of ["a", "b", "c", "d"]) s = M.pushBubble(s, { id, who: "T", text: id, kind: "status" }, 1000)
 assert.deepStrictEqual(s.map(b => b.id), ["b", "c", "d"])
@@ -127,8 +140,8 @@ assert.strictEqual(M.OFFLINE.wake, "off")
 // Every key from orbTip, ago and stateLabel has a Russian line
 const keys = new Set()
 for (const oma of ["off", "idle", "loading", "listening", "thinking", "speaking", "paused"])
-  for (const waiting of [0, 2]) for (const quiet of [false, true])
-    for (const l of M.orbTip(Object.assign({}, st, { oma, waiting, quiet }))) keys.add(l[0])
+  for (const waiting of [0, 2]) for (const quiet of [false, true]) for (const quiet_why of ["", ...Object.keys(M.QUIET_WHY)])
+    for (const l of M.orbTip(Object.assign({}, st, { oma, waiting, quiet, quiet_why }))) keys.add(l[0])
 for (const l of M.orbTip(M.OFFLINE)) keys.add(l[0])
 for (const n of [0, 100, 600, 7300, 3 * 86400]) keys.add(M.ago(0, n)[0])
 for (const a of ["working", "waiting", "done", "idle", "?"]) keys.add(M.stateLabel(a))
@@ -200,7 +213,7 @@ assert.strictEqual(M.taken("", { key: "chat:1", role: "me", text: "" }), false)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 9)
+assert.strictEqual(M.SETTINGS_ROWS.length, 11)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "eugene", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
@@ -212,11 +225,14 @@ assert.deepStrictEqual(M.settingStep("orb_over_fullscreen", Object.assign({}, cf
 assert.deepStrictEqual(M.settingStep("orb_satellites", Object.assign({}, cfg, { orb_satellites: true }), 1), { key: "orb_satellites", value: false, sample: false })
 assert.deepStrictEqual(M.settingStep("progress_digest", cfg, 1), { key: "progress_digest", value: true, sample: false })
 assert.deepStrictEqual(M.settingStep("agents_voice", Object.assign({}, cfg, { agents_voice: true }), 1), { key: "agents_voice", value: false, sample: false })
+assert.deepStrictEqual(M.settingStep("screencast_privacy", Object.assign({}, cfg, { screencast_privacy: true }), 1), { key: "screencast_privacy", value: false, sample: false })
+assert.deepStrictEqual(M.settingStep("hush_summary", cfg, 1), { key: "hush_summary", value: true, sample: false })
 // every row steps but the hours (two dropdowns, the window walks them)
 for (const r of M.SETTINGS_ROWS) assert.strictEqual(M.settingStep(r, cfg, 1) === null, r === "quiet_hours", r)
 
 // The settings page: one fixed order of sections (the Jarvis wave's design); SETTINGS_ROWS are their rows in it
 assert.deepStrictEqual(M.SETTINGS_SECTIONS.map(s => s.title), ["", "Quiet mode", "Hearing", "Orb", "Agents"])
+assert.deepStrictEqual(M.SETTINGS_SECTIONS[1].rows, ["quiet_now", "quiet_schedule", "quiet_hours", "screencast_privacy", "hush_summary"])
 assert.deepStrictEqual(M.SETTINGS_ROWS, [].concat(...M.SETTINGS_SECTIONS.map(s => s.rows)))
 // Window.qml draws them in that order: a header per section with rows (the first has none: its rows are captions),
 // a SettingRow per key, and no row numbers by hand — a row is SETTINGS_ROWS.indexOf(key)
