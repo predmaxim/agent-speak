@@ -47,6 +47,11 @@ pub enum Msg {
     /// `agent-speak show`: агента (session; пусто — следующий ждущий) — на экран, в терминал ничего не пишется. Запрос с
     /// ответом `{"ok": проект}` или `{"err": …}`; ошибка — ещё и пузырём Омы, кроме quiet (зовёт сама Ома — скажет сама).
     Show { #[serde(default)] agent: String, #[serde(default)] quiet: bool },
+    /// Колесо над орбом, пока Ома говорит: темп этого ответа на step шагов RATES (+ быстрее); config.toml не пишется.
+    RateStep { step: i64 },
+    /// Слух Омы для орба: её вход (узел PipeWire; "" — вход по умолчанию), до когда она ещё слушает (эпоха, с; нет —
+    /// дуги нет) и длина этого окна, с. Шлёт при смене, отдельно от voice_state: его повтор держал бы новости и чистил очередь.
+    Ear { #[serde(default)] ear_in: String, #[serde(default)] until: Option<f64>, #[serde(default)] secs: f64 },
 }
 
 pub fn socket_path() -> PathBuf {
@@ -107,6 +112,10 @@ mod tests {
         let show = serde_json::from_str::<Msg>("{\"cmd\":\"show\",\"agent\":\"s\"}").unwrap();
         assert!(matches!(show, Msg::Show { ref agent, quiet: false } if agent == "s"));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"show\"}").unwrap(), Msg::Show { ref agent, .. } if agent.is_empty()), "без агента — следующий ждущий");
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"rate_step\",\"step\":-1}").unwrap(), Msg::RateStep { step: -1 }));
+        let ear = serde_json::from_str::<Msg>("{\"cmd\":\"ear\",\"ear_in\":\"alsa_input.x\",\"until\":1794812345.2,\"secs\":20}").unwrap();
+        assert!(matches!(ear, Msg::Ear { ref ear_in, until: Some(u), secs } if ear_in == "alsa_input.x" && u == 1794812345.2 && secs == 20.0));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"ear\"}").unwrap(), Msg::Ear { until: None, .. }), "поля — по желанию");
     }
 
     #[test]

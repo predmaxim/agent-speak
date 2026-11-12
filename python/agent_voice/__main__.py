@@ -12,7 +12,7 @@ import time
 import traceback
 
 from . import link, memory
-from .context import foreign_capture, locked, mic_outputs, on_ac
+from .context import foreign_capture, locked, mic_outputs, muted, on_ac
 from .conversation import Conversation
 from .orders import Orders
 from .turn import SmartTurn
@@ -97,6 +97,7 @@ class Oma:
         self.limit = ""    # фраза службы «лимит почти кончился» (limit); "" — окна у порога нет
         self.notified = (None, 0.0)  # последнее уведомление: текст, время
         self.ask_id = None  # id набранной реплики из окна, пока команда ask идёт: её строка в чате вернётся с ним
+        self.ear_sent = ("", None)  # (вход, quiet_at) последней строки ear службе: как у неё до первой строки
 
     def _show(self, text):
         self.emit({"bubble": {"id": f"oma-{os.getpid()}-{self.n}", "who": "Ома", "text": text, "kind": "oma", "append": True}})
@@ -403,7 +404,24 @@ class Oma:
             self.events.put_nowait(("delta", said, n))
             self.events.put_nowait(("done", None, n))
 
+    def _ear_line(self):
+        """Орбу — её вход и сколько она ещё слушает: строка ear службе при смене входа или срока тишины (quiet_at).
+        Длина окна — от сейчас до срока: строка уходит сразу после действия, которое его взвело."""
+        q = self.conv.quiet_at
+        target = getattr(self.ear, "target", "")
+        if (target, q) == self.ear_sent:
+            return
+        self.ear_sent = (target, q)
+        left = None if q is None else max(0.0, q - self.conv.clock())
+        self.send({"cmd": "ear", "ear_in": target, "until": None if left is None else time.time() + left, "secs": left or 0.0})
+
     async def act(self, acts):
+        try:
+            await self._act(acts)
+        finally:
+            self._ear_line()
+
+    async def _act(self, acts):
         for a in acts:
             k = a[0]
             if k == "ear":
@@ -538,7 +556,9 @@ async def main():
             busy = False
             while True:
                 pid = oma.ear.pid  # до await: слух мог переоткрыться, а снимок pactl — со старым pw-record
-                now = pid is not None and foreign_capture(await asyncio.to_thread(mic_outputs), {pid})
+                # микрофон выключен (mute) — как чужой: слух не слушает, разговор на паузе
+                now = pid is not None and (foreign_capture(await asyncio.to_thread(mic_outputs), {pid})
+                                           or await asyncio.to_thread(muted, oma.ear.target))
                 if now != busy:
                     busy = now
                     events.put_nowait(("mic", busy))

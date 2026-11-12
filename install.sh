@@ -45,6 +45,23 @@ ST=$DATA/smart-turn-v3.2-cpu.onnx
     echo "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f  $ST.tmp" | sha256sum -c --quiet && mv "$ST.tmp" "$ST"
 } || { rm -f "$ST.tmp"; echo "Smart Turn не скачался — Ома будет ждать паузу" >&2; }
 
+# Хук Claude Code «вызов инструмента не отработал» — орб «поник» (README, «Хуки»). Дописывается один раз: есть строка с
+# этой командой — файл не трогается; чужие хуки и прочие настройки остаются. Работающие сессии подхватывают его сами.
+CS=$(realpath -m ~/.claude/settings.json)
+HOOK="$HOME/.local/bin/agent-speak hook post-tool-use-failure"
+if [[ -d ${CS%/*} ]]; then
+  [[ -s $CS ]] || echo '{}' >"$CS"
+  # jq -e: 0 — строка уже есть, 1 — нет, иное — файл не читается (его правят руками)
+  rc=0
+  jq -e --arg c "$HOOK" '[.hooks.PostToolUseFailure[]?.hooks[]?.command] | index($c)' "$CS" >/dev/null || rc=$?
+  if ((rc == 1)); then
+    jq --arg c "$HOOK" '.hooks.PostToolUseFailure += [{"hooks": [{"type": "command", "command": $c}]}]' "$CS" >"$CS.agent-speak.tmp"
+    mv "$CS.agent-speak.tmp" "$CS"
+  elif ((rc != 0)); then
+    echo "$CS не читается — хук post-tool-use-failure не добавлен, впиши его сам (README, «Хуки»)" >&2
+  fi
+fi
+
 systemctl --user daemon-reload
 systemctl --user enable --now agent-speakd.service agent-speak-memory.timer
 systemctl --user restart agent-speakd.service

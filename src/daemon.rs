@@ -184,6 +184,9 @@ struct Oma {
     started: Option<Instant>,  // когда запущена нынешняя
     crashes: usize,            // падений подряд — шаг OMA_BACKOFF
     reap: Option<std::thread::JoinHandle<()>>, // прежнюю пожинают: пока не вышла, новую не поднимаем
+    ear_in: String,            // её вход (Msg::Ear): "" — вход по умолчанию
+    listen_until: Option<f64>, // до когда она слушает, эпоха, с
+    listen_secs: f64,          // длина нынешнего окна слушания, с
 }
 
 /// Пузырь, пока экран показывают: вместо текста — метка по виду, у агента — папка проекта, а не заголовок сессии
@@ -300,6 +303,8 @@ struct State {
     trouble_sent: usize,                         // trouble последней разосланной строки состояния
     voices: u64,     // реплик Омы (`voice`) с запуска службы — номер последней
     voice_base: u64, // столько их было до запуска нынешней Омы: voiced считается от него
+    rate_now: Option<String>, // темп этого ответа с колеса над орбом; None — из настроек
+    struggling_sent: usize,   // struggling последней разосланной строки состояния
 }
 
 fn home() -> PathBuf {
@@ -504,6 +509,8 @@ pub fn run() {
         trouble_sent: 0,
         voices: 0,
         voice_base: 0,
+        rate_now: None,
+        struggling_sent: 0,
     };
     {
         let tx = tx.clone();
@@ -935,7 +942,8 @@ impl State {
 
     /// Настройки → поток воспроизведения и очередь, затем — подписчикам.
     fn apply(&mut self) {
-        *self.shared.voice.lock().unwrap() = (self.cfg.speaker.clone(), self.cfg.rate.clone());
+        let rate = self.rate_now.clone().unwrap_or_else(|| self.cfg.rate.clone());
+        *self.shared.voice.lock().unwrap() = (self.cfg.speaker.clone(), rate);
         if !self.cfg.agents_voice {
             limits::clear_hints(&self.hints, |_| false); // не следим — и подсказок агентам нет
             self.limits_bad = false;
@@ -991,15 +999,15 @@ impl State {
             limit: &self.limit,
             limit_warn: self.cfg.limit_warn,
             // волна 3 (A): орб слышит
-            ear_in: "",
-            listen_until: None,
-            listen_secs: 0.0,
+            ear_in: &self.oma.ear_in,
+            listen_until: self.oma.listen_until,
+            listen_secs: self.oma.listen_secs,
             // волна 3 (A): настроение орба
-            struggling: 0,
-            orb_moods: false,
-            orb_idle_motion: false,
+            struggling: self.struggling(),
+            orb_moods: self.cfg.orb_moods,
+            orb_idle_motion: self.cfg.orb_idle_motion,
             // волна 3 (A): колесо над орбом
-            rate_now: "",
+            rate_now: self.rate_now.as_deref().unwrap_or_default(),
             // волна 3 (B): полосы, знаки, интонация
             news_every: 0,
             earcons: false,
@@ -1058,11 +1066,17 @@ impl State {
         if self.cfg.agents_voice { self.watch.trouble() } else { 0 }
     }
 
+    /// Агентов, у которых за ход FAILS_DROOP и больше сбоев, — орб «поник»; не следим за агентами — 0.
+    fn struggling(&self) -> usize {
+        if self.cfg.agents_voice { self.registry.struggling() } else { 0 }
+    }
+
     fn broadcast(&mut self) {
         let line = self.status_line();
         self.out_sent = self.out();
         self.waiting_sent = self.registry.waiting();
         self.trouble_sent = self.trouble();
+        self.struggling_sent = self.struggling();
         self.hold_sent = self.media_hold();
         self.broadcast_line(&line);
     }
@@ -1087,7 +1101,7 @@ impl State {
             self.broadcast_line(&line);
             self.agents_sent = line;
         }
-        if self.registry.waiting() != self.waiting_sent || self.trouble() != self.trouble_sent {
+        if self.registry.waiting() != self.waiting_sent || self.trouble() != self.trouble_sent || self.struggling() != self.struggling_sent {
             self.broadcast();
         }
     }
@@ -1216,10 +1230,28 @@ impl State {
                 self.board.answered(&d.session); // новый вопрос — прежний уже решён
             }
             let say = format!("{}: {}", d.project, d.say);
-            self.board.push(News { session: d.session, class, say, born: (self.now_secs)() });
+            self.board.push(News { session: d.session.clone(), class, say, born: (self.now_secs)() });
         }
         self.push_agents();
         self.speak_news(); // пересказ готов — звучит сразу, а не со следующим тиком
+        if let Some(class) = class {
+            self.ripple(&d.session, class);
+        }
+    }
+
+    /// Волна на орбе вместо слов: новость пришла, а Ома её сейчас не говорит — тихий режим (на доску она не легла)
+    /// или ждёт на доске (занят, отошёл, разговор, тишина по причине). Агент, которым он занят, — без волны: он на него смотрит.
+    fn ripple(&mut self, session: &str, class: Class) {
+        let tone = match class {
+            Class::Final => "final",
+            Class::Question => "question",
+            Class::Progress => "status",
+            Class::Urgent | Class::Restore => return,
+        };
+        if !self.cfg.orb_moods || !(self.quiet() || self.board.has(session, class)) || self.engaged().as_deref() == Some(session) {
+            return;
+        }
+        self.broadcast_line(&format!("{}\n", serde_json::json!({"ripple": {"tone": tone}})));
     }
 
     /// Новости — когда Ома молчит, ничего не звучит и пользователь слушает; слух греется заранее, чтобы ответ услышать сразу.
@@ -1327,7 +1359,33 @@ impl State {
     }
 
     /// Заговорила или смолкла (поток воспроизведения).
+    /// Колесо над орбом: темп звучащего ответа на step шагов RATES, на краях упирается. Звучит со следующей фразы:
+    /// темп читается на каждую фразу. Ничего не звучит — колесо ничего не делает.
+    fn rate_step(&mut self, step: i64) {
+        if !self.shared.busy.load(Ordering::SeqCst) && self.oma.state != "speaking" {
+            return;
+        }
+        let rates = crate::config::RATES;
+        let now = self.rate_now.as_deref().unwrap_or(&self.cfg.rate);
+        let i = rates.iter().position(|r| *r == now).unwrap_or(2) as i64;
+        let rate = rates[(i + step).clamp(0, rates.len() as i64 - 1) as usize].to_string();
+        self.shared.voice.lock().unwrap().1 = rate.clone();
+        self.rate_now = Some(rate);
+        self.broadcast();
+    }
+
+    /// Ответ кончился: всё смолкло и удержания нет (оно стоит, пока Ома думает или говорит, — паузы между её фразами
+    /// темп не сбрасывают) — темп колеса уходит, дальше темп из настроек. Зовут оба конца: смолк звук (on_busy) и
+    /// снялось удержание (voice_state) — её последняя фраза смолкает раньше, чем она перестаёт «говорить».
+    fn rate_back(&mut self) {
+        if self.rate_now.is_some() && self.silent() && !self.shared.queue.lock().unwrap().held() {
+            self.rate_now = None;
+            self.shared.voice.lock().unwrap().1 = self.cfg.rate.clone();
+        }
+    }
+
     fn on_busy(&mut self) {
+        self.rate_back(); // до speak_news: накопленные новости — уже темпом из настроек
         // смолкла — накопленное встаёт в очередь сейчас, а не со следующим tick: музыка не вклинивается на 0–1 с
         self.speak_news();
         self.broadcast();
@@ -1529,6 +1587,8 @@ impl State {
         }
         self.oma.state = "off".into();
         self.oma.talking = false;
+        // её слуха нет; новая начинает строку ear с этих же пустых значений
+        (self.oma.ear_in, self.oma.listen_until, self.oma.listen_secs) = (String::new(), None, 0.0);
         self.listen_sent = false; // ответа на listen от упавшей не будет
         self.hold(false);
         self.purge();
@@ -1684,6 +1744,7 @@ impl State {
                     self.oma_pause(false); // разговор кончился — её пауза не должна держать новости и чтение
                 }
                 self.hold(matches!(state.as_str(), "thinking" | "speaking"));
+                self.rate_back();
                 self.oma.state = state;
                 self.oma.talking = talking;
                 self.listen_sent = false;
@@ -1728,10 +1789,18 @@ impl State {
             }
             Msg::Read => self.read(),
             Msg::Summary => self.summary(),
+            Msg::RateStep { step } => self.rate_step(step),
+            Msg::Ear { ear_in, until, secs } => {
+                (self.oma.ear_in, self.oma.listen_until, self.oma.listen_secs) = (ear_in, until, secs);
+                self.broadcast();
+            }
             Msg::Hook { kind, payload } => self.on_hook(&kind, &payload),
             Msg::Set { key, value } => {
                 let muted = key == "agents_voice" && value == false && self.cfg.agents_voice;
                 if self.cfg.set(&key, &value) {
+                    if key == "rate" {
+                        self.rate_now = None; // темп выбран в окне — колесо этого ответа он перекрывает
+                    }
                     self.cfg.save();
                     if muted {
                         self.stop(); // выключили озвучку — и то, что звучит, обрываем, а не ждём конца фразы
@@ -2017,6 +2086,11 @@ impl State {
                 self.ask(&thread, Ask::Final, last, None);
             }
             "session-end" => self.watch.ended(&session), // вышел сам — исчезновение не падение
+            "post-tool-use-failure" => {
+                if agents::tool_failed(p) {
+                    self.registry.failed(&session);
+                }
+            }
             other => eprintln!("agent-speak: неизвестный хук {other}"),
         }
         self.push_agents();
@@ -2242,6 +2316,8 @@ mod tests {
             trouble_sent: 0,
             voices: 0,
             voice_base: 0,
+            rate_now: None,
+            struggling_sent: 0,
         }
     }
 
@@ -2645,6 +2721,16 @@ mod tests {
         assert_eq!(sat(&st), true, "по умолчанию спутники есть");
         st.cfg.orb_satellites = false;
         assert_eq!(sat(&st), false);
+    }
+
+    #[test]
+    fn status_line_carries_orb_moods_and_idle_motion() {
+        let field = |st: &State, k: &str| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()[k].clone();
+        let mut st = test_state();
+        assert_eq!((field(&st, "orb_moods"), field(&st, "orb_idle_motion")), (true.into(), true.into()), "по умолчанию включены");
+        st.cfg.orb_moods = false;
+        st.cfg.orb_idle_motion = false;
+        assert_eq!((field(&st, "orb_moods"), field(&st, "orb_idle_motion")), (false.into(), false.into()));
     }
 
     /// Выход по умолчанию — Bluetooth-наушники (имя узла, как его даёт `pactl get-default-sink`).
@@ -3124,6 +3210,73 @@ mod tests {
     }
 
     #[test]
+    fn wheel_sets_rate_of_this_answer_only() {
+        let mut st = test_state();
+        let rate_now = |st: &State| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["rate_now"].clone();
+        st.on_msg(Msg::RateStep { step: 1 });
+        assert_eq!(st.rate_now, None, "ничего не звучит — колесо ничего не делает");
+        st.shared.busy.store(true, Ordering::SeqCst);
+        st.on_msg(Msg::RateStep { step: 1 });
+        assert_eq!((st.rate_now.as_deref(), st.shared.voice.lock().unwrap().1.as_str()), (Some("fast"), "fast"));
+        st.on_msg(Msg::RateStep { step: 5 });
+        assert_eq!(st.rate_now.as_deref(), Some("x-fast"), "на краю упирается");
+        assert_eq!((rate_now(&st), st.cfg.rate.as_str()), ("x-fast".into(), "medium"), "config.toml не пишется");
+        // смолкла между фразами, а удержание стоит (Ома думает или говорит) — темп держится
+        st.shared.busy.store(false, Ordering::SeqCst);
+        st.hold(true);
+        st.on_busy();
+        assert_eq!(st.rate_now.as_deref(), Some("x-fast"));
+        // ответ кончился — темп из настроек
+        st.hold(false);
+        st.on_busy();
+        assert_eq!((st.rate_now.as_deref(), st.shared.voice.lock().unwrap().1.as_str()), (None, "medium"));
+        assert_eq!(rate_now(&st), "");
+        // её речь (oma speaking) без звука службы — колесо работает
+        st.oma.state = "speaking".into();
+        st.on_msg(Msg::RateStep { step: -2 });
+        assert_eq!(st.rate_now.as_deref(), Some("x-slow"));
+        // её ответ: последняя фраза смолкла, пока она «говорит» (удержание), — темп держится; её «слушаю» снимает
+        // удержание без нового звука — ответ кончился, темп из настроек, а не со следующей речью
+        st.on_msg(Msg::VoiceState { state: "speaking".into(), talking: true });
+        st.shared.busy.store(true, Ordering::SeqCst);
+        st.on_msg(Msg::RateStep { step: 1 });
+        st.shared.busy.store(false, Ordering::SeqCst);
+        st.on_busy();
+        assert_eq!(st.rate_now.as_deref(), Some("slow"), "Ома ещё говорит");
+        st.on_msg(Msg::VoiceState { state: "listening".into(), talking: true });
+        assert_eq!((st.rate_now.as_deref(), rate_now(&st)), (None, "".into()));
+    }
+
+    #[test]
+    fn ear_line_reaches_the_orb() {
+        let mut st = test_state();
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        st.on_msg(Msg::Ear { ear_in: "alsa_input.pci".into(), until: Some(1794812345.2), secs: 20.0 });
+        let v = next(&mut r);
+        assert_eq!((v["ear_in"].as_str(), v["listen_until"].as_f64(), v["listen_secs"].as_f64()), (Some("alsa_input.pci"), Some(1794812345.2), Some(20.0)));
+        st.on_msg(Msg::Ear { ear_in: String::new(), until: None, secs: 0.0 });
+        assert!(next(&mut r)["listen_until"].is_null(), "заговорил или слух закрыт — дуги нет");
+        // упала посреди слушания — её слуха нет: новая Ома начинает с тех же пустых значений, что и служба
+        st.on_msg(Msg::Ear { ear_in: "alsa_input.pci".into(), until: Some(1794812345.2), secs: 20.0 });
+        st.oma_down();
+        let v = serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap();
+        assert_eq!((v["ear_in"].as_str(), v["listen_until"].is_null(), v["listen_secs"].as_f64()), (Some(""), true, Some(0.0)));
+    }
+
+    #[test]
+    fn set_rate_drops_wheel_rate() {
+        let _home = TempHome::new("rate-now");
+        let mut st = test_state();
+        st.shared.busy.store(true, Ordering::SeqCst);
+        st.on_msg(Msg::RateStep { step: -1 });
+        st.on_msg(Msg::Set { key: "speaker".into(), value: serde_json::json!("baya") });
+        assert_eq!(st.shared.voice.lock().unwrap().clone(), ("baya".into(), "slow".into()), "другая настройка темп этого ответа не сбрасывает");
+        st.on_msg(Msg::Set { key: "rate".into(), value: serde_json::json!("fast") });
+        assert_eq!((st.rate_now.as_deref(), st.shared.voice.lock().unwrap().1.as_str()), (None, "fast"));
+    }
+
+    #[test]
     fn broken_config_keeps_settings_and_file() {
         let home = TempHome::new("cfg-broken");
         let file = home.dir.join(".config/agent-speak/config.toml");
@@ -3581,6 +3734,38 @@ mod tests {
     }
 
     #[test]
+    fn tool_failures_droop_the_orb_and_reach_the_card() {
+        let mut st = test_state();
+        with_agents(&mut st, &["s", "t"]);
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut r = reader(ours);
+        st.subscribe(theirs);
+        hello(&mut r);
+        let fail = |st: &mut State, err: &str| {
+            st.on_hook("post-tool-use-failure", &serde_json::json!({"session_id": "s", "tool_name": "Edit", "error": err, "is_interrupt": false}))
+        };
+        fail(&mut st, "String to replace not found in file.");
+        st.on_hook("post-tool-use-failure", &serde_json::json!({"session_id": "s", "tool_name": "Bash", "error": "Exit code 1", "is_interrupt": false}));
+        fail(&mut st, "File does not exist.");
+        let lines = drain(&mut r);
+        assert!(lines.iter().all(|l| l.get("running").is_none()), "двое — орб ещё не поник: строки состояния нет {lines:?}");
+        assert_eq!(lines.last().unwrap()["agents"][0]["fails"], 2, "ненулевой код Bash не в счёт");
+        fail(&mut st, "File does not exist.");
+        let lines = drain(&mut r);
+        assert_eq!(lines.iter().find(|l| l.get("running").is_some()).expect("строка состояния")["struggling"], 1);
+        // новый ход — с нуля, и орб это узнаёт
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s", "prompt": "ещё раз"}));
+        assert_eq!(drain(&mut r).iter().find(|l| l.get("running").is_some()).expect("строка состояния")["struggling"], 0);
+        // за агентами не следим — орб не никнет
+        for _ in 0..3 {
+            fail(&mut st, "x");
+        }
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["struggling"], 1);
+        st.cfg.agents_voice = false;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["struggling"], 0);
+    }
+
+    #[test]
     fn summary_click_says_brief_and_bubbles_it() {
         let mut st = test_state();
         with_agents(&mut st, &["почта"]);
@@ -3778,6 +3963,39 @@ mod tests {
         assert_eq!(b.len(), 1);
         assert_eq!((b[0]["kind"].as_str(), b[0]["text"].as_str(), b[0]["who"].as_str()), (Some("final"), Some("Фича готова."), Some("T-s")));
         assert_eq!(pop1(&st), "плуг: Фича готова.", "звучит сразу, а не со следующим тиком");
+    }
+
+    #[test]
+    fn unspoken_news_ripples_the_orb_once() {
+        let ripples = |r: &mut BufReader<UnixStream>| drain(r).into_iter().filter_map(|v| v["ripple"]["tone"].as_str().map(String::from)).collect::<Vec<_>>();
+        let mut st = test_state();
+        with_agents(&mut st, &["s", "t"]);
+        let mut r = sub(&mut st);
+        st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
+        assert!(ripples(&mut r).is_empty(), "сказала сразу — волны нет");
+        pop1(&st);
+        // идёт разговор с Омой: новости ждут за ней — волна цветом события
+        st.on_msg(Msg::VoiceState { state: "listening".into(), talking: true });
+        st.registry.question("t", "Клоду нужно разрешение", 1000);
+        st.on_digest(dg("t", Ask::Question, false, "Можно удалить ветку?"));
+        st.on_digest(dg("s", Ask::Final, false, "Ещё готово."));
+        assert_eq!(ripples(&mut r), ["question", "final"]);
+        // тихий режим: новость на доску не кладётся, а волна есть
+        st.cfg.quiet_override = "on".into();
+        st.registry.status("s", "правлю", 1000);
+        st.on_digest(dg("s", Ask::Progress, true, "Половина готова."));
+        assert_eq!(ripples(&mut r), ["status"]);
+        st.on_digest(dg("s", Ask::Progress, false, "Правлю."));
+        assert!(ripples(&mut r).is_empty(), "неважное промежуточное — не новость");
+        // его чат открыт в окне — он и так это видит
+        st.on_msg(Msg::View { agent: "s".into() });
+        st.on_digest(dg("s", Ask::Final, false, "Готово."));
+        assert!(ripples(&mut r).is_empty());
+        // настроение орба выключено — волн нет
+        st.on_msg(Msg::View { agent: String::new() });
+        st.cfg.orb_moods = false;
+        st.on_digest(dg("s", Ask::Final, false, "Готово."));
+        assert!(ripples(&mut r).is_empty());
     }
 
     #[test]

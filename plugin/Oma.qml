@@ -98,6 +98,7 @@ Item {
     visible: link.speech.running === true
     link: link
     covered: omaWindow.shown
+    openChat: omaWindow.chatKey
     bubbles: omaWindow.shown ? [] : Model.withDraft(root.bubbles, root.draft)
     onDismissed: function(key) { root.bubbles = Model.dismiss(root.bubbles, key) }
     onWindowToggled: omaWindow.toggle()

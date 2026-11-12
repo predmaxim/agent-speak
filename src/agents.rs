@@ -11,6 +11,7 @@ pub const FEED_MAX: usize = 20; // строк ленты на агента
 pub const LINE_MAX: usize = 8000; // символов в строке ленты: чат окна показывает сообщение целиком
 pub const IDLE_AFTER: u64 = 600; // с после «готово» → «простаивает»
 const STATUS_MAX: usize = 120;
+pub const FAILS_DROOP: usize = 3; // упавших вызовов за ход — орб «поник»
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -51,6 +52,8 @@ pub struct Entry {
     pub health: String, // сторож: «завис», «лимит до 15:20»…; пусто — в порядке
     /// Вопрос, который ждёт ответа, с вариантами (`claude::question_context`): по нему мозг Омы отвечает агенту.
     pub ask: String,
+    /// Вызовов инструментов, которые не смогли отработать, за этот ход (хук PostToolUseFailure, см. tool_failed).
+    pub fails: usize,
 }
 
 /// Живая сессия, найденная на диске / в /proc.
@@ -64,6 +67,14 @@ pub struct Live {
     pub transcript: PathBuf,
     pub state: State,   // по файлу сессии: busy → работает, waiting → ждёт ответа, прочее → простаивает
     pub status_at: u64, // statusUpdatedAt файла сессии, с; 0 — неизвестно
+}
+
+/// Хук PostToolUseFailure: вызов инструмента агента не смог отработать. Не в счёт: прерванный пользователем
+/// (is_interrupt), вызов сабагента (agent_id — у него свой ход) и ненулевой код Bash («Exit code N»: команда
+/// отработала и ответила — ls, grep, красный прогон TDD; проба волны 0 — такой приходит сбоем).
+pub fn tool_failed(p: &Value) -> bool {
+    let bash_answered = p["tool_name"] == "Bash" && p["error"].as_str().is_some_and(|e| e.starts_with("Exit code "));
+    p["is_interrupt"] != true && p["agent_id"].as_str().is_none_or(str::is_empty) && !bash_answered
 }
 
 /// start_of(pid): время старта живого процесса (см. proc_start), None — процесса нет.
@@ -379,7 +390,7 @@ impl Registry {
                 changed = true;
                 self.entries.push(Entry {
                     id: l.id, agent: l.agent, title: l.title, project: folder(&l.cwd), cwd: l.cwd, transcript,
-                    state: l.state, status: String::new(), since: now, focused: false, heard: false, pid: l.pid, health: String::new(), ask: String::new(),
+                    state: l.state, status: String::new(), since: now, focused: false, heard: false, pid: l.pid, health: String::new(), ask: String::new(), fails: 0,
                     // агент впервые на глазах (и после перезапуска демона): лента начинается с его истории
                     feed: if l.agent == "claude" { history(&l.transcript, &images_dir()) } else { VecDeque::new() },
                 });
@@ -412,6 +423,9 @@ impl Registry {
         let Some(e) = self.entries.iter_mut().find(|e| e.id == id) else { return false };
         e.heard = true;
         (e.state, e.since) = (state, now);
+        if matches!(kind, "prompt" | "final") {
+            e.fails = 0; // счёт сбоев — за ход
+        }
         if kind != "question" {
             e.ask.clear(); // агент двинулся дальше — вопрос решён
         }
@@ -525,6 +539,18 @@ impl Registry {
         self.get(&self.jumped)
     }
 
+    /// Вызов инструмента агента id не смог отработать; true — агент есть.
+    pub fn failed(&mut self, id: &str) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.id == id) else { return false };
+        e.fails += 1;
+        true
+    }
+
+    /// Агентов с FAILS_DROOP и больше сбоев за ход.
+    pub fn struggling(&self) -> usize {
+        self.entries.iter().filter(|e| e.fails >= FAILS_DROOP).count()
+    }
+
     pub fn waiting(&self) -> usize {
         self.entries.iter().filter(|e| e.state == State::Waiting).count()
     }
@@ -627,6 +653,39 @@ mod tests {
         r.asking("a", menu);
         r.sync(vec![Live { state: State::Working, status_at: 160, ..live("a", true) }], 161); // ответили в терминале: хука нет
         assert_eq!(ask(&r), "", "вопрос больше не ждёт — варианты не висят");
+    }
+
+    #[test]
+    fn tool_failure_counts_only_a_tool_that_could_not_run() {
+        use serde_json::json;
+        let bash = |err: &str| json!({"session_id": "s", "tool_name": "Bash", "error": err, "is_interrupt": false});
+        // проба волны 0: ненулевой код Bash приходит сбоем — это ответ команды (ls, grep, красный прогон TDD), не сбой
+        assert!(!tool_failed(&bash("Exit code 2\nls: cannot access '/x': No such file or directory")));
+        assert!(!tool_failed(&bash("Exit code 1")));
+        assert!(tool_failed(&bash("Error: Bash tool could not run")), "не код выхода команды — сбой самого вызова (текст условный: другие виды ошибок Bash проба не ловила)");
+        assert!(tool_failed(&json!({"session_id": "s", "tool_name": "Edit", "error": "String to replace not found in file."})));
+        assert!(!tool_failed(&json!({"session_id": "s", "tool_name": "Edit", "error": "x", "is_interrupt": true})), "прервал пользователь");
+        assert!(!tool_failed(&json!({"session_id": "s", "tool_name": "Edit", "error": "x", "agent_id": "a1"})), "у сабагента — свой счёт, не агента");
+        assert!(tool_failed(&json!({"session_id": "s", "tool_name": "Edit", "error": "x", "agent_id": ""})));
+    }
+
+    #[test]
+    fn failures_count_per_turn_and_reset_by_prompt_and_end() {
+        let fails = |r: &Registry| r.get("a").unwrap().fails;
+        let mut r = Registry::new();
+        r.sync(vec![live("a", true), live("b", true)], 100);
+        assert!(!r.failed("nobody"));
+        for _ in 0..FAILS_DROOP {
+            assert!(r.failed("a"));
+        }
+        assert_eq!((fails(&r), r.struggling()), (FAILS_DROOP, 1));
+        r.status("a", "правлю", 101);
+        assert_eq!(fails(&r), FAILS_DROOP, "ход идёт — счёт тоже");
+        r.prompt("a", "ещё", 102);
+        assert_eq!((fails(&r), r.struggling()), (0, 0), "новый ход — с нуля");
+        r.failed("a");
+        r.finished("a", "Готово.", 103);
+        assert_eq!(fails(&r), 0, "ход кончился");
     }
 
     #[test]

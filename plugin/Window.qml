@@ -467,6 +467,9 @@ Item {
             mode: root.shown ? Model.orbMode(root.speech) : "idle"
             size: Style.font.display
             line: Math.max(1, Style.space(2))
+            rate: root.speech.rate_now || root.speech.rate || "medium"
+            limit: (root.speech.limit || "") !== ""
+            limitColor: fixedColors.values.yellow || "#d4a72c"
           }
           // Right to left: the power switch at the edge, the buttons, the
           // count of agents waiting for an answer. A page has only Back.
@@ -1347,6 +1350,26 @@ Item {
                   checked: root.speech.orb_satellites === true
                   foreground: root.fg
                   onToggled: root.step("orb_satellites", 1)
+                }
+              }
+
+              SettingRow {
+                key: "orb_moods"
+                label: root.tr("Orb mood")
+                ToggleSwitch {
+                  checked: root.speech.orb_moods === true
+                  foreground: root.fg
+                  onToggled: root.step("orb_moods", 1)
+                }
+              }
+
+              SettingRow {
+                key: "orb_idle_motion"
+                label: root.tr("Breathes at rest")
+                ToggleSwitch {
+                  checked: root.speech.orb_idle_motion === true
+                  foreground: root.fg
+                  onToggled: root.step("orb_idle_motion", 1)
                 }
               }
 

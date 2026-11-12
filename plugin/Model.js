@@ -32,9 +32,11 @@ function parseLine(line) {
   return null
 }
 
-// What the orb shows, by priority. Oma down is "off", yet a waiting agent still shows.
-function orbMode(st) {
+// What the orb shows, by priority. Oma down is "off", yet a waiting agent still shows. `muted`: the mic is off (the
+// default input or Oma's own, read by the orb from PipeWire) — while she hears, the grey disc with the crossed mic.
+function orbMode(st, muted) {
   if (!st || !st.running) return "off"
+  if (muted && ["loading", "listening", "paused"].indexOf(st.oma) >= 0) return "muted"
   if (["loading", "listening", "thinking", "speaking", "paused"].indexOf(st.oma) >= 0) return st.oma
   if (st.speaking) return "speaking"   // news or manual reading: the service speaks, Oma is idle
   if (st.trouble > 0 && st.agents_voice !== false) return "trouble"   // the watch needs the user, above waiting
@@ -54,17 +56,66 @@ function headItems(page, running) {
 }
 
 // Tooltip: its lines, each a key for tr(key, arg); the orb's tooltip and the window header draw them all.
-function orbTip(st) {
-  var mode = orbMode(st)
+function orbTip(st, muted) {
+  var mode = orbMode(st, muted)
   var tips = { off: "Oma is not running", loading: "Oma is loading", listening: "Oma is listening", thinking: "Oma is thinking",
-    speaking: "Oma is speaking", paused: "Paused", quiet: "Quiet mode", idle: "Oma" }
+    speaking: "Oma is speaking", paused: "Paused", quiet: "Quiet mode", idle: "Oma", muted: "Mic is off" }
   var why = st && QUIET_WHY[st.quiet_why]
   var lines = mode === "trouble" ? [["%1 need help", st.trouble]] : mode === "waiting" ? [["%1 waiting", st.waiting]]
     : mode === "quiet" && !st.quiet && why ? [] : [[tips[mode], ""]]   // quiet by reason only: the reason is the line
   if (why) lines.push([why, ""])
+  // the wheel's tempo of this answer (the daemon's rate_now): until the answer ends
+  if (st && TEMPO[st.rate_now]) lines.push([TEMPO[st.rate_now], ""])
   // a limit window near its end: the daemon's phrase, already Russian, so no tr line — it passes tr() as is
   if (st && st.limit) lines.push([st.limit, ""])
   return lines
+}
+
+// The ear meter: PwNodePeakMonitor's peak (linear 0..1) in decibels, −50 dB → 0 … −10 dB → 1 (a calibration for the
+// laptop's mic and a headset: speech at arm's length is about −30); no node — −1.
+var LEVEL_FLOOR = -50
+var LEVEL_TOP = -10
+function level(peak) {
+  if (peak < 0) return -1
+  var db = peak > 0 ? 20 * Math.log(peak) / Math.LN10 : -Infinity
+  return Math.max(0, Math.min(1, (db - LEVEL_FLOOR) / (LEVEL_TOP - LEVEL_FLOOR)))
+}
+
+// How long she still listens, a share of the window: the daemon's listen_until (epoch, s) and listen_secs at `now`;
+// −1 — no arc.
+function listenLeft(until, secs, now) {
+  if (until === null || until === undefined || !(secs > 0)) return -1
+  return Math.max(0, Math.min(1, (until - now) / secs))
+}
+
+// The «done» ring, until seen: `seen` maps an agent id to the since of its done the user has seen — its tab in focus
+// or its chat open in Oma's window (`open`, a chat key). Gone agents are forgotten. Returns the new map.
+function seenDone(seen, agents, open) {
+  var out = {}
+  Array.prototype.slice.call(agents || []).forEach(function(a) {
+    if (a.state === "done" && (a.focused || open === "agent:" + a.id)) out[a.id] = a.since
+    else if (seen[a.id] !== undefined) out[a.id] = seen[a.id]
+  })
+  return out
+}
+
+// A done agent the user has not seen yet: the ring burns.
+function doneUnseen(agents, seen) {
+  return Array.prototype.slice.call(agents || []).some(function(a) { return a.state === "done" && seen[a.id] !== a.since })
+}
+
+// The tempo line by the daemon's rate (RATES in src/config.rs).
+var TEMPO = { "x-slow": "Tempo: very slow", slow: "Tempo: slow", medium: "Tempo: normal", fast: "Tempo: fast", "x-fast": "Tempo: very fast" }
+
+// The wheel over the orb: angleDelta.y piles up in `acc`, a step per ±120 (a notch; a touchpad sends many small ones —
+// stepping on each, as the stock PanelSlider does, would jump), the rest is kept for the next turn.
+function wheelStep(acc, dy) {
+  var a = acc + dy, n = Math.trunc(a / 120) || 0   // || 0: no -0
+  return { steps: n, acc: a - n * 120 }
+}
+
+function rateStep(step) {
+  return JSON.stringify({ cmd: "rate_step", step: step }) + "\n"
 }
 
 // An agent's dot (the window's, the orb's card and satellites): its state; the watch's word (orange) is above any but
@@ -92,17 +143,20 @@ function clip(s, n) {
 }
 
 var PEEK_MAX = 8
+var FAILS_DROOP = 3   // as agents::FAILS_DROOP
 
 // The orb's hover card: {rows, more} — up to PEEK_MAX agents, the most urgent first, and how many more. A row: its
 // dot, name, time in its state (a tr key, at `now`) and a second line up to 60 chars — the question's first line for
-// a waiting one, the watch's word, else the status.
+// a waiting one, the watch's word, else the status (or the count of failed calls, `fails`).
 function peekRows(agents, now) {
   var all = byUrgency(agents)
   return { more: Math.max(0, all.length - PEEK_MAX), rows: all.slice(0, PEEK_MAX).map(function(a) {
     var dot = dotKind(a)
     var ask = String(a.ask || "").split("\n").filter(function(l) { return l.trim() !== "" })[0]
     var text = dot === "waiting" ? ask || a.status : dot === "health" ? a.health : a.status
-    return { id: a.id, dot: dot, name: a.title || a.project || "", ago: ago(a.since, now), text: clip(text, 60) }
+    // fails: tool calls that could not run this turn (the daemon's FAILS_DROOP and up) — a working row counts them instead
+    return { id: a.id, dot: dot, name: a.title || a.project || "", ago: ago(a.since, now), text: clip(text, 60),
+      fails: dot === "working" && a.fails >= FAILS_DROOP ? a.fails : 0 }
   }) }
 }
 
@@ -332,7 +386,7 @@ var SETTINGS_SECTIONS = [
   { title: "", rows: ["speaker", "rate"] },
   { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours", "screencast_privacy", "hush_summary"] },
   { title: "Hearing", rows: ["music_pause"] },
-  { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites"] },
+  { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites", "orb_moods", "orb_idle_motion"] },
   { title: "Agents", rows: ["agents_voice", "progress_digest", "memory", "memory_page", "limit_warn"] }
 ]
 
@@ -346,7 +400,7 @@ function settingStep(row, st, dx) {
   if (row === "quiet_now") return { key: "quiet_override", value: st.quiet ? "off" : "on", sample: false }
   if (row === "quiet_schedule") return { key: "quiet_schedule", value: !st.quiet_schedule, sample: false }
   if (row === "orb_over_fullscreen") return { key: row, value: !st.orb_over_fullscreen, sample: false }
-  if (row === "orb_satellites") return { key: row, value: !st.orb_satellites, sample: false }
+  if (row === "orb_satellites" || row === "orb_moods" || row === "orb_idle_motion") return { key: row, value: !st[row], sample: false }
   if (row === "progress_digest") return { key: row, value: !st.progress_digest, sample: false }
   if (row === "agents_voice") return { key: row, value: !st.agents_voice, sample: false }
   if (row === "screencast_privacy" || row === "hush_summary") return { key: row, value: !st[row], sample: false }
