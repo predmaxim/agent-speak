@@ -433,7 +433,8 @@ PanelWindow {
           if (!sat.agent) return ""
           var a = Model.ago(sat.agent.since, Date.now() / 1000)
           return (sat.agent.title || sat.agent.project || "") + " — "
-            + (sat.kind === "health" ? sat.agent.health : win.tr(Model.stateLabel(sat.agent.state)).toLowerCase()) + " · " + win.tr(a[0], a[1])
+            + (sat.agent.note ? win.tr("Needs: %1", sat.agent.note)
+              : sat.kind === "health" ? sat.agent.health : win.tr(Model.stateLabel(sat.agent.state)).toLowerCase()) + " · " + win.tr(a[0], a[1])
         }
       }
     }

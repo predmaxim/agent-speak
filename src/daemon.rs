@@ -43,6 +43,7 @@ enum Event {
     Tell(Box<dyn FnOnce() + Send>), // ответ агенту от Омы — в поток действий; ответ CLI шлёт само дело
     Turn(Sender<String>), // ход мозга Омы: свежий фокус, ответ — строка агентов
     Show(String, Sender<Result<String, String>>), // `agent-speak show`: агент (пусто — следующий ждущий), ответ — его проект или ошибка
+    Note(String, u32, String, Sender<Result<String, String>>), // `agent-speak note`: сессия, pid CLI, текст; ответ — агенту
     Bt(&'static str, bool), // режим наушников переключён (headset | music) и переключала ли его Ома
     Outs(String, String), // выходы звука сменились: выход по умолчанию, динамики ноутбука — от потока `pactl subscribe`
 }
@@ -115,6 +116,10 @@ const OMA_REAP: Duration = Duration::from_secs(30);
 const LIMIT_HOLD: u64 = 600;
 /// Строк экрана терминала в вопросе модели о зависании.
 const SCREEN_LINES: usize = 25;
+
+/// Ответ агенту на `agent-speak note`: принято; и отказ — Ома заметки не слушает (выключено или не следит за агентами).
+const NOTE_TAKEN: &str = "Передано Оме. Ответ придёт обычным сообщением.";
+const NOTE_OFF: &str = "Ома сейчас не слушает заметки агентов";
 
 
 
@@ -541,6 +546,7 @@ pub fn run() {
                 let _ = reply.send(st.turn());
             }
             Event::Show(agent, reply) => st.show(&agent, reply),
+            Event::Note(session, pid, text, reply) => drop(reply.send(st.inbox(&session, pid, &text))),
             Event::Bt(mode, switched) => st.on_bt(mode, switched),
             Event::Outs(default, speakers) => st.on_outs(default, speakers),
         }
@@ -769,7 +775,7 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
         match serde_json::from_str::<Msg>(&line) {
             // ответ лёг бы между строками рассылки, а его таймаут записи (общий у клонов сокета) — на подписчика:
             // запрос не исполняется, отказ пишется с таймаутом подписки
-            Ok(Msg::Tell { .. } | Msg::Turn | Msg::Show { .. }) if subscribed => {
+            Ok(Msg::Tell { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. }) if subscribed => {
                 let err = serde_json::json!({"err": "запрос — отдельным соединением: это подписано на рассылку"});
                 if (&conn).write_all(format!("{err}\n").as_bytes()).is_err() {
                     break;
@@ -807,6 +813,18 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
                 let reply = match shown {
                     Ok(name) => serde_json::json!({"ok": name}),
                     Err(e) => serde_json::json!({"err": e}),
+                };
+                if !answer(&conn, &format!("{reply}\n")) {
+                    break;
+                }
+            }
+            Ok(Msg::Note { session, pid, text }) => {
+                let (rtx, rrx) = mpsc::channel();
+                let r = tx.send(Event::Note(session, pid, text, rtx)).ok().and_then(|()| rrx.recv().ok());
+                let reply = match r {
+                    Some(Ok(ok)) => serde_json::json!({"ok": ok}),
+                    Some(Err(e)) => serde_json::json!({"err": e}),
+                    None => serde_json::json!({"err": "служба не ответила"}),
                 };
                 if !answer(&conn, &format!("{reply}\n")) {
                     break;
@@ -1022,7 +1040,7 @@ impl State {
             // волна 4: агенты
             done_facts: false,
             permission_buttons: false,
-            agent_inbox: false,
+            agent_inbox: self.cfg.agent_inbox,
             // волна 5: слово-побудка
             wake: "off",
             wake_word: false,
@@ -1887,7 +1905,7 @@ impl State {
                 self.on_back(back);
             }
             Msg::View { agent } => self.viewing = agent,
-            Msg::Subscribe | Msg::Tell { .. } | Msg::Turn | Msg::Show { .. } => {} // приходят как Event::Subscribe, Tell, Turn и Show
+            Msg::Subscribe | Msg::Tell { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. } => {} // приходят как Event::Subscribe, Tell, Turn, Show и Note
         }
         if changes {
             self.broadcast();
@@ -2023,6 +2041,27 @@ impl State {
         })));
     }
 
+    /// Заметка агента (`agent-speak note`): «нужно» у агента в окне и на спутнике (он среди ждущих), пузырь, вне тишины —
+    /// сразу вслух (СЕЙЧАС). Текст — данные агента: звучит за «агенту нужно — », мозгу идёт как его слова. Снимает её
+    /// промпт пользователя этому агенту. Ok — ответ агенту; Err — тоже ему: пусть напишет пользователю сам.
+    fn inbox(&mut self, session: &str, pid: u32, text: &str) -> Result<String, String> {
+        if !self.cfg.agent_inbox || !self.cfg.agents_voice {
+            return Err(NOTE_OFF.into());
+        }
+        let Some(id) = self.registry.get(session).or_else(|| self.registry.above(pid)).map(|e| e.id.clone()) else {
+            return Err("Ома не знает этого агента".into());
+        };
+        let Some(e) = self.registry.note(&id, text) else { return Err("Пустая заметка: одной строкой — что нужно от пользователя".into()) };
+        let (who, project, say) = (e.title.clone(), e.project.clone(), format!("агенту нужно — {}", e.note));
+        let line = news::Chunk { class: Some(Class::Now), project: project.clone(), text: say.clone() }.line();
+        self.bubble(&id, &format!("note-{id}"), &who, &line, "question");
+        if !self.quiet() {
+            self.board.push(News { session: id, class: Class::Now, project, say, important: false, born: (self.now_secs)() });
+        }
+        self.push_agents();
+        Ok(NOTE_TAKEN.into())
+    }
+
     fn on_hook(&mut self, kind: &str, p: &serde_json::Value) {
         if kind == "statusline" {
             // рисуется на каждое событие и в покое — не активность агента, только проценты лимитов
@@ -2059,7 +2098,8 @@ impl State {
                 let by_helper = agents::technical(prompt);
                 *self.helper_turn.entry(session.clone()).or_insert(by_helper) &= by_helper;
                 self.registry.prompt(&session, prompt, now);
-                self.board.prompted(&session); // ответили в терминале — Оме спрашивать нечего, и «нужно» агента снято
+                // ответили в терминале — Оме спрашивать нечего, и «нужно» агента снято; отчёт помощника — не ответ пользователя
+                if by_helper { self.board.answered(&session) } else { self.board.prompted(&session) }
                 self.watch.prompted(&session);
                 self.registry.set_health(&session, &self.watch.health(&session));
                 self.progress.remove(&session);
@@ -3917,6 +3957,61 @@ mod tests {
         assert_eq!(serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["struggling"], 1);
         st.cfg.agents_voice = false;
         assert_eq!(serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["struggling"], 0);
+    }
+
+    #[test]
+    fn agent_note_is_said_at_once_and_waits_for_the_users_prompt() {
+        let mut st = test_state();
+        with_agents(&mut st, &["s", "t"]);
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        assert_eq!(st.inbox("s", 0, "нужен токен TFS"), Ok(NOTE_TAKEN.into()));
+        let lines = drain(&mut r);
+        assert_eq!(lines.iter().find(|l| l.get("running").is_some()).expect("строка состояния")["waiting"], 1, "орб «ждёт»");
+        assert_eq!(lines.iter().find_map(|l| l.get("agents")).unwrap()[0]["note"], "нужен токен TFS", "окно и спутник");
+        let b: Vec<_> = lines.iter().filter_map(|l| l.get("bubble")).collect();
+        assert_eq!((b.len(), b[0]["agent"].as_str(), b[0]["text"].as_str()), (1, Some("s"), Some("s: агенту нужно — нужен токен TFS")));
+        assert!(st.board.has("s", Class::Now), "СЕЙЧАС: звучит сразу, не в пачке");
+        // отчёт помощника под видом промпта — не ответ пользователя
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s", "prompt": "<task-notification>готово</task-notification>"}));
+        assert!(st.board.has("s", Class::Now) && st.registry.waiting() == 1);
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s", "prompt": "токен в ~/.tfs"}));
+        assert!(!st.board.has("s", Class::Now) && st.registry.waiting() == 0, "ответ пользователя снимает и речь, и пометку");
+        // тихий режим: пометка есть, речи нет
+        st.cfg.quiet_override = "on".into();
+        assert!(st.inbox("t", 0, "выбери: A или B").is_ok());
+        assert!(!st.board.has("t", Class::Now) && st.registry.waiting() == 1);
+    }
+
+    #[test]
+    fn agent_note_refused_when_oma_does_not_listen() {
+        let mut st = test_state();
+        with_agents(&mut st, &["s"]);
+        assert!(st.inbox("чужой", 0, "x").unwrap_err().contains("не знает этого агента"), "claude -p и прочие не из реестра");
+        assert!(st.inbox("s", 0, " \n ").is_err(), "пустая");
+        st.cfg.agent_inbox = false;
+        assert_eq!(st.inbox("s", 0, "нужен токен"), Err(NOTE_OFF.into()));
+        st.cfg = Config { agents_voice: false, ..Config::default() };
+        assert_eq!(st.inbox("s", 0, "нужен токен"), Err(NOTE_OFF.into()), "за агентами не следим — о них ни слова");
+        assert_eq!((st.registry.waiting(), st.board.has("s", Class::Now)), (0, false));
+        let v = |st: &State| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["agent_inbox"].clone();
+        assert_eq!(v(&st), true);
+        st.cfg.agent_inbox = false;
+        assert_eq!(v(&st), false);
+    }
+
+    #[test]
+    fn note_is_a_request() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (server, client) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || serve(server, tx));
+        let mut w = client.try_clone().unwrap();
+        let mut r = reader(client);
+        w.write_all("{\"cmd\":\"note\",\"session\":\"s\",\"pid\":7,\"text\":\"нужен токен\"}\n".as_bytes()).unwrap();
+        let Ok(Event::Note(session, pid, text, reply)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("note не дошёл до цикла") };
+        assert_eq!((session.as_str(), pid, text.as_str()), ("s", 7, "нужен токен"));
+        reply.send(Ok(NOTE_TAKEN.into())).unwrap();
+        assert_eq!(next(&mut r)["ok"], NOTE_TAKEN);
     }
 
     #[test]

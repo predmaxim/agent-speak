@@ -266,7 +266,7 @@ assert.strictEqual(M.taken("", { key: "chat:1", role: "me", text: "" }), false)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 20)
+assert.strictEqual(M.SETTINGS_ROWS.length, 21)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "kseniya", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
@@ -289,6 +289,10 @@ assert.deepStrictEqual(M.SETTINGS_SECTIONS.find(s => s.title === "Hearing").rows
 assert.deepStrictEqual(M.settingStep("limit_warn", Object.assign({}, cfg, { limit_warn: true }), 1), { key: "limit_warn", value: false, sample: false })
 assert.strictEqual(M.SETTINGS_SECTIONS[4].rows[M.SETTINGS_SECTIONS[4].rows.length - 1], "limit_warn", "«Предупреждать о лимите» — последняя в агентах")
 assert.deepStrictEqual(M.settingStep("memory", Object.assign({}, cfg, { memory: true }), 1), { key: "memory", value: false, sample: false })
+// «Agents write to Oma» (agent_inbox): a switch right before the limit warning
+assert.deepStrictEqual(M.settingStep("agent_inbox", Object.assign({}, cfg, { agent_inbox: true }), 1), { key: "agent_inbox", value: false, sample: false })
+assert.strictEqual(M.SETTINGS_ROWS[M.SETTINGS_ROWS.indexOf("limit_warn") - 1], "agent_inbox")
+assert.strictEqual(ru("Agents write to Oma"), "Агенты пишут Оме")
 // the voice: intonation and sound cues switch; finals aloud at most every N min — a dropdown, ←/→ go round
 assert.deepStrictEqual(M.SETTINGS_SECTIONS[0].rows, ["speaker", "rate", "intonation", "earcons"])
 assert.deepStrictEqual(M.settingStep("intonation", Object.assign({}, cfg, { intonation: true }), 1), { key: "intonation", value: false, sample: false })
@@ -325,6 +329,12 @@ const crowd = [ag("i", "idle", 10), ag("d1", "done", 20), ag("w1", "working", 30
 assert.deepStrictEqual(M.byUrgency(crowd).map(a => a.id), ["q1", "q2", "h", "w2", "w1", "d1", "i"])
 assert.deepStrictEqual(crowd.map(M.dotKind), ["idle", "done", "working", "waiting", "health", "working", "waiting"])
 assert.strictEqual(M.dotKind(ag("x", "waiting", 0, { health: "завис" })), "waiting")   // the question's red stays first
+// an agent's note to Oma («needs», `agent-speak note`): it waits for the user though it works — red, its words the line
+const noted = ag("n", "working", 5, { health: "завис", note: "токен TFS" })
+assert.strictEqual(M.dotKind(noted), "waiting")
+assert.deepStrictEqual(M.peekRows([noted], 0).rows.map(r => [r.dot, r.text]), [["waiting", "токен TFS"]])
+assert.strictEqual(M.peekRows([ag("q", "waiting", 0, { ask: "Какой вид?", note: "токен" })], 0).rows[0].text, "Какой вид?", "the question first")
+assert.strictEqual(ru("Needs: %1", "токен TFS"), "нужно: токен TFS")
 const peek = M.peekRows(crowd, 45 + 15 * 60)
 assert.strictEqual(peek.more, 0)
 assert.deepStrictEqual(peek.rows.map(r => [r.id, r.dot, r.name, r.text]), [
