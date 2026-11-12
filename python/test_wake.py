@@ -347,6 +347,25 @@ def test_mute_while_she_hears_her_name_does_not_close_are_you_there(monkeypatch)
     run(go())
 
 
+def test_mic_watch_eof_is_an_error_and_closes_the_ear():
+    # подписка pactl кончилась сама (перезапустили pipewire-pulse) — без неё mute и чужую запись никто не заметит:
+    # слух закрывается, как при смерти pw-record; побудку снова откроет тик ac
+    from agent_voice.ear import Ear
+    out = asyncio.Queue()
+    e = Ear(out, Whisper(load=lambda: "m"), cmd=LIVE, vad_load=lambda: None, mic=lambda: ("", False, ""), muted=lambda t: False,
+            watch=["sh", "-c", "exit 0"])
+
+    async def go():
+        await e.start()
+        proc = e._proc
+        assert await asyncio.wait_for(out.get(), 5) == ("mic_check",)
+        ev = await asyncio.wait_for(out.get(), 5)
+        assert ev[0] == "error" and "MicWatch" in ev[1]
+        await asyncio.wait_for(proc.wait(), 5)  # pw-record не пишет без присмотра
+        assert not e.open and e._sub is None
+    run(go())
+
+
 def test_ear_close_rechecks_the_mic_as_free():
     # слух закрыт — микрофон для Омы свободен, как раньше по опросу: проверка в очереди, MicWatch уже нет
     from agent_voice.ear import Ear

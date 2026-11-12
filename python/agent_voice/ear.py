@@ -181,7 +181,7 @@ class Ear:
             phrases = asyncio.Queue()
             self._tasks = [asyncio.create_task(self._recognize(phrases)), asyncio.create_task(self._read(proc, phrases))]
             if self._sub:
-                self._tasks.append(asyncio.create_task(self._watch(self._sub)))
+                self._tasks.append(asyncio.create_task(self._watch(self._sub, proc)))
             return True
 
     async def take(self, at):
@@ -243,12 +243,15 @@ class Ear:
         finally:
             waker.busy = False
 
-    async def _watch(self, sub):
-        """MicWatch: чужой захват, mute и вход по умолчанию — по событиям pactl subscribe, а не опросом; первая — сразу."""
+    async def _watch(self, sub, proc):
+        """MicWatch: чужой захват, mute и вход по умолчанию — по событиям pactl subscribe, а не опросом; первая — сразу.
+        Подписка кончилась сама (перезапуск pipewire-pulse) — слух закрывается, как при смерти pw-record: без неё mute и
+        чужую запись никто не заметит."""
         await self._mic_check()
         while line := await sub.stdout.readline():
             if MIC_EVENT.search(line.decode(errors="replace")):
                 await self._mic_check()
+        await self._died(proc, "MicWatch: pactl subscribe завершился")
 
     async def _mic_check(self):
         if not self.mic_pending:
@@ -302,7 +305,10 @@ class Ear:
             reason = "pw-record завершился"
         except Exception as e:
             reason = f"слух: {e!r}"
-        # читатель кончил сам (не stop): сообщить и привести Ear в закрытое состояние
+        await self._died(proc, reason)
+
+    async def _died(self, proc, reason):
+        """Читатель или MicWatch кончил сам (не stop): сообщить и привести Ear в закрытое состояние."""
         await self.out.put(("error", reason))
         if self._proc is proc:
             me = asyncio.current_task()
