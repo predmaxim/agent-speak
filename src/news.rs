@@ -2,6 +2,7 @@
 //! ДАЛЬШЕ (итоги ходов, «починила сама») — пачкой не чаще раза в `every`; промежуточного на доске нет: оно только в окне.
 
 use crate::audio::Cue;
+use crate::gitfacts::Facts;
 use crate::phrases::{self, Rotor};
 use crate::text::plural;
 
@@ -47,6 +48,7 @@ pub struct News {
     pub say: String,     // без «проект: »
     pub important: bool, // пользователю нужно решить или сделать: в пачке итогов звучит своей фразой, а не именем проекта
     pub born: u64,
+    pub facts: Facts,    // git после хода (итог): за фразой — «Закоммичено.»; в пачке из 2+ — только тревожное
 }
 
 impl News {
@@ -71,7 +73,7 @@ impl Chunk {
     }
 
     fn of(n: &News) -> Chunk {
-        Chunk { class: Some(n.class), project: n.project.clone(), text: n.say.clone() }
+        Chunk { class: Some(n.class), project: n.project.clone(), text: n.facts.after(&n.say) }
     }
 
     /// «проект: текст», как кусок звучит без интонации.
@@ -320,7 +322,10 @@ fn batch(finals: &[News]) -> Vec<Chunk> {
         return finals.iter().map(Chunk::of).collect();
     }
     let (own, rest): (Vec<&News>, Vec<&News>) = finals.iter().partition(|i| i.important || i.project.is_empty());
-    let mut chunks: Vec<Chunk> = own.into_iter().map(Chunk::of).collect();
+    // факты git в пачке — только тревожные: «Закоммичено» не звучит
+    let alarm = |i: &News| if i.facts.dirty > 0 { i.facts } else { Facts::default() };
+    let mut chunks: Vec<Chunk> = own.into_iter().map(|i| Chunk::of(&News { facts: alarm(i), ..i.clone() })).collect();
+    let alarms: Vec<String> = rest.iter().filter_map(|i| i.facts.alarm(&i.project)).collect();
     let mut names: Vec<&str> = Vec::new();
     for i in rest {
         if !names.contains(&i.project.as_str()) {
@@ -331,6 +336,12 @@ fn batch(finals: &[News]) -> Vec<Chunk> {
         let verb = if names.len() == 1 { "Закончил" } else { "Закончили" }; // перечень имён, а не числительное
         let more = if chunks.is_empty() { "" } else { " ещё" };
         chunks.push(Chunk { class: Some(Class::Final), project: String::new(), text: format!("{verb}{more}: {}.", names.join(", ")) });
+    }
+    for a in alarms {
+        // два агента в одном репозитории — одна фраза
+        if !chunks.iter().any(|c| c.text == a) {
+            chunks.push(Chunk { class: Some(Class::Final), project: String::new(), text: a });
+        }
     }
     chunks
 }
@@ -348,7 +359,7 @@ mod tests {
     /// Новость из строки «проект: фраза», как её собирают служба и сторож; без «: » — без проекта.
     fn n(session: &str, class: Class, line: &str, born: u64) -> News {
         let (project, say) = line.split_once(": ").unwrap_or(("", line));
-        News { session: session.into(), class, project: project.into(), say: say.into(), important: false, born }
+        News { session: session.into(), class, project: project.into(), say: say.into(), important: false, born, facts: Facts::default() }
     }
 
     fn tk(b: &mut Board, now: u64, skip: Option<&str>) -> Option<String> {
@@ -763,6 +774,22 @@ mod tests {
             b.push(n(&format!("s{i}"), Class::Final, &format!("p{i}: готово."), 40 + i));
         }
         assert!(tk(&mut b, 40, None).unwrap().starts_with("Закончили: p0, p1,"));
+    }
+
+    #[test]
+    fn git_facts_follow_the_final_only_alarming_in_a_batch() {
+        let git = |commits, dirty| Facts { commits, dirty, unpushed: Some(2) };
+        let with = |s: &str, line: &str, born, important, facts| News { important, facts, ..n(s, Class::Final, line, born) };
+        let mut b = Board::default();
+        b.push(with("a", "datebook: готово.", 1, false, git(1, 0)));
+        assert_eq!(sp(&mut b, 10).unwrap(), "datebook: готово. Закоммичено.", "один итог — все факты; «не запушено» — только в окне");
+        b.push(with("a", "datebook: готово.", 2, false, git(1, 0)));
+        b.push(with("b", "agent-speak: эхо починено.", 3, false, git(1, 3)));
+        b.push(with("e", "agent-speak: орб готов.", 4, false, git(0, 3)));
+        b.push(with("c", "omarchy-mail: нужно решить, куда пушить.", 5, true, git(0, 1)));
+        b.push(with("d", "site: выкатка готова, нужна проверка.", 6, true, git(2, 0)));
+        assert_eq!(sp(&mut b, 20).unwrap(), "omarchy-mail: нужно решить, куда пушить. Не закоммичен 1 файл. site: выкатка готова, нужна проверка. \
+            Закончили ещё: datebook, agent-speak. В agent-speak не закоммичены 3 файла.", "одна фраза на репозиторий");
     }
 
     #[test]
