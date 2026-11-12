@@ -52,8 +52,8 @@ def status_events(d, last):
     if last.get("limit", "") != limit:
         evs.append(("limit", limit))
     remember = d.get("memory") is not False
-    if last.get("memory") is False and remember:  # включили память — не первая строка
-        evs.append(("memory_on",))
+    if last.get("memory") != remember:  # и первая строка: включили, пока Омы не было, — узнаётся по метке на диске
+        evs.append(("memory", remember))
     last["memory"] = remember
     last.update(speaking=speaking, voiced=voiced, user_paused=user_paused, limit=limit)
     return evs
@@ -308,8 +308,8 @@ class Oma:
             self.why = ev[1]
         elif kind == "limit":
             self.limit = ev[1]
-        elif kind == "memory_on":  # сказанное при выключенной памяти в заметки дней не попадёт
-            self.bg(asyncio.to_thread(memory.mark_seen))
+        elif kind == "memory":  # сказанное при выключенной памяти в заметки дней не попадёт
+            self.bg(asyncio.to_thread(memory.switched, ev[1]))
         elif kind == "mic":
             self.ear.paused = ev[1]  # микрофон пишет другой (voxtype и т. п.) — кадры не слушаем
             await self.act(c.mic_busy(ev[1]))

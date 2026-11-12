@@ -2942,7 +2942,8 @@ def test_status_line_events_only_on_change_and_her_sound_by_voiced():
     last = {}
     line = lambda speaking, voiced, played=0.0, out="speakers", quiet=False: {
         "running": True, "speaking": speaking, "voiced": voiced, "played_at": played, "out": out, "quiet": quiet}
-    assert status_events(line(False, 0), last) == [("audio", False, 0.0, 0, False), ("quiet", False), ("quiet_why", ""), ("out", "speakers")]
+    assert status_events(line(False, 0), last) == [("audio", False, 0.0, 0, False), ("quiet", False), ("quiet_why", ""), ("out", "speakers"),
+                                                    ("memory", True)]  # первая строка: настройка памяти — к метке off на диске
     assert status_events(line(False, 0), last) == [], "повтор «не говорит» — не событие"
     assert status_events(line(True, 0), last) == [("audio", True, 0.0, 0, False)]
     assert status_events(line(True, 0, 0.0, "headphones"), last) == [("out", "headphones")]
@@ -3520,19 +3521,24 @@ def test_memory_switched_on_marks_chats_said_while_off(monkeypatch, tmp_path):
     msgs = {"p": [m("user", "личный разговор"), m("assistant", "Поняла.")]}
     memory, _ = _compress_env(monkeypatch, tmp_path, [info("p", mod=int(d10 * 1000))], msgs)
     last = {}
-    assert ("memory_on",) not in status_events({"memory": True}, last), "первая строка — не включение"
-    assert ("memory_on",) not in status_events({"memory": False}, last)
-    assert ("memory_on",) not in status_events({"memory": False}, last)
-    assert ("memory_on",) in status_events({"memory": True}, last), "выкл → вкл"
-    assert ("memory_on",) not in status_events({"memory": True}, last), "только смена"
+    assert ("memory", True) in status_events({"memory": True}, last), "первая строка — тоже: могли включить, пока Омы не было"
+    assert ("memory", False) in status_events({"memory": False}, last)
+    assert not [e for e in status_events({"memory": False}, last) if e[0] == "memory"], "только смена"
+    assert ("memory", True) in status_events({"memory": True}, last), "выкл → вкл"
     sent, emitted = [], []
     _, oma = _oma(sent, emitted)
 
-    async def go():
-        await oma.event(("memory_on",))
-        await asyncio.gather(*oma.tasks)
-    run(go())
+    async def go(*evs):
+        for ev in evs:
+            await oma.event(ev)
+            await asyncio.gather(*oma.tasks)
+    run(go(("memory", True)))
+    assert not os.path.exists(os.path.join(memory.DIR, "seen.json")), "включена и метки off нет — отмечать нечего"
+    run(go(("memory", False)))
+    assert os.path.exists(os.path.join(memory.DIR, "off")), "выключена — метка на диске (переживает перезапуск Омы)"
+    run(go(("memory", True)))
     assert json.load(open(os.path.join(memory.DIR, "seen.json"))) == {"p": 2}
+    assert not os.path.exists(os.path.join(memory.DIR, "off"))
     asked = []
 
     async def ask(prompt):
@@ -3700,3 +3706,16 @@ def test_memory_compress_deletes_old_days_and_stale_news(monkeypatch, tmp_path):
     run(memory.compress(now=today, ask=fail))
     assert sorted(os.listdir(days)) == ["2026-10-13.md"], "заметки старше 30 дней удаляются"
     assert os.listdir(news) == [], "пересказы, не сжатые за 7 дней, удаляются"
+
+
+def test_memory_switched_on_while_oma_was_down_marks_on_first_line(monkeypatch, tmp_path):
+    # выключил, поговорил, Ома упала; включили, пока её не было: первая строка новой Омы — уже «вкл», метка off на диске решает
+    m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
+    d10 = _local(2026, 11, 10, 20)
+    memory, _ = _compress_env(monkeypatch, tmp_path, [info("p", mod=int(d10 * 1000))], {"p": [m("user", "личное"), m("assistant", "Поняла.")]})
+    memory.switched(False)
+    from agent_voice.__main__ import status_events
+    assert ("memory", True) in status_events({"memory": True}, {}), "первая строка новой Омы"
+    memory.switched(True)
+    assert json.load(open(os.path.join(memory.DIR, "seen.json"))) == {"p": 2}
+    assert not os.path.exists(os.path.join(memory.DIR, "off"))

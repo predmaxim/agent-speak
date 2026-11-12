@@ -7,11 +7,13 @@ Write/Edit, а gate() — хук PreToolUse — пропускает тольк�
 которые служба пишет в news/<день>.jsonl (src/memory.rs). Свежие 7 дней идут в системный промпт новых чатов (block())."""
 import asyncio
 import datetime
+import fcntl
 import glob
 import json
 import os
 import re
 import sys
+import tempfile
 import time
 import tomllib
 
@@ -100,14 +102,28 @@ def mark_seen(marks=None, sids=None):
     сообщений}, sids — все чаты (ушедших в файле не остаётся); без них — все чаты до конца: память включили, сказанное
     при выключенной в заметки дней не попадёт. Смещение только растёт: файл пишут и Ома, и таймер."""
     from . import brain  # SDK — тяжёлый импорт, только задаче
-    seen = _seen()
-    if marks is None:
-        sids = {i.session_id for i in brain.list_sessions(brain.OMA_DIR)}
-        marks = {s: seen.get(s, 0) + len(brain.get_session_messages(s, directory=brain.OMA_DIR, offset=seen.get(s, 0)))
-                 for s in sids}
-    seen.update({s: max(n, seen.get(s, 0)) for s, n in marks.items()})
     ensure()
-    _write(os.path.join(DIR, "seen.json"), json.dumps({s: n for s, n in seen.items() if s in sids}))
+    with open(os.path.join(DIR, "seen.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # чтение-изменение-запись целиком: Ома и таймер не перетрут друг друга
+        seen = _seen()
+        if marks is None:
+            sids = {i.session_id for i in brain.list_sessions(brain.OMA_DIR)}
+            marks = {s: seen.get(s, 0) + len(brain.get_session_messages(s, directory=brain.OMA_DIR, offset=seen.get(s, 0)))
+                     for s in sids}
+        seen.update({s: max(n, seen.get(s, 0)) for s, n in marks.items()})
+        _write(os.path.join(DIR, "seen.json"), json.dumps({s: n for s, n in seen.items() if s in sids}))
+
+
+def switched(on):
+    """Настройка памяти в строке службы (и первая после запуска Омы). Выключена — метка off на диске; включена при метке —
+    всё сказанное до сих пор отмечено (mark_seen), метка снята: включили и тогда, когда Омы не было, — сжатие этого не возьмёт."""
+    ensure()
+    off = os.path.join(DIR, "off")
+    if not on:
+        os.close(os.open(off, os.O_WRONLY | os.O_CREAT, 0o600))
+    elif os.path.exists(off):
+        mark_seen()
+        os.remove(off)
 
 
 def prompt(on):
@@ -188,11 +204,15 @@ def clip(text, n=NOTE_MAX):
 
 
 def _write(path, text):
-    """Атомарно и только себе: tmp 0600 + rename."""
-    tmp = path + ".tmp"
-    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
-        f.write(text)
-    os.replace(tmp, path)
+    """Атомарно и только себе: свой tmp (mkstemp — 0600, имя у каждого писателя своё) + rename."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=os.path.basename(path) + ".")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
 
 
 def _news(path):

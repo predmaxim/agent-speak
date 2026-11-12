@@ -854,8 +854,11 @@ impl State {
         eprintln!("agent-speak: показ экрана: {why}");
         self.quiet_why.screencast = on;
         self.quiet_over |= on;
-        if !self.quiet_why.any() {
-            self.quiet_over &= self.board.overview(QUIET_OVER).is_some(); // сводке нечего считать (ни итогов, ни вопросов) — её не будет, дальше обычные новости
+        if !self.quiet_why.any() && self.quiet_over && self.board.overview(QUIET_OVER).is_none() {
+            // сводке нечего считать (ни итогов, ни вопросов) — её не будет: промежуточное за тишину выбросить, как выбросила бы она,
+            // срочное и восстановление — по своим правилам, дальше обычные новости
+            self.quiet_over = false;
+            self.board.retain_classes(&[Class::Urgent, Class::Restore]);
         }
         true
     }
@@ -5077,6 +5080,25 @@ mod tests {
     #[test]
     fn urgent_only_kept_no_summary_later() {
         assert_eq!(kept_only_while_busy(Class::Urgent), ["плуг: Фича готова."]);
+    }
+
+    #[test]
+    fn progress_only_kept_is_dropped_not_spoken_later() {
+        // за тишину по причине легло только промежуточное (progress_digest вкл): сводки нет, и шаги не звучат обычной новостью
+        for summary in [true, false] {
+            let (mut st, now) = presence_state(1000);
+            st.cfg.hush_summary = summary;
+            snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 0, "screencast": true}));
+            st.board.push(News { session: "t".into(), class: Class::Progress, say: "плуг: нашёл утечку.".into(), born: 1000 });
+            *now.lock().unwrap() = 1030;
+            snap(&mut st, serde_json::json!({"at": 1030, "idle_since": 0}));
+            st.tick();
+            assert!(!st.quiet_over);
+            assert!(texts(&st).is_empty(), "промежуточное за тишину не звучит (hush_summary={summary})");
+            final_s(&mut st);
+            st.tick();
+            assert_eq!(texts(&st), ["плуг: Фича готова."], "следующий итог — своим текстом");
+        }
     }
 
     #[test]
