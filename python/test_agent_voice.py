@@ -1793,7 +1793,7 @@ def test_draft_is_typed_without_asking_even_by_voice():
     assert r.startswith("Вставлено в поле ввода omarchy-mail, не отправлено") and "«Написала omarchy-mail, отправишь сам»" in r
 
 
-def test_draft_refuses_menu_option_chat_and_interrupted_turn():
+def test_draft_refuses_menu_option_chat_and_asked_turn():
     o, calls = _orders()
     o.turn(True, "выбери второй вариант, но не отправляй")
     assert run(o.tell(E[0], "", "второй", option=2, draft=True)).startswith("Не вставлено: черновик — только текст") and not calls
