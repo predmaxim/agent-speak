@@ -22,6 +22,8 @@ pub struct Config {
     pub orb_pos: String,
     /// орб и пузыри — и над полноэкранными окнами (слой Overlay), иначе под ними (Top)
     pub orb_over_fullscreen: bool,
+    /// спутники агентов: точки у орба, по одной на агента
+    pub orb_satellites: bool,
     /// сторож проверяет агентов раз в столько секунд
     pub watch_every: u64,
     /// агент «работает», а событий нет столько минут — завис
@@ -33,6 +35,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config { speaker: "xenia".into(), rate: "medium".into(),
+            orb_satellites: true,
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: true, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
             orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95 }
     }
@@ -101,6 +104,7 @@ impl Config {
             "progress_digest" if value.is_boolean() => self.progress_digest = value.as_bool().unwrap(),
             "orb_pos" if valid_pos(s) => self.orb_pos = s.into(),
             "orb_over_fullscreen" if value.is_boolean() => self.orb_over_fullscreen = value.as_bool().unwrap(),
+            "orb_satellites" if value.is_boolean() => self.orb_satellites = value.as_bool().unwrap(),
             "watch_every" if in_range(value, 15, 3600) => self.watch_every = value.as_u64().unwrap(),
             "hung_after" if in_range(value, 2, 240) => self.hung_after = value.as_u64().unwrap(),
             "limit_threshold" if in_range(value, 50, 100) => self.limit_threshold = value.as_u64().unwrap(),
@@ -212,6 +216,9 @@ mod tests {
         assert!(!c.set("progress_digest", &json!("true")));
         assert!(c.orb_over_fullscreen && c.set("orb_over_fullscreen", &json!(false)) && !c.orb_over_fullscreen);
         assert!(!c.set("orb_corner", &json!("top-left")));
+        assert!(c.orb_satellites && c.set("orb_satellites", &json!(false)) && !c.orb_satellites);
+        assert!(!c.set("orb_satellites", &json!("false")));
+        assert!(parse("speaker = \"baya\"").unwrap().orb_satellites, "старый файл без ключа — спутники есть");
     }
 
     #[test]

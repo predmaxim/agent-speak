@@ -42,6 +42,8 @@ pub enum Msg {
     /// Ответ агенту от Омы (`agent-speak tell`): запрос с ответом `{"ok": метка нажатого пункта}` или `{"err": …}`;
     /// идёт в очередь потока действий, той же, что у сторожа. expect — метка варианта, пусто — не сверять.
     Tell { session: String, option: usize, text: String, #[serde(default)] expect: String },
+    /// Средний клик по орбу: сводка агентов одной фразой (вслух и пузырём Омы); что-то звучит — стоп, как `read`.
+    Summary,
 }
 
 pub fn socket_path() -> PathBuf {
@@ -98,6 +100,7 @@ mod tests {
         assert!(matches!(presence, Msg::Presence { ref state } if state == "busy"));
         let tell = serde_json::from_str::<Msg>("{\"cmd\":\"tell\",\"session\":\"s\",\"option\":1,\"text\":\"\"}").unwrap();
         assert!(matches!(tell, Msg::Tell { ref session, option: 1, ref expect, .. } if session == "s" && expect.is_empty()), "метка — по желанию");
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"summary\"}").unwrap(), Msg::Summary));
     }
 
     #[test]
