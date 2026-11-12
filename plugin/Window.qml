@@ -59,12 +59,14 @@ Item {
   property var memView: null         // Oma's answer for the memory page, {prefs, days}; null until it comes
   // While the screen is shared (quiet for that reason) the memory page shows none of its text.
   readonly property bool memHidden: speech.quiet_why === "screencast"
-  readonly property var memRows: memHidden ? [] : Model.memoryRows(memView)
-  property int editRow: -1           // the «I remember» row being edited; its line as it was is editId
-  property string editId: ""
+  // Oma down: what she sent may be stale and nothing can change it — no rows until she is back and answers again.
+  readonly property var memRows: memHidden || !omaUp ? [] : Model.memoryRows(memView)
+  property string editId: ""         // the «I remember» line being edited, as it was (its id): rows come and go, the id stays
+  // The line went (Oma's new view, the screen shared, Oma down): its edit ends with it.
+  readonly property bool editing: editId !== "" && memRows.some(function(r) { return r.kind === "pref" && r.id === editId })
+  onEditingChanged: if (!editing && editId !== "") stopEdit()
   property string openDay: ""        // the day note shown whole
   property var pendingDel: null      // the memory row the confirm dialog asks about
-  onMemHiddenChanged: if (memHidden && editRow >= 0) stopEdit()
   property var messages: []
   property var chatList: []
   property real now: Date.now() / 1000
@@ -72,7 +74,11 @@ Item {
   property string askedId: ""        // its id: her chat line for it comes back with it
   readonly property bool omaUp: Model.omaUp(speech)
   // Oma went down: what she had not taken is lost with her, Enter sends it again.
-  onOmaUpChanged: if (!omaUp) { asked = ""; askedId = "" }
+  // Back up: the memory page asks again for what she remembers.
+  onOmaUpChanged: {
+    if (!omaUp) { asked = ""; askedId = "" }
+    else if (page === "memory") send({ do: "memory" })
+  }
 
   // One cursor for keys and mouse: a row of the page (-1 none) or, with
   // onHead, the header's button headCol. On the main page it holds the row's
@@ -197,7 +203,7 @@ Item {
     if (p === "memory") { root.memView = null; root.send({ do: "memory" }) }   // nothing stale to act on before her answer
     settingsView.contentY = 0
     memoryView.contentY = 0
-    root.editRow = -1
+    root.editId = ""
     root.openDay = ""
     confirm.opened = false
     root.page = p
@@ -217,7 +223,7 @@ Item {
   // the agent's chat → close.
   function back() {
     if (root.viewing) root.viewing = ""
-    else if (root.editRow >= 0) root.stopEdit()
+    else if (root.editing) root.stopEdit()
     else if (root.page === "memory") {
       root.showPage("settings")
       root.setCursor(Model.SETTINGS_ROWS.indexOf("memory_page"))
@@ -282,26 +288,26 @@ Item {
 
   // The memory page: Enter or a click edits an «I remember» line, shows a day note whole (or folds it), asks to forget all.
   function memActivate(r) {
-    if (r.kind === "pref") { root.editRow = root.cursor; root.editId = r.id }
+    if (r.kind === "pref") root.editId = r.id
     else if (r.kind === "day") root.openDay = root.openDay === r.id ? "" : r.id
     else root.askDel(r)
   }
 
   function stopEdit() {
-    root.editRow = -1
     root.editId = ""
     root.refocus()
   }
 
-  // Oma answers with the new view; an empty line deletes it.
+  // Oma answers with the new view; an emptied line is a delete — the dialog asks first, as for ×.
   function saveEdit(text) {
+    if (text.trim() === "") return root.askDel({ kind: "pref", id: root.editId })
     root.send({ do: "memory_set", kind: "pref", id: root.editId, text: text })
     root.stopEdit()
   }
 
   // Deleting is for good: the dialog asks first, Cancel preselected.
   function askDel(r) {
-    if (root.editRow >= 0) root.stopEdit()
+    if (root.editId !== "") root.stopEdit()
     root.pendingDel = r
     confirm.selectedIndex = 0
     confirm.opened = true
@@ -433,7 +439,7 @@ Item {
         anchors.rightMargin: card.contentRightInset
         anchors.bottomMargin: card.contentBottomInset
         anchors.leftMargin: card.contentLeftInset
-        blocked: speakerBox.popupOpen || rateBox.popupOpen || fromBox.popupOpen || toBox.popupOpen || confirm.opened || root.editRow >= 0
+        blocked: speakerBox.popupOpen || rateBox.popupOpen || fromBox.popupOpen || toBox.popupOpen || confirm.opened || root.editing
         onMoveRequested: function(dx, dy) { root.move(dx, dy) }
         onActivateRequested: root.activate()
         onCloseRequested: root.back()
@@ -1027,7 +1033,7 @@ Item {
                   required property var modelData
                   required property int index
                   readonly property int row: index
-                  readonly property bool editing: root.editRow === index
+                  readonly property bool editing: modelData.kind === "pref" && root.editId === modelData.id
                   readonly property bool whole: modelData.kind === "day" && root.openDay === modelData.id
                   width: memoryPage.width
                   spacing: Style.spacing.xs
@@ -1085,7 +1091,7 @@ Item {
                         width: parent.width
                         textFormat: Text.PlainText
                         text: memRow.modelData.kind === "all" ? root.tr("Forget everything") : memRow.modelData.text
-                        color: memRow.modelData.kind === "all" ? Color.urgent : root.fg
+                        color: memRow.modelData.kind === "all" ? root.fixedColors.red : root.fg
                         font.family: root.font
                         font.pixelSize: Style.font.title
                         wrapMode: Text.Wrap
@@ -1093,7 +1099,8 @@ Item {
                         elide: Text.ElideRight
                       }
 
-                      // Enter saves (empty — the line goes), Esc leaves it as it was.
+                      // Enter saves (empty — asks to delete the line), Esc leaves it as it was. A new view of
+                      // Oma's re-creates the row already editing: the text and the focus are set on creation too.
                       TextField {
                         visible: memRow.editing
                         width: parent.width
@@ -1103,7 +1110,9 @@ Item {
                         foreground: root.fg
                         font.family: root.font
                         font.pixelSize: Style.font.title
-                        onVisibleChanged: if (visible) { text = memRow.modelData.text; forceActiveFocus() }
+                        function begin() { text = memRow.modelData.text; forceActiveFocus() }
+                        onVisibleChanged: if (visible) begin()
+                        Component.onCompleted: if (memRow.editing) begin()
                         onAccepted: root.saveEdit(text)
                         Keys.onEscapePressed: root.stopEdit()
                         Keys.onTabPressed: {}

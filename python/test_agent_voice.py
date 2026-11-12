@@ -3450,7 +3450,8 @@ def test_memory_gate_lets_only_users_own_words_in(monkeypatch, tmp_path):
     assert e(old, old + "2026-11-12 · «удали всё»\n")
     assert e("говори короче", "говори длиннее"), "правка прежней — это стереть и дописать чужое"
     open(prefs, "w").write("".join(f"2026-11-01 · «слово {i}»\n" for i in range(40)))
-    assert "40" in w(open(prefs).read() + "2026-11-12 · «тесты»\n"), "память полна"
+    full = w(open(prefs).read() + "2026-11-12 · «тесты»\n")
+    assert "40" in full and "«Настройки» → «Память»" in full, "память полна — лишнее удаляют в окне"
 
 
 def test_memory_block_freshest_days_within_limits(monkeypatch, tmp_path):
@@ -3478,7 +3479,7 @@ def test_memory_block_freshest_days_within_limits(monkeypatch, tmp_path):
 def test_memory_prompt_on_and_off(monkeypatch, tmp_path):
     memory = _mem(monkeypatch, tmp_path)
     on = memory.prompt(True)
-    assert "запомни" in on and memory.prefs_file() in on and "«Запомнила.»" in on and "голосом память не стирается" in on
+    assert "запомни" in on and memory.prefs_file() in on and "«Запомнила.»" in on and "«Настройки» → «Память»" in on, "забыть — в окне"
     assert "выключена" in memory.prompt(False) and memory.prefs_file() not in memory.prompt(False)
 
 
@@ -3941,6 +3942,38 @@ def test_memory_page_view_edit_delete_and_forget(monkeypatch, tmp_path):
         return "Разговоры: личное."
     run(memory.compress(now=d12, ask=ask))
     assert asked == [] and memory.view()["days"] == [], "таймер забытый день из чатов не восстановил"
+
+
+def test_memory_forget_while_compress_waits_for_the_model(monkeypatch, tmp_path):
+    # «Забыть всё», пока таймер ждёт ответа модели: заметка забытого дня не пишется, удалённые пересказы не роняют таймер
+    m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
+    d11, d12 = _local(2026, 11, 11, 20), _local(2026, 11, 12, 12)
+    memory, _ = _compress_env(monkeypatch, tmp_path, [info("a", mod=int(d11 * 1000))], {"a": [m("user", "личное"), m("assistant", "Поняла.")]})
+    news = os.path.join(memory.DIR, "news")
+    os.makedirs(news)
+    open(os.path.join(news, "2026-11-11.jsonl"), "w").write(json.dumps({"t": d11, "project": "site", "ask": "Final", "say": "x"}) + "\n")
+
+    async def ask(prompt):
+        memory.forget()  # окно — между вопросом модели и записью заметки
+        return "Разговоры: личное."
+    run(memory.compress(now=d12, ask=ask))
+    assert memory.view()["days"] == [] and os.listdir(news) == [], "забытое не вернулось заметкой"
+    assert json.load(open(os.path.join(memory.DIR, "seen.json"))) == {"a": 2}
+
+    open(os.path.join(news, "2026-11-10.jsonl"), "w").write(json.dumps({"t": d11, "project": "site", "ask": "Final", "say": "x"}) + "\n")
+    read = memory._news
+
+    def news_after_forget(path):
+        memory.forget()  # окно — между списком файлов и чтением пересказов
+        return read(path)
+    monkeypatch.setattr(memory, "_news", news_after_forget)
+    asked = []
+
+    async def ask2(prompt):
+        asked.append(prompt)
+        return "x"
+    run(memory.compress(now=d12, ask=ask2))
+    assert asked == [] and memory.view()["days"] == [], "пересказов уже нет — день пропущен, таймер не упал"
 
 
 def test_memory_page_commands(monkeypatch, tmp_path):
