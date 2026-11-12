@@ -529,6 +529,33 @@ def test_ear_start_on_muted_mic_drops_frames_from_the_first():
     run(go())
 
 
+def test_mic_poll_unpauses_ear_unmuted_before_the_poll(monkeypatch):
+    # mute, «говорить» (Ear.start сам ставит paused), mute сняли раньше опроса (до 1 с): занятость не менялась, а слух
+    # на паузе — опрос сверяет флаг слуха с фактом, иначе Ома глуха до перезапуска
+    import agent_voice.__main__ as m
+    from agent_voice.ear import Ear
+    mute = [True]
+    e = Ear(asyncio.Queue(), Whisper(load=lambda: "m"), cmd=["sleep", "60"], vad_load=lambda: None,
+            mic=lambda: ("", False, ""), muted=lambda t: mute[0])  # вход по умолчанию: `sleep` без --target живёт
+    monkeypatch.setattr(m, "mic_outputs", lambda: [])
+    monkeypatch.setattr(m, "muted", lambda t: mute[0])
+
+    async def go():
+        events = asyncio.Queue()
+        oma = SimpleNamespace(ear=e)
+        await e.start()
+        assert e.paused
+        mute[0] = False
+        busy = await m.mic_poll(oma, events, False)
+        assert busy is False and events.get_nowait() == ("mic", False), "флаг разошёлся с фактом — событие, Ома снимет паузу"
+        e.paused = False  # так его ставит Ома по событию
+        assert await m.mic_poll(oma, events, busy) is False and events.empty(), "сошлось — событий нет"
+        mute[0] = True
+        assert await m.mic_poll(oma, events, False) is True and events.get_nowait() == ("mic", True)
+        await e.stop()
+    run(go())
+
+
 def test_on_ac_usb_counts(tmp_path):
     for n, typ, on in (("A", "Mains", "0"), ("U", "USB", "1")):
         (tmp_path / n).mkdir()

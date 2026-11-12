@@ -70,6 +70,16 @@ def kill_children():
             os.kill(int(pid), signal.SIGTERM)
 
 
+async def mic_poll(oma, events, busy):
+    """Один опрос микрофона: чужой захват или mute — слух не слушает, разговор на паузе. Событие — при смене и когда флаг
+    слуха разошёлся с фактом: Ear.start сам ставит paused при mute, и mute, снятый раньше опроса, иначе оставил бы её глухой."""
+    pid = oma.ear.pid  # до await: слух мог переоткрыться, а снимок pactl — со старым pw-record
+    now = pid is not None and (foreign_capture(await asyncio.to_thread(mic_outputs), {pid})
+                               or await asyncio.to_thread(muted, oma.ear.target))
+    if now != busy or oma.ear.paused != now:
+        events.put_nowait(("mic", now))
+    return now
+
 class Oma:
     """Связывает разговор, слух, мозг и демона: команды и события → действия Conversation → исполнение."""
 
@@ -555,13 +565,7 @@ async def main():
         async def mic():
             busy = False
             while True:
-                pid = oma.ear.pid  # до await: слух мог переоткрыться, а снимок pactl — со старым pw-record
-                # микрофон выключен (mute) — как чужой: слух не слушает, разговор на паузе
-                now = pid is not None and (foreign_capture(await asyncio.to_thread(mic_outputs), {pid})
-                                           or await asyncio.to_thread(muted, oma.ear.target))
-                if now != busy:
-                    busy = now
-                    events.put_nowait(("mic", busy))
+                busy = await mic_poll(oma, events, busy)
                 await asyncio.sleep(1)
 
         reader = asyncio.StreamReader(limit=1 << 22)  # ask со вставленным логом бывает длинным

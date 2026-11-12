@@ -385,6 +385,9 @@ impl Registry {
                     if state != State::Waiting {
                         e.ask.clear(); // ответили в терминале: хука нет
                     }
+                    if matches!(state, State::Idle | State::Done) {
+                        e.fails = 0; // ход кончился без хука (Esc): счёт сбоев — за ход
+                    }
                 }
             } else {
                 changed = true;
@@ -546,9 +549,9 @@ impl Registry {
         true
     }
 
-    /// Агентов с FAILS_DROOP и больше сбоев за ход.
+    /// Агентов с FAILS_DROOP и больше сбоев за ход; ход идёт (работает или ждёт ответа) — сбой после его конца не в счёт.
     pub fn struggling(&self) -> usize {
-        self.entries.iter().filter(|e| e.fails >= FAILS_DROOP).count()
+        self.entries.iter().filter(|e| e.fails >= FAILS_DROOP && matches!(e.state, State::Working | State::Waiting)).count()
     }
 
     pub fn waiting(&self) -> usize {
@@ -686,6 +689,17 @@ mod tests {
         r.failed("a");
         r.finished("a", "Готово.", 103);
         assert_eq!(fails(&r), 0, "ход кончился");
+        // Esc хуков не шлёт: агент уходит в покой по файлу сессии (sync) — ход кончился и так
+        r.prompt("a", "ещё", 104);
+        for _ in 0..FAILS_DROOP {
+            r.failed("a");
+        }
+        r.sync(vec![Live { state: State::Idle, status_at: 200, ..live("a", false) }, live("b", true)], 105);
+        assert_eq!((fails(&r), r.struggling()), (0, 0), "прервали по Esc — не поник");
+        for _ in 0..FAILS_DROOP {
+            r.failed("a");
+        }
+        assert_eq!(r.struggling(), 0, "в покое не никнет: хук сбоя пришёл после конца хода");
     }
 
     #[test]

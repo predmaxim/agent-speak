@@ -21,6 +21,7 @@ Item {
 
   property var link
   property var draft: null           // Oma's draft bubble, shown at the chat's end
+  property bool micMuted: false      // the mic is off (read by the orb from PipeWire)
   property bool shown: false
   property string viewing: ""   // a screenshot open over the window
   property string jumpErr: ""   // why `agent-speak show` from this window did not show the agent (its bubble's text)
@@ -46,7 +47,7 @@ Item {
   readonly property var tr: I18n.translator(I18n.textLanguage(function(name) { return Quickshell.env(name) }))
   readonly property var speech: link ? link.speech : Model.OFFLINE
   readonly property var agents: link ? link.agents : []
-  readonly property var tip: Model.orbTip(speech)
+  readonly property var tip: Model.orbTip(speech, micMuted)
   readonly property var settingsSecs: Model.sections(tr)
   readonly property color fg: Color.popups.text
   readonly property color dim: Qt.darker(fg, 1.4)
@@ -469,7 +470,7 @@ Item {
           fontFamily: root.font
           // Idle while hidden: no animation runs for a window nobody sees.
           iconComponent: OrbFace {
-            mode: root.shown ? Model.orbMode(root.speech) : "idle"
+            mode: root.shown ? Model.orbMode(root.speech, root.micMuted) : "idle"
             size: Style.font.display
             line: Math.max(1, Style.space(2))
             rate: root.speech.rate_now || root.speech.rate || "medium"

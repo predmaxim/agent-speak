@@ -97,6 +97,7 @@ Item {
 
   // Oma off (the service stopped): no orb on the desktop; the window and the indicator turn her on.
   Plugin.Orb {
+    id: orb
     visible: link.speech.running === true
     link: link
     covered: omaWindow.shown
@@ -116,6 +117,7 @@ Item {
   Plugin.Window {
     id: omaWindow
     link: link
+    micMuted: orb.micMuted   // one PipeWire reader (the orb's): the header orb and its tip say «Mic is off» too
     draft: root.draft
     onShownChanged: if (shown) root.bubbles = []
   }
