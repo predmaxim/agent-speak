@@ -52,6 +52,12 @@ pub enum Msg {
     /// Слух Омы для орба: её вход (узел PipeWire; "" — вход по умолчанию), до когда она ещё слушает (эпоха, с; нет —
     /// дуги нет) и длина этого окна, с. Шлёт при смене, отдельно от voice_state: его повтор держал бы новости и чистил очередь.
     Ear { #[serde(default)] ear_in: String, #[serde(default)] until: Option<f64>, #[serde(default)] secs: f64 },
+    /// Хук PermissionRequest (`agent-speak hook permission-request`): соединение открыто, пока запрос жив; служба отвечает
+    /// одной строкой `{"decision": "allow" | "deny" | ""}` ("" — без решения). EOF хука (его убил Claude Code: «No» или
+    /// Esc в терминале) снимает карточку.
+    Permission { payload: serde_json::Value },
+    /// Кнопка карточки разрешения в окне или пузыре: решение — хуку запроса id. Клик равен набранному: без подтверждения.
+    Permit { id: String, allow: bool },
 }
 
 pub fn socket_path() -> PathBuf {
@@ -116,6 +122,10 @@ mod tests {
         let ear = serde_json::from_str::<Msg>("{\"cmd\":\"ear\",\"ear_in\":\"alsa_input.x\",\"until\":1794812345.2,\"secs\":20}").unwrap();
         assert!(matches!(ear, Msg::Ear { ref ear_in, until: Some(u), secs } if ear_in == "alsa_input.x" && u == 1794812345.2 && secs == 20.0));
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"ear\"}").unwrap(), Msg::Ear { until: None, .. }), "поля — по желанию");
+        let perm = serde_json::from_str::<Msg>("{\"cmd\":\"permission\",\"payload\":{\"tool_name\":\"Bash\"}}").unwrap();
+        assert!(matches!(perm, Msg::Permission { ref payload } if payload["tool_name"] == "Bash"));
+        let permit = serde_json::from_str::<Msg>("{\"cmd\":\"permit\",\"id\":\"perm-7\",\"allow\":true}").unwrap();
+        assert!(matches!(permit, Msg::Permit { ref id, allow: true } if id == "perm-7"));
     }
 
     #[test]
