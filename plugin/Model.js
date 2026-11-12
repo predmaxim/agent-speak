@@ -328,7 +328,7 @@ function sections(tr) {
 var SETTINGS_SECTIONS = [
   { title: "", rows: ["speaker", "rate"] },
   { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours", "screencast_privacy", "hush_summary"] },
-  { title: "Hearing", rows: [] },
+  { title: "Hearing", rows: ["music_pause"] },
   { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites"] },
   { title: "Agents", rows: ["agents_voice", "progress_digest"] }
 ]
@@ -347,9 +347,22 @@ function settingStep(row, st, dx) {
   if (row === "progress_digest") return { key: row, value: !st.progress_digest, sample: false }
   if (row === "agents_voice") return { key: row, value: !st.agents_voice, sample: false }
   if (row === "screencast_privacy" || row === "hush_summary") return { key: row, value: !st[row], sample: false }
+  if (row === "music_pause") return { key: row, value: !st.music_pause, sample: false }
   var sec = sections(function(t) { return t }).filter(function(x) { return x.key === row })[0]
   if (!sec) return null
   var values = sec.options.map(function(o) { return o.value })
   var n = values.length, i = values.indexOf(st[row])
   return { key: row, value: values[i < 0 ? 0 : ((i + dx) % n + n) % n], sample: sec.sample }
+}
+
+// Music pause: Oma took the sound (the daemon's media_hold) — the MPRIS players to pause: playing ones that can pause.
+function toPause(players) {
+  return players.filter(function(p) { return p.isPlaying && p.canPause })
+}
+
+// Oma let the sound go — the players to play again: the ones paused for her (their dbusName in `held`), still paused
+// (pausedState is MprisPlaybackState.Paused) and able to play. Anything playing by then (the user started it) — none.
+function toResume(players, held, pausedState) {
+  if (players.some(function(p) { return p.isPlaying })) return []
+  return players.filter(function(p) { return held.indexOf(p.dbusName) >= 0 && p.playbackState === pausedState && p.canPlay })
 }

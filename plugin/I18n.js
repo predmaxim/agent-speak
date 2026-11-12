@@ -18,6 +18,7 @@ var TABLES = {
     "Chat history": "История чатов", "Settings": "Настройки", "Back": "Назад",
     "No agents": "Агентов нет", "You": "Ты", "Ask Oma…": "Спросить Ому…", "Untitled chat": "Без названия",
     "No chats yet": "Чатов пока нет", "Quiet now": "Сейчас тихо", "On schedule": "По расписанию", "From / to": "С / до",
+    "Hearing": "Слух", "Pause music while Oma speaks and listens": "Пауза музыки, пока Ома говорит и слушает",
     "Orb": "Орб", "Over fullscreen windows": "Над полноэкранными окнами", "Agent satellites": "Спутники агентов", "%1 more": "ещё %1",
     "Agents": "Агенты", "General chat": "Общий чат", "Copy": "Копировать", "Copied": "Скопировано", "Retell progress": "Пересказывать промежуточное",
     "Watch agents": "Следить за агентами", "Oma is off": "Ома выключена", "Turn Oma on": "Включить Ому", "Turn Oma off": "Выключить Ому",

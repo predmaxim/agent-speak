@@ -104,6 +104,11 @@ Item {
     onChatOpened: function(key) { omaWindow.open(key) }
   }
 
+  // Music pauses while Oma speaks or listens; the setting off or the daemon gone — what it paused plays again.
+  Plugin.MediaHold {
+    hold: link.speech.media_hold === true && link.speech.music_pause === true
+  }
+
   // Qualified: a bare `Window` is QtQuick's.
   Plugin.Window {
     id: omaWindow
