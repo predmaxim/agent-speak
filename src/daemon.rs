@@ -860,14 +860,19 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
         match serde_json::from_str::<Msg>(&line) {
             // ответ лёг бы между строками рассылки, а его таймаут записи (общий у клонов сокета) — на подписчика:
             // запрос не исполняется, отказ пишется с таймаутом подписки
-            Ok(Msg::Tell { .. } | Msg::Draft { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. }) if subscribed => {
+            Ok(Msg::Tell { .. } | Msg::TellKeep { .. } | Msg::Draft { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. }) if subscribed => {
                 let err = serde_json::json!({"err": "запрос — отдельным соединением: это подписано на рассылку"});
                 if (&conn).write_all(format!("{err}\n").as_bytes()).is_err() {
                     break;
                 }
             }
             Ok(Msg::Tell { session, option, text, expect }) => {
-                if !queued(&tx, &conn, move || crate::orders::tell(&session, option, &text, &expect)) {
+                if !queued(&tx, &conn, move || crate::orders::tell(&session, option, &text, &expect, false)) {
+                    break;
+                }
+            }
+            Ok(Msg::TellKeep { session, option, text, expect }) => {
+                if !queued(&tx, &conn, move || crate::orders::tell(&session, option, &text, &expect, true)) {
                     break;
                 }
             }
@@ -2100,8 +2105,8 @@ impl State {
                     eprintln!("agent-speak: later: {e}");
                 }
             }
-            // приходят как Event::Subscribe, Tell (и Draft), Turn, Show, Note и Permission (с подписанного соединения запрос не держится)
-            Msg::Subscribe | Msg::Tell { .. } | Msg::Draft { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. } | Msg::Permission { .. } => {}
+            // приходят как Event::Subscribe, Tell (и TellKeep, Draft), Turn, Show, Note и Permission (с подписанного соединения запрос не держится)
+            Msg::Subscribe | Msg::Tell { .. } | Msg::TellKeep { .. } | Msg::Draft { .. } | Msg::Turn | Msg::Show { .. } | Msg::Note { .. } | Msg::Permission { .. } => {}
         }
         if changes {
             self.broadcast();
@@ -2554,8 +2559,9 @@ impl State {
 
     /// Передать поручения, чей ход кончился: агент «готово» и пользователь не печатает в нём (перед текстом идёт Ctrl+U —
     /// он стёр бы черновик), иначе — со следующим тиком; агент снова работает — ждём его следующего конца хода. Снимается
-    /// до передачи: одно подтверждение — одна передача, удачная или нет. Поле ввода не читается: на экране простым текстом
-    /// серая подсказка Claude Code после хода неотличима от черновика (предел — в README «Потом»).
+    /// до передачи: одно подтверждение — одна передача, удачная или нет. Текст в поле ввода Claude (черновик, брошенный
+    /// дольше FOCUS_INPUT) не стирается и не прячется без спроса: orders::tell отказывает (INPUT_BUSY), Ома говорит,
+    /// что не передала и почему, — пользователь решает сам.
     fn deliver_later(&mut self) {
         let due: Vec<(String, String)> = self.later.list.iter().filter(|o| o.due).map(|o| (o.id.clone(), o.agent.clone())).collect();
         for (id, agent) in due {
@@ -2573,7 +2579,8 @@ impl State {
             let out = self.later.out.clone();
             // поток действий упал — дело выброшено; поручение уже снято
             let _ = self.act.send(mux::Work::Other(Box::new(move || {
-                let result = crate::orders::tell(&order.agent, 0, &order.text, "").map(|_| ());
+                // текст в поле ввода — не стираем и не прячем без спроса: не передала, Ома скажет почему (INPUT_BUSY)
+                let result = crate::orders::tell(&order.agent, 0, &order.text, "", false).map(|_| ());
                 let _ = out.send(crate::later::Done::Told { order, result });
             })));
             self.push_later();
@@ -2598,7 +2605,8 @@ impl State {
             crate::later::Done::Told { order: o, result } => {
                 let text = match result {
                     Ok(()) => phrases::gendered(phrases::LATER_TOLD, self.gender()).replace("{что}", &o.gist),
-                    Err(e) => phrases::gendered(phrases::LATER_NOT_TOLD, self.gender()).replace("{что}", &e),
+                    // что не ушло — тоже: по нему пользователь и решит, что делать (текст в поле агента — передать с keep)
+                    Err(e) => phrases::gendered(phrases::LATER_NOT_TOLD, self.gender()).replace("{что}", &format!("«{}» — {e}", o.gist)),
                 };
                 self.later_say(&o.agent, &o.id, &o.who, &text);
             }
@@ -4702,6 +4710,11 @@ mod tests {
         st.on_later_done(crate::later::Done::Told { order, result: Ok(()) });
         assert_eq!(bubbles(&mut r)[0]["text"], "a: передала — прогони тесты");
         assert_eq!(board_line(&mut st, 2000).unwrap(), "a: передала — прогони тесты", "исход — сразу, класс СЕЙЧАС");
+        // в поле агента был текст: не стёрт и не спрятан — Ома говорит, что не ушло и почему, решает пользователь
+        let order = crate::later::Order { id: "later-2".into(), kind: "tell".into(), agent: "a".into(), who: "a".into(), text: "Прогони тесты".into(), gist: "прогони тесты".into(), path: String::new(), pr: 0, since: 1000, due: false };
+        let busy = format!("{}: «мой вопрос»", crate::orders::INPUT_BUSY);
+        st.on_later_done(crate::later::Done::Told { order, result: Err(busy) });
+        assert_eq!(bubbles(&mut r)[0]["text"], "a: не передала: «прогони тесты» — в поле ввода агента уже есть текст: «мой вопрос»");
     }
 
     #[test]

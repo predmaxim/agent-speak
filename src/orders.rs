@@ -171,20 +171,47 @@ const NO_PLAN_MENU: &str = "не вижу меню одобрения плана
 const TYPE_SOMETHING: &str = "Type something.";
 const CHAT_ABOUT: &str = "Chat about this";
 
-/// Терминал живого агента session и его вызов в полёте; why — конец отказа, если терминала нет.
-fn target(session: &str, why: &str) -> Result<(mux::Pane, Option<Value>), String> {
+/// Терминал живого агента session, его вызов в полёте и Claude ли он; why — конец отказа, если терминала нет.
+fn target(session: &str, why: &str) -> Result<(mux::Pane, Option<Value>, bool), String> {
     let live = crate::agents::scan_all().into_iter().find(|l| l.id == session).ok_or("агента нет среди живых")?;
     let pane = pane_of(&live, why)?;
-    // у Codex меню не разбираем — всегда текст
-    let call = if live.agent == "claude" { claude::in_flight(&tail_of(&live.transcript.to_string_lossy(), |t| claude::has_record(t, false))) } else { None };
-    Ok((pane, call))
+    // у Codex меню и поле ввода не разбираем — всегда текст
+    let claude = live.agent == "claude";
+    let call = if claude { claude::in_flight(&tail_of(&live.transcript.to_string_lossy(), |t| claude::has_record(t, false))) } else { None };
+    Ok((pane, call, claude))
 }
+
+/// Набранное в поле ввода агента session (`agent-speak input`): только чтение, без службы — Ома спрашивает
+/// пользователя, что делать с текстом в поле, до вопроса «да, передай». Не Claude — пусто: его поле не разбираем.
+pub fn input_of(session: &str) -> Result<String, String> {
+    let (pane, _, claude) = target(session, "поле не прочитать")?;
+    if claude { mux::typed(&pane) } else { Ok(String::new()) }
+}
+
+/// Начало отказа tell, когда в поле ввода уже есть текст: по нему Ома спрашивает пользователя, что с ним сделать.
+pub const INPUT_BUSY: &str = "в поле ввода агента уже есть текст";
 
 /// Передать агенту session текст или пункт меню (expect — его метка, пусто — не сверять); Ok — метка нажатого пункта.
 /// Зовётся из потока действий службы (`mux::Work::Other`): чтение экрана, сверка и нажатие — без чужих записей между ними.
-pub fn tell(session: &str, option: usize, text: &str, expect: &str) -> Result<String, String> {
-    let (pane, call) = target(session, "передать не могу")?;
-    let (steps, chosen) = steps(call.as_ref(), &one_line(text), option, expect, || mux::screen(&pane))?;
+/// Текст уходит после Ctrl+U, который стёр бы набранное в поле (черновик, недописанное пользователем): у Claude поле
+/// сначала читается — не пусто: без keep — отказ INPUT_BUSY, с keep — Ctrl+S (stash): поле целиком в сторону, после
+/// отправки Claude Code сам вернёт его в поле.
+pub fn tell(session: &str, option: usize, text: &str, expect: &str, keep: bool) -> Result<String, String> {
+    let (pane, call, claude) = target(session, "передать не могу")?;
+    let (mut steps, chosen) = steps(call.as_ref(), &one_line(text), option, expect, || mux::screen(&pane))?;
+    if claude && steps.iter().any(|s| matches!(s, Step::Text(_))) {
+        let typed = mux::typed(&pane)?;
+        if !typed.is_empty() {
+            if !keep {
+                return Err(format!("{INPUT_BUSY}: «{}»", typed.chars().take(200).collect::<String>()));
+            }
+            // stash Claude Code возвращает только после обычного сообщения, не после «/команды» (2.1.322)
+            if one_line(text).starts_with('/') {
+                return Err("после «/команды» Claude Code не вернёт текст из поля (stash возвращается только после обычного сообщения) — сначала разберись с текстом в поле".into());
+            }
+            steps.insert(0, Step::Key(Key::CtrlS));
+        }
+    }
     mux::perform(&pane, &steps)?;
     Ok(chosen)
 }
@@ -196,20 +223,21 @@ const DRAFT_MENU: &str = "агент ждёт выбора в меню — че�
 /// Экран и вердикт терминала (waits) — всегда: у Codex вызова в полёте нет, у Claude он ложится в транскрипт не сразу,
 /// а подтверждения, которое у tell защищает от ослышки, у черновика нет. Не прочитались — отказ, не пишем вслепую.
 /// Вердикт — последним, ближе всего к вводу: меню Codex видно только по нему.
-// shortcut: меню, открывшееся между проверкой и вводом (~0,5 с), не поймать; станет бить — терминал с атомарным «введи, если не ждёт»
+/// Текст — вставкой (`Step::Paste`): меню, открывшееся между проверкой и вводом, вставка не выбирает (Claude Code 2.1.322:
+/// разрешение её не берёт, вопрос кладёт в поле «Type something» и не отправляет).
 fn draft_steps(call: Option<&Value>, text: &str, waits: impl FnOnce() -> Result<bool, String>, screen: impl FnOnce() -> Result<String, String>) -> Result<Vec<Step>, String> {
     let text = text.trim();
     match call.and_then(|c| c["name"].as_str()) {
         _ if text.is_empty() => Err("пустой текст".into()),
         Some("AskUserQuestion" | "ExitPlanMode") => Err(DRAFT_MENU.into()),
         _ if menu_on(&screen()?) || waits()? => Err(DRAFT_MENU.into()),
-        _ => Ok(vec![Step::Type(text.into())]),
+        _ => Ok(vec![Step::Paste(text.into())]),
     }
 }
 
 /// Вставить текст в поле ввода агента session, не отправляя (`agent-speak draft`): в том же потоке действий, что tell.
 pub fn draft(session: &str, text: &str) -> Result<(), String> {
-    let (pane, call) = target(session, "черновик не вставить")?;
+    let (pane, call, _) = target(session, "черновик не вставить")?;
     mux::perform(&pane, &draft_steps(call.as_ref(), &one_line(text), || mux::waits(&pane), || mux::screen(&pane))?)
 }
 
@@ -398,9 +426,9 @@ mod tests {
         let free = || Ok(false);
         let prompt = || Ok("✻ Running…\n❯ \n  ⏵⏵ auto mode on".to_string());
         // ни Ctrl+U (недонабранное пользователем остаётся), ни Enter (отправит он сам)
-        assert_eq!(draft_steps(None, " займись тестами ", free, prompt).unwrap(), [Step::Type("займись тестами".into())]);
+        assert_eq!(draft_steps(None, " займись тестами ", free, prompt).unwrap(), [Step::Paste("займись тестами".into())]);
         let bash = json!({"name": "Bash", "input": {"command": "cargo test"}});
-        assert_eq!(draft_steps(Some(&bash), "займись тестами", free, prompt).unwrap(), [Step::Type("займись тестами".into())], "агент работает — черновик ждёт в поле");
+        assert_eq!(draft_steps(Some(&bash), "займись тестами", free, prompt).unwrap(), [Step::Paste("займись тестами".into())], "агент работает — черновик ждёт в поле");
         let permission = || Ok(" Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again\n   3. No".to_string());
         assert_eq!(draft_steps(Some(&bash), "нет", free, permission), Err(DRAFT_MENU.into()), "в меню буквы и цифры выбирали бы пункты");
         assert_eq!(draft_steps(None, "нет", free, permission), Err(DRAFT_MENU.into()), "вызова в транскрипте ещё нет, а меню уже на экране");
@@ -415,7 +443,8 @@ mod tests {
 
     #[test]
     fn tell_unknown_session_is_error() {
-        assert!(tell("нет-такой-сессии", 0, "привет", "").unwrap_err().contains("нет среди живых"));
+        assert!(tell("нет-такой-сессии", 0, "привет", "", false).unwrap_err().contains("нет среди живых"));
+        assert!(input_of("нет-такой-сессии").unwrap_err().contains("нет среди живых"));
         assert!(menu_of("нет-такой-сессии").unwrap_err().contains("нет среди живых"));
         assert!(draft("нет-такой-сессии", "привет").unwrap_err().contains("нет среди живых"));
     }

@@ -112,6 +112,10 @@ async def cli(*args, timeout=90):
 
 
 CHAT = "в чат Orca передать не могу — ответь в Orca"  # как orders::CHAT службы
+INPUT_BUSY = "в поле ввода агента уже есть текст"  # как orders::INPUT_BUSY службы: текст перед Ctrl+U не стирается
+ASK_BUSY = ("Перескажи его коротко и спроси пользователя, что с ним сделать: передать, а текст сохранить (tell с keep=true — "
+            "он вернётся в поле после отправки), дописать новое к нему (tell с draft=true) или оставить и ничего не "
+            "передавать. Сам не решай.")
 
 
 def _name(path):
@@ -161,15 +165,19 @@ class Orders:
             return f"Не передано: {why} только после подтверждения. Вопрос уже задан вслух: «{question}»"
         ok, out = await self.run(*args)
         if not ok:
-            return f"Не передано: {out}. Скажи пользователю коротко, что не вышло."
+            return f"Не передано: {out}. " + (ASK_BUSY if out.startswith(INPUT_BUSY) else "Скажи пользователю коротко, что не вышло.")
         return ok_reply + (f" Нажат пункт «{out}» — назови его пользователю." if out and args[0] == "tell" else "")  # tell: метка с экрана
 
-    async def tell(self, entry, text, gist, option=0, draft=False):
+    async def tell(self, entry, text, gist, option=0, draft=False, keep=False):
         n, p, ask = self.n, entry["project"], asked(entry)
         if entry.get("chat"):  # чат Orca: CLI Orca пишет только в терминалы — спрашивать «да, передай» не о чем
             return f"Не передано: {p} — {CHAT}. Скажи пользователю коротко."
         if draft:
             return await self._draft(entry, text, option)
+        if not option and not keep:  # текст уходит после Ctrl+U: набранное в поле стёрлось бы — спросить до «да, передай»
+            ok, typed = await self.run("input", entry["id"])  # не прочиталось — служба проверит ещё раз перед вводом
+            if ok and typed.strip():
+                return f"Не передано: в поле ввода {p} уже есть текст: «{typed.strip()[:200]}». {ASK_BUSY}"
         d = self.gate(text, ask, option)  # до чтения экрана: по реплике хода, в котором мозг вызвал tell
         item, question, also = chosen(ask, option), f"Передать проекту {p}: {gist}?", ""
         expect = item.split(" — ")[0]  # метка варианта, как её видел мозг: tell жмёт, только если в вызове агента та же
@@ -182,8 +190,10 @@ class Orders:
                 question = f"Одобрить план проекта {p} — пункт «{item}»?"
             else:  # не одобрение: «Tell Claude what to change» уходит с текстом правок — их смысл в вопросе, текст в окне
                 question, also = f"Выбрать пункт плана проекта {p} «{item}»: {gist}?", f": «{text}»" if text.strip() else ""
+        if keep:  # текст в поле — stash: после отправки Claude Code вернёт его
+            question += " Текст из поля верну после отправки."
         shown = f"Передам проекту {p}: " + (f"вариант {option} — {item}{also}" if option else f"«{text}»")
-        args = ("tell", entry["id"], str(option), text) + ((expect,) if option and expect else ())
+        args = ("tell",) + (("--keep",) if keep else ()) + (entry["id"], str(option), text) + ((expect,) if option and expect else ())
         told = gendered("Передал{|а}", self.gender)
         return await self._order(args, d, n, f"{told} проекту {p}: {gist}.",
                                  f"Передано проекту {p}. Скажи пользователю одной фразой, кому и что: "

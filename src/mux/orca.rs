@@ -40,6 +40,9 @@ impl Mux for Orca {
         let out = cli(orca(pane, &["read", "--screen"]))?;
         screen_text(&out).ok_or_else(|| error_of(&out))
     }
+    fn typed(&self, pane: &Pane) -> Result<String, String> {
+        composer_draft(&cli(orca(pane, &["read", "--screen"]))?)
+    }
     fn waits(&self, pane: &Pane) -> Result<bool, String> {
         agent_waits(&cli(orca(pane, &["show"]))?)
     }
@@ -79,6 +82,7 @@ fn key_text(key: &Key) -> Option<String> {
         Key::Esc => "\x1b".into(),
         Key::CtrlC => return None,
         Key::CtrlU => "\x15".into(),
+        Key::CtrlS => "\x13".into(),
         Key::Enter => "\r".into(),
         Key::Digit(d) => d.to_string(),
     })
@@ -165,6 +169,16 @@ fn agent_waits(out: &str) -> Result<bool, String> {
     }
 }
 
+/// Ответ `terminal read --screen`: `draft` — набранное в поле ввода агента, как его разобрала Orca (без серой подсказки
+/// и заглушки: `terminal-composer-draft.js`, Orca 1.4.256); нет поля — поле пустое.
+fn composer_draft(out: &str) -> Result<String, String> {
+    let v: Value = serde_json::from_str(out).map_err(|_| error_of(out))?;
+    if v["ok"] != true {
+        return Err(error_of(out));
+    }
+    Ok(v["result"]["terminal"]["draft"].as_str().unwrap_or_default().trim().to_string())
+}
+
 /// Ответ `terminal read --screen`: строки экрана.
 pub fn screen_text(out: &str) -> Option<String> {
     let v: Value = serde_json::from_str(out).ok()?;
@@ -190,6 +204,14 @@ mod tests {
         assert!(accepted(r#"{"ok":true,"result":{"send":{"accepted":false}}}"#).is_err());
         assert_eq!(screen_text(r#"{"ok":true,"result":{"terminal":{"tail":["a","b"]}}}"#).unwrap(), "a\nb");
         assert_eq!(screen_text("мусор"), None);
+    }
+
+    #[test]
+    fn composer_draft_from_screen_read() {
+        // так отвечала Orca 1.4.256: набранное — в draft, вне tail; пустое поле — без draft
+        assert_eq!(composer_draft(r#"{"ok":true,"result":{"terminal":{"tail":["❯"],"draft":"Ответь одним словом: ок"}}}"#), Ok("Ответь одним словом: ок".into()));
+        assert_eq!(composer_draft(r#"{"ok":true,"result":{"terminal":{"tail":["❯ продолжай"]}}}"#), Ok(String::new()), "серая подсказка — не набранное");
+        assert!(composer_draft(r#"{"ok":false,"error":{"message":"terminal_not_found"}}"#).is_err());
     }
 
     #[test]
@@ -233,6 +255,7 @@ mod tests {
         assert_eq!(key_text(&Key::Digit(3)), Some("3".into()));
         assert_eq!(key_text(&Key::Esc), Some("\x1b".into()));
         assert_eq!(key_text(&Key::CtrlU), Some("\x15".into()));
+        assert_eq!(key_text(&Key::CtrlS), Some("\x13".into()));
         assert_eq!(key_text(&Key::CtrlC), None, "у Ctrl+C — --interrupt");
     }
 
