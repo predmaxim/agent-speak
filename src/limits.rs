@@ -109,6 +109,16 @@ impl Limits {
         self.series.values().any(|(w, _)| w.pct >= threshold && w.resets_at > now)
     }
 
+    /// Окна у порога: по агенту самое полное с процентом не ниже at и сбросом впереди; по ключу.
+    pub fn warn(&self, now: u64, at: f64) -> Vec<Window> {
+        let agent = |w: &Window| w.key.split(':').next().unwrap_or_default().to_string();
+        let mut v: Vec<Window> = self.series.values().map(|(w, _)| w.clone()).filter(|w| w.pct >= at && w.resets_at > now).collect();
+        // равные проценты — держит окно с поздним сбросом
+        v.sort_by(|a, b| agent(a).cmp(&agent(b)).then(b.pct.total_cmp(&a.pct)).then(b.resets_at.cmp(&a.resets_at)));
+        v.dedup_by(|a, b| agent(a) == agent(b));
+        v
+    }
+
     /// Срок сброса самого полного окна агента (claude | codex).
     pub fn reset_of(&self, agent: &str) -> Option<u64> {
         let prefix = format!("{agent}:");
@@ -125,6 +135,12 @@ pub fn hint(f: &Forecast) -> String {
 что сделано и что осталось, и остановись; последней строкой ответа напиши «{LIMIT_STOP}».",
         f.label, f.pct, min(f.out_in), min(f.reset_in)
     )
+}
+
+/// Фраза Омы об окне у порога: «Лимит Claude почти кончился, сброс в 17:40.» — без цифр, как и орб.
+pub fn warn_text(w: &Window, now: u64) -> String {
+    let who = if w.key.starts_with("codex:") { "Codex" } else { "Claude" };
+    format!("Лимит {who} почти кончился, сброс {}.", crate::watch::when(w.resets_at, now))
 }
 
 pub fn hints_dir() -> PathBuf {
@@ -234,6 +250,28 @@ mod tests {
         assert_eq!(from_codex(line).iter().map(|w| (w.key.as_str(), w.pct, w.label)).collect::<Vec<_>>(), [("codex:primary", 12.0, "Codex")]);
         assert!(from_codex(r#"{"type":"event_msg","payload":{"type":"agent_message"}}"#).is_empty());
         assert!(from_codex("мусор").is_empty());
+    }
+
+    #[test]
+    fn warn_takes_the_fullest_live_window_per_agent() {
+        let mut l = Limits::default();
+        l.sample(w("claude:five_hour", 91.0, 5000), 1000);
+        l.sample(w("claude:seven_day", 94.0, 90_000), 1000);
+        l.sample(w("codex:primary", 89.0, 7000), 1000);
+        assert_eq!(l.warn(1000, 90.0).iter().map(|w| (w.key.as_str(), w.resets_at)).collect::<Vec<_>>(), [("claude:seven_day", 90_000)], "самое полное окно Claude; Codex ниже порога");
+        l.sample(w("codex:secondary", 97.0, 8000), 1000);
+        assert_eq!(l.warn(1000, 90.0).iter().map(|w| w.key.as_str()).collect::<Vec<_>>(), ["claude:seven_day", "codex:secondary"]);
+        assert_eq!(l.warn(8000, 90.0).iter().map(|w| w.key.as_str()).collect::<Vec<_>>(), ["claude:seven_day"], "сброс прошёл — окна у порога нет");
+        assert!(l.warn(1000, 98.0).is_empty());
+    }
+
+    #[test]
+    fn warn_text_names_agent_and_reset() {
+        let now = 1_800_000_000;
+        let t = warn_text(&w("claude:five_hour", 92.0, now + 3600), now);
+        assert_eq!(t, format!("Лимит Claude почти кончился, сброс {}.", crate::watch::when(now + 3600, now)));
+        assert!(t.starts_with("Лимит Claude почти кончился, сброс в "), "{t}");
+        assert!(warn_text(&w("codex:primary", 95.0, now + 60), now).starts_with("Лимит Codex почти кончился"));
     }
 
     #[test]

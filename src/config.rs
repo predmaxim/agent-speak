@@ -28,13 +28,17 @@ pub struct Config {
     pub hung_after: u64,
     /// процент лимита, с которого Ома считает прогноз и подсказывает агентам
     pub limit_threshold: u64,
+    /// предупреждать, что окно лимита почти кончилось («Предупреждать о лимите»): фраза, подсказка орба, строка мозгу
+    pub limit_warn: bool,
+    /// процент окна лимита, с которого Ома предупреждает пользователя; только config.toml
+    pub limit_warn_at: u64,
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config { speaker: "xenia".into(), rate: "medium".into(),
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: true, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
-            orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95 }
+            orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95, limit_warn: true, limit_warn_at: 90 }
     }
 }
 
@@ -104,6 +108,8 @@ impl Config {
             "watch_every" if in_range(value, 15, 3600) => self.watch_every = value.as_u64().unwrap(),
             "hung_after" if in_range(value, 2, 240) => self.hung_after = value.as_u64().unwrap(),
             "limit_threshold" if in_range(value, 50, 100) => self.limit_threshold = value.as_u64().unwrap(),
+            "limit_warn" if value.is_boolean() => self.limit_warn = value.as_bool().unwrap(),
+            "limit_warn_at" if in_range(value, 50, 100) => self.limit_warn_at = value.as_u64().unwrap(),
             _ => return false,
         }
         true
@@ -257,5 +263,17 @@ mod tests {
         assert!(!c.set("hung_after", &json!(12.5)));
         assert!(c.set("hung_after", &json!(20)) && c.set("watch_every", &json!(15)) && c.set("limit_threshold", &json!(50)));
         assert_eq!((c.watch_every, c.hung_after, c.limit_threshold), (15, 20, 50));
+    }
+
+    #[test]
+    fn limit_warn_keys_default_and_validate() {
+        use serde_json::json;
+        let mut c = Config::default();
+        assert_eq!((c.limit_warn, c.limit_warn_at), (true, 90));
+        assert!(c.set("limit_warn", &json!(false)) && !c.limit_warn);
+        assert!(!c.set("limit_warn", &json!("false")));
+        assert!(!c.set("limit_warn_at", &json!(49)) && !c.set("limit_warn_at", &json!(101)) && c.limit_warn_at == 90);
+        assert!(c.set("limit_warn_at", &json!(100)) && c.limit_warn_at == 100);
+        assert_eq!(parse("limit_warn_at = 30").unwrap().limit_warn_at, 90, "из файла — так же, как set");
     }
 }

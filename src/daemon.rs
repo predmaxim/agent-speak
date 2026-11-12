@@ -241,6 +241,8 @@ struct State {
     limits: Limits,            // проценты лимитов и прогноз
     limits_bad: bool,          // лимит кончится раньше сброса: промежуточное не пересказываем
     limits_good: Option<u64>,  // с этого момента прогноз хороший, а эпизод ещё держится
+    limit: String,             // фраза «лимит почти кончился» в строке состояния; "" — окна у порога нет
+    limit_said: HashMap<String, u64>, // агент → срок сброса, о котором уже сказано: эпизод предупреждения
     act: Sender<mux::Work>,    // действия в терминалах агентов; в тестах — канал без потока
     next_watch: Instant,
     activity: HashMap<String, u64>, // сессия → последний хук, с
@@ -435,6 +437,8 @@ pub fn run() {
         limits: Limits::default(),
         limits_bad: false,
         limits_good: None,
+        limit: String::new(),
+        limit_said: HashMap::new(),
         act,
         next_watch: Instant::now(),
         activity: HashMap::new(),
@@ -830,6 +834,7 @@ impl State {
             limits::clear_hints(&self.hints, |_| false); // не следим — и подсказок агентам нет
             self.limits_bad = false;
         }
+        self.warn_limits((self.now_secs)()); // предупреждение выключили — гаснет сразу, а не со сторожем
         self.purge(); // могла включиться тишина
         self.broadcast();
     }
@@ -876,8 +881,8 @@ impl State {
             media_hold: false,
             music_pause: false,
             // волна 2 (E): лимиты
-            limit: "",
-            limit_warn: false,
+            limit: &self.limit,
+            limit_warn: self.cfg.limit_warn,
             // волна 3 (A): орб слышит
             ear_in: "",
             listen_until: None,
@@ -1835,6 +1840,9 @@ impl State {
             self.on_act(a, &panes);
         }
         self.hint_limits(now);
+        if self.warn_limits(now) {
+            self.broadcast();
+        }
         self.refresh_health();
     }
 
@@ -1906,6 +1914,26 @@ impl State {
         limits::clear_hints(&self.hints, |s| hinted.contains(s));
     }
 
+    /// Окно лимита у limit_warn_at: фраза — в строку состояния (орб, мозг); новый эпизод (агент, срок сброса) — она же
+    /// пузырём Омы и на доску, один раз. true — фраза в строке состояния сменилась.
+    fn warn_limits(&mut self, now: u64) -> bool {
+        let on = self.cfg.agents_voice && self.cfg.limit_warn;
+        let warn = if on { self.limits.warn(now, self.cfg.limit_warn_at as f64) } else { vec![] };
+        let mut line = vec![];
+        for w in &warn {
+            let agent = w.key.split(':').next().unwrap_or_default().to_string();
+            let text = limits::warn_text(w, now);
+            if self.limit_said.insert(agent.clone(), w.resets_at) != Some(w.resets_at) {
+                self.watch_say(&format!("limit-{agent}"), &text, Class::Restore);
+            }
+            line.push(text);
+        }
+        let line = line.join(" ");
+        let changed = line != self.limit;
+        self.limit = line;
+        changed
+    }
+
     fn refresh_health(&mut self) {
         let ids: Vec<String> = self.registry.entries().iter().map(|e| e.id.clone()).collect();
         for id in ids {
@@ -1973,6 +2001,8 @@ mod tests {
             limits: Limits::default(),
             limits_bad: false,
             limits_good: None,
+        limit: String::new(),
+        limit_said: HashMap::new(),
             act: mpsc::channel().0, // терминалы в тестах не трогаются
             next_watch: Instant::now() + Duration::from_secs(86_400), // tick сторожа не зовёт: тесты зовут watch_tick сами
             activity: HashMap::new(),
@@ -2086,6 +2116,54 @@ mod tests {
         st.watch_tick();
         assert!(!st.limits_bad && !st.hints.join("b").exists(), "хороший прогноз продержался — эпизод кончен");
         let _ = std::fs::remove_dir_all(&st.hints);
+    }
+
+    #[test]
+    fn limit_warning_once_per_episode_in_status_and_bubble() {
+        let mut st = test_state();
+        let now = Arc::new(Mutex::new(1000u64));
+        let n = now.clone();
+        st.now_secs = Box::new(move || *n.lock().unwrap());
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        let said = |r: &mut BufReader<UnixStream>| -> (Vec<String>, Vec<String>) {
+            let all = drain(r);
+            let limits = all.iter().filter_map(|v| v.get("limit").and_then(|l| l.as_str()).map(String::from)).collect();
+            let bubbles = all.iter().filter_map(|v| v.get("bubble").map(|b| b["text"].as_str().unwrap().to_string())).collect();
+            (limits, bubbles)
+        };
+        statusline(&mut st, 89.0, 9000);
+        st.watch_tick();
+        assert_eq!(said(&mut r), (vec![], vec![]), "ниже 90 % — ни слова и строка та же");
+        statusline(&mut st, 91.0, 9000);
+        st.watch_tick();
+        let text = crate::limits::warn_text(&crate::limits::from_statusline(&serde_json::json!({"rate_limits": {"five_hour": {"used_percentage": 91.0, "resets_at": 9000}}}))[0], 1000);
+        assert_eq!(said(&mut r), (vec![text.clone()], vec![text.clone()]), "строка состояния и пузырь Омы");
+        assert_eq!(st.board.take(1000, None).as_deref(), Some(text.as_str()), "и голосом — с доски");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["limit_warn"], true);
+        statusline(&mut st, 95.0, 9000);
+        st.watch_tick();
+        assert_eq!(said(&mut r), (vec![], vec![]), "тот же сброс — тот же эпизод: фраза один раз, строка без смены");
+        assert!(st.board.take(1000, None).is_none());
+        statusline(&mut st, 40.0, 9000);
+        st.watch_tick();
+        assert_eq!(said(&mut r).0, [""], "ниже порога — дуга гаснет");
+        statusline(&mut st, 92.0, 9000);
+        st.watch_tick();
+        assert_eq!(said(&mut r), (vec![text.clone()], vec![]), "вернулся к порогу с тем же сбросом — без второй фразы");
+        st.cfg.limit_warn = false;
+        st.apply();
+        assert_eq!(said(&mut r).0, [""], "выключили — сразу гаснет");
+        st.cfg.limit_warn = true;
+        st.cfg.agents_voice = false;
+        st.apply();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["limit"], "", "не следим — не предупреждаем");
+        st.cfg.agents_voice = true;
+        st.apply();
+        *now.lock().unwrap() = 9500; // окно сбросилось, новое дошло до порога
+        statusline(&mut st, 93.0, 30_000);
+        st.watch_tick();
+        assert_eq!(said(&mut r).1.len(), 1, "новый срок сброса — новый эпизод");
     }
 
     #[test]

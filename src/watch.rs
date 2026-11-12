@@ -141,13 +141,30 @@ fn run(f: &Facts, pane: &Pane, what: What, steps: Vec<Step>) -> Vec<Act> {
     vec![Act::Run(Job { session: f.id.clone(), pane: pane.clone(), steps, what })]
 }
 
-/// «ЧЧ:ММ» по местному времени.
-fn clock(epoch: u64) -> String {
+/// Местное время эпохи.
+fn local(epoch: u64) -> libc::tm {
     // SAFETY: localtime_r потокобезопасна, tm — локальный буфер
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     let t = epoch as libc::time_t;
     unsafe { libc::localtime_r(&t, &mut tm) };
+    tm
+}
+
+/// «ЧЧ:ММ» по местному времени.
+pub(crate) fn clock(epoch: u64) -> String {
+    let tm = local(epoch);
     format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+}
+
+/// День недели с предлогом, винительный; индекс — tm_wday (0 — воскресенье).
+const WEEKDAYS: [&str; 7] = ["в воскресенье", "в понедельник", "во вторник", "в среду", "в четверг", "в пятницу", "в субботу"];
+
+/// Когда наступит epoch: «в 17:40», а дальше суток от now — «в среду в 21:00».
+pub(crate) fn when(epoch: u64, now: u64) -> String {
+    if epoch.saturating_sub(now) <= 86_400 {
+        return format!("в {}", clock(epoch));
+    }
+    format!("{} в {}", WEEKDAYS[local(epoch).tm_wday.rem_euclid(7) as usize], clock(epoch))
 }
 
 fn limit_health(until: u64) -> String {
@@ -992,6 +1009,22 @@ mod tests {
         assert_eq!(w.trouble(), 1, "оранжевый держится, пока пользователь не посмотрел");
         w.check(&ctx(201 + 1801, 999), vec![], |_| true, |_| false);
         assert_eq!(w.trouble(), 0, "агента нет — сигнал не вечный");
+    }
+
+    #[test]
+    fn when_names_the_day_only_past_a_day() {
+        let now = 1_800_000_000;
+        assert_eq!(when(now + 3600, now), format!("в {}", clock(now + 3600)), "в пределах суток — только время");
+        assert_eq!(when(now + 86_400, now), format!("в {}", clock(now + 86_400)));
+        // дальше суток — день недели в винительном: семь дней подряд — семь разных, по кругу
+        let days: Vec<String> = (2..9).map(|d| when(now + d * 86_400, now)).collect();
+        for (i, d) in days.iter().enumerate() {
+            let at = now + (i as u64 + 2) * 86_400;
+            assert!(d.ends_with(&format!(" в {}", clock(at))), "{d}");
+            let k = WEEKDAYS.iter().position(|w| d.starts_with(&format!("{w} в "))).unwrap_or_else(|| panic!("{d}"));
+            let next = WEEKDAYS.iter().position(|w| days[(i + 1) % 7].starts_with(&format!("{w} в "))).unwrap();
+            assert_eq!(next, (k + 1) % 7, "{days:?}");
+        }
     }
 
     impl Facts {
