@@ -38,6 +38,8 @@ pub struct Facts {
     pub turn_over: bool,
     /// вызов в полёте у сабагента, которого ждёт агент (вызов Agent/Task)
     pub sub_call: Option<Value>,
+    /// агент в чате Orca: терминала (pane) нет — только сказать, и сказать, где он
+    pub chat: bool,
 }
 
 /// Время и пороги тика, в секундах; idle — сколько пользователь не трогал ввод.
@@ -221,7 +223,8 @@ impl Watch {
                 self.tracks.insert(l.id.clone(), t); // для done и возвращения агента
                 run(l, pane, What::Resume, vec![Step::Text(l.resume.clone())])
             }
-            _ => say(&l.id, Class::Urgent, p, "агент закрылся посреди хода, а поднять его я не могу — он не в herdr или Orca.".into()),
+            _ => say(&l.id, Class::Urgent, p, format!("агент закрылся посреди хода, а поднять его я не могу — {}.",
+                if l.chat { "он был в чате Orca" } else { "он не в herdr или Orca" })),
         }
     }
 
@@ -349,6 +352,7 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, rotor: &mut Rotor, ctx: &C
         return match &f.pane {
             Some(pane) => run(f, pane, What::Wake, vec![Step::Text(if doc { WAKE_DOC } else { WAKE }.into())]),
             // агент стоит, пока пользователь его не разбудит, — держит работу: сразу, не пачкой
+            None if f.chat => say(&f.id, Class::Now, p, "лимит сброшен; агент в чате Orca — разбуди его там, пожалуйста.".into()),
             None => say(&f.id, Class::Now, p, "лимит сброшен; агент не в herdr и не в Orca — разбуди его, пожалуйста.".into()),
         };
     }
@@ -362,10 +366,11 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, rotor: &mut Rotor, ctx: &C
     vec![]
 }
 
-/// Агент не в herdr и не в Orca: сделать ничего нельзя — только сказать.
+/// Агент не в herdr и не в Orca или в чате Orca: сделать ничего нельзя — только сказать.
 fn outside(t: &mut Track, rotor: &mut Rotor, f: &Facts, now: u64) -> Vec<Act> {
     (t.said, t.alarm, t.alarm_at) = (true, true, now);
-    say(&f.id, Class::Urgent, &f.project, format!("агент висит вне herdr и Orca, мне его не достать — {}.", rotor.next(phrases::END)))
+    let what = if f.chat { "в чате Orca, нажать там я ничего не могу" } else { "вне herdr и Orca, мне его не достать" };
+    say(&f.id, Class::Urgent, &f.project, format!("агент висит {what} — {}.", rotor.next(phrases::END)))
 }
 
 /// Попыток за час не осталось — сказать пользователю один раз; None — пробовать можно. {конец} в what — хвост END.
@@ -584,7 +589,7 @@ mod tests {
         Facts {
             id: id.into(), project: "p".into(), state: State::Working, active_at: 1,
             helpers: 0, call: None, error: None, pane: Some(Pane { mux: "herdr", id: "w1:p1".into(), via: "/s".into() }), shell: Some(1),
-            resume: "claude --resume id".into(), pid: 7, turn_over: false, sub_call: None,
+            resume: "claude --resume id".into(), pid: 7, turn_over: false, sub_call: None, chat: false,
         }
     }
     fn ctx(now: u64, idle: u64) -> Ctx {
@@ -831,6 +836,23 @@ mod tests {
         let a = Facts { pane: None, call: Some(json!({"name": "Agent", "input": {}})), ..f("a") };
         let acts = w.check(&ctx(800, 999), vec![a], |_| true, |_| false);
         assert!(matches!(&acts[..], [Act::Say { class: Class::Urgent, project, text, .. }] if project == "p" && text == "агент висит вне herdr и Orca, мне его не достать — загляни, пожалуйста."), "{acts:?}");
+    }
+
+    #[test]
+    fn chat_of_orca_is_never_pressed_only_reported() {
+        // у чата Orca нет терминала: ни Esc, ни Ctrl+C, ни текста — только сказать, и сказать, что он в чате Orca
+        let chat = |id: &str| Facts { pane: None, shell: None, chat: true, ..f(id) };
+        let mut w = Watch::default();
+        let acts = w.check(&ctx(800, 999), vec![Facts { call: Some(json!({"name": "Agent", "input": {}})), ..chat("a") }], |_| true, |_| false);
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Urgent, text, .. }] if text == "агент висит в чате Orca, нажать там я ничего не могу — загляни, пожалуйста."), "{acts:?}");
+        let mut w = Watch::default();
+        w.limited("b", 5000);
+        let acts = w.check(&ctx(5061, 0), vec![Facts { state: State::Done, active_at: 100, ..chat("b") }], |_| true, |_| false);
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Now, text, .. }] if text == "лимит сброшен; агент в чате Orca — разбуди его там, пожалуйста."), "{acts:?}");
+        let mut w = Watch::default();
+        w.check(&ctx(100, 0), vec![chat("c")], |_| true, |_| false);
+        let acts = w.check(&ctx(200, 999), vec![], |_| true, |_| false);
+        assert!(matches!(&acts[..], [Act::Say { class: Class::Urgent, text, .. }] if text == "агент закрылся посреди хода, а поднять его я не могу — он был в чате Orca."), "{acts:?}");
     }
 
     #[test]

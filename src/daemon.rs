@@ -608,12 +608,19 @@ fn final_message(p: &serde_json::Value, transcript: &Path) -> Option<String> {
     claude::last_turn(&std::fs::read_to_string(transcript).unwrap_or_default()).pop()
 }
 
+/// Ответ `show`: проект агента (нет — заголовок). Чат Orca вперёд вывести нечем — CLI Orca переключает только вкладки
+/// терминалов (`terminal switch`), — поднимается окно Orca, и Ома называет, какой чат открыть.
+fn shown_name(e: &Entry) -> String {
+    let name = if e.project.is_empty() { e.title.clone() } else { e.project.clone() };
+    if e.chat { format!("{name}: окно Orca, чат «{}» — его вкладку открой сам", e.title) } else { name }
+}
+
 /// Факты о агенте без чтения диска: то, что знает реестр.
 fn blank_facts(e: &Entry, activity: u64) -> Facts {
     Facts {
         id: e.id.clone(), project: e.project.clone(), state: e.state,
         active_at: activity, helpers: 0, call: None, error: None, pane: None, shell: None, resume: String::new(),
-        pid: e.pid, turn_over: false, sub_call: None,
+        pid: e.pid, turn_over: false, sub_call: None, chat: e.chat,
     }
 }
 
@@ -2202,7 +2209,7 @@ impl State {
             let _ = reply.send(Err(if agent.is_empty() { "Никто не ждёт ответа" } else { "Такого агента нет" }.into()));
             return;
         };
-        let (pid, name) = (e.pid, if e.project.is_empty() { e.title.clone() } else { e.project.clone() });
+        let (pid, name) = (e.pid, shown_name(e));
         // поток действий упал — дело с ответом выброшено, serve ответит ошибкой
         let _ = self.act.send(mux::Work::Other(Box::new(move || {
             let _ = reply.send(crate::focus::bring(pid).map(|()| name));
@@ -2448,6 +2455,9 @@ impl State {
         let r = match act.as_str() {
             "tell" => {
                 let e = self.registry.get(&session).ok_or("такого агента нет")?;
+                if e.chat {
+                    return Err(crate::orders::CHAT.into()); // передать потом будет нечем
+                }
                 // агент уже закончил (пока Ома ждала «да, передай») — поручение уходит сразу: одно подтверждение — одна
                 // передача; закончил вопросом — ждёт следующего конца хода, как в later_due. Итог — последняя строка
                 // ленты: после Stop лента Claude — заново по транскрипту, и итог в ней — status, а не final
@@ -4614,6 +4624,19 @@ mod tests {
         st.on_later_done(crate::later::Done::Told { order, result: Ok(()) });
         assert_eq!(bubbles(&mut r)[0]["text"], "a: передала — прогони тесты");
         assert_eq!(board_line(&mut st, 2000).unwrap(), "a: передала — прогони тесты", "исход — сразу, класс СЕЙЧАС");
+    }
+
+    #[test]
+    fn later_tell_to_an_orca_chat_is_refused_and_show_names_the_chat() {
+        // у чата Orca терминала нет: поручение «потом» не ставится — передать его будет нечем; показать — окно Orca и чей чат
+        let mut st = test_state();
+        let chat = vec![Live { chat: true, ..live("c") }];
+        st.scan = Box::new(move || chat.clone());
+        st.rescan();
+        assert_eq!(st.later_cmd(later_msg("tell", "c", "Прогони тесты")), Err(crate::orders::CHAT.into()));
+        let e = st.registry.get("c").unwrap();
+        assert_eq!(shown_name(e), "c: окно Orca, чат «T-c» — его вкладку открой сам");
+        assert_eq!(shown_name(&Entry { chat: false, ..e.clone() }), "c");
     }
 
     #[test]
