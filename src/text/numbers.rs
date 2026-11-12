@@ -84,11 +84,11 @@ fn int_words(digits: &str) -> String {
     let rest = n % 1000;
     if millions > 0 {
         w.push(triple(millions, false));
-        w.push(plural(millions, "миллион", "миллиона", "миллионов").into());
+        w.push(super::plural(millions as usize, ["миллион", "миллиона", "миллионов"]).into());
     }
     if thousands > 0 {
         w.push(triple(thousands, true));
-        w.push(plural(thousands, "тысяча", "тысячи", "тысяч").into());
+        w.push(super::plural(thousands as usize, ["тысяча", "тысячи", "тысяч"]).into());
     }
     if rest > 0 {
         w.push(triple(rest, false));
@@ -117,17 +117,6 @@ fn triple(n: u64, feminine: bool) -> String {
         });
     }
     w.join(" ")
-}
-
-fn plural(n: u64, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
-    let (d, h) = (n % 10, n % 100);
-    if d == 1 && h != 11 {
-        one
-    } else if (2..=4).contains(&d) && !(12..=14).contains(&h) {
-        few
-    } else {
-        many
-    }
 }
 
 #[cfg(test)]

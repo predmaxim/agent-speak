@@ -1,5 +1,7 @@
 //! Доска новостей Омы: что говорить следующим — срочное сторожа, восстановление, вопросы по одному, итоги, промежуточное.
 
+use crate::text::plural;
+
 /// Порядок вариантов — приоритет.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Class {
@@ -214,15 +216,6 @@ impl Board {
         self.items = rest;
         got.sort_by_key(|i| i.born);
         got
-    }
-}
-
-/// Русское склонение: один / два-четыре / пять.
-fn plural(n: usize, forms: [&'static str; 3]) -> &'static str {
-    match (n % 10, n % 100) {
-        (1, r) if r != 11 => forms[0],
-        (2..=4, r) if !(12..=14).contains(&r) => forms[1],
-        _ => forms[2],
     }
 }
 

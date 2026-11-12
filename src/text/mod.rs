@@ -6,6 +6,15 @@ pub mod terms;
 
 use terms::Terms;
 
+/// Русское склонение по числу: один / два-четыре / пять (1 агент, 2 агента, 5 агентов, 11 агентов, 21 агент).
+pub fn plural(n: usize, forms: [&'static str; 3]) -> &'static str {
+    match (n % 10, n % 100) {
+        (1, r) if r != 11 => forms[0],
+        (2..=4, r) if !(12..=14).contains(&r) => forms[1],
+        _ => forms[2],
+    }
+}
+
 /// Сырой текст агента → предложения для синтеза + незнакомые латинские слова.
 /// Haiku ставит ударение комбинирующим знаком U+0301 после гласной; Silero ждёт «+» перед ней.
 pub fn plus_stress(p: &str) -> String {
@@ -40,6 +49,13 @@ pub fn prepare(raw: &str, terms: &Terms) -> (Vec<String>, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plural_forms() {
+        let f = ["агент", "агента", "агентов"];
+        let got: Vec<&str> = [0, 1, 2, 4, 5, 11, 12, 14, 21, 22, 25, 101, 111, 112, 1001].iter().map(|&n| plural(n, f)).collect();
+        assert_eq!(got, ["агентов", "агент", "агента", "агента", "агентов", "агентов", "агентов", "агентов", "агент", "агента", "агентов", "агент", "агентов", "агентов", "агент"]);
+    }
 
     #[test]
     fn prepare_keeps_model_stress() {
