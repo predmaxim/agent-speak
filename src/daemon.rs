@@ -977,8 +977,8 @@ impl State {
             listen_secs: 0.0,
             // волна 3 (A): настроение орба
             struggling: 0,
-            orb_moods: false,
-            orb_idle_motion: false,
+            orb_moods: self.cfg.orb_moods,
+            orb_idle_motion: self.cfg.orb_idle_motion,
             // волна 3 (A): колесо над орбом
             rate_now: "",
             // волна 3 (B): полосы, знаки, интонация
@@ -2565,6 +2565,16 @@ mod tests {
         assert_eq!(sat(&st), true, "по умолчанию спутники есть");
         st.cfg.orb_satellites = false;
         assert_eq!(sat(&st), false);
+    }
+
+    #[test]
+    fn status_line_carries_orb_moods_and_idle_motion() {
+        let field = |st: &State, k: &str| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()[k].clone();
+        let mut st = test_state();
+        assert_eq!((field(&st, "orb_moods"), field(&st, "orb_idle_motion")), (true.into(), true.into()), "по умолчанию включены");
+        st.cfg.orb_moods = false;
+        st.cfg.orb_idle_motion = false;
+        assert_eq!((field(&st, "orb_moods"), field(&st, "orb_idle_motion")), (false.into(), false.into()));
     }
 
     /// Выход по умолчанию — Bluetooth-наушники (имя узла, как его даёт `pactl get-default-sink`).

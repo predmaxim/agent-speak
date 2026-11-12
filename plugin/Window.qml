@@ -1082,6 +1082,26 @@ Item {
                 }
               }
 
+              SettingRow {
+                key: "orb_moods"
+                label: root.tr("Orb mood")
+                ToggleSwitch {
+                  checked: root.speech.orb_moods === true
+                  foreground: root.fg
+                  onToggled: root.step("orb_moods", 1)
+                }
+              }
+
+              SettingRow {
+                key: "orb_idle_motion"
+                label: root.tr("Breathes at rest")
+                ToggleSwitch {
+                  checked: root.speech.orb_idle_motion === true
+                  foreground: root.fg
+                  onToggled: root.step("orb_idle_motion", 1)
+                }
+              }
+
               PanelSectionHeader {
                 leftPadding: Style.spacing.rowPaddingX
                 topPadding: Style.space(14)

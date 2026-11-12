@@ -217,7 +217,7 @@ assert.strictEqual(M.taken("", { key: "chat:1", role: "me", text: "" }), false)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 14)
+assert.strictEqual(M.SETTINGS_ROWS.length, 16)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "kseniya", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
@@ -227,6 +227,10 @@ assert.deepStrictEqual(M.settingStep("quiet_schedule", cfg, 1), { key: "quiet_sc
 assert.strictEqual(M.settingStep("quiet_hours", cfg, 1), null)
 assert.deepStrictEqual(M.settingStep("orb_over_fullscreen", Object.assign({}, cfg, { orb_over_fullscreen: true }), 1), { key: "orb_over_fullscreen", value: false, sample: false })
 assert.deepStrictEqual(M.settingStep("orb_satellites", Object.assign({}, cfg, { orb_satellites: true }), 1), { key: "orb_satellites", value: false, sample: false })
+// the orb's moods and its breath at rest: switches in the Orb section, after the satellites (the Jarvis wave's order)
+assert.deepStrictEqual(M.SETTINGS_SECTIONS.find(s => s.title === "Orb").rows, ["orb_over_fullscreen", "orb_satellites", "orb_moods", "orb_idle_motion"])
+assert.deepStrictEqual(M.settingStep("orb_moods", Object.assign({}, cfg, { orb_moods: true }), 1), { key: "orb_moods", value: false, sample: false })
+assert.deepStrictEqual(M.settingStep("orb_idle_motion", cfg, -1), { key: "orb_idle_motion", value: true, sample: false })
 assert.deepStrictEqual(M.settingStep("progress_digest", cfg, 1), { key: "progress_digest", value: true, sample: false })
 assert.deepStrictEqual(M.settingStep("agents_voice", Object.assign({}, cfg, { agents_voice: true }), 1), { key: "agents_voice", value: false, sample: false })
 assert.deepStrictEqual(M.settingStep("screencast_privacy", Object.assign({}, cfg, { screencast_privacy: true }), 1), { key: "screencast_privacy", value: false, sample: false })

@@ -332,7 +332,7 @@ var SETTINGS_SECTIONS = [
   { title: "", rows: ["speaker", "rate"] },
   { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours", "screencast_privacy", "hush_summary"] },
   { title: "Hearing", rows: ["music_pause"] },
-  { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites"] },
+  { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites", "orb_moods", "orb_idle_motion"] },
   { title: "Agents", rows: ["agents_voice", "progress_digest", "memory", "limit_warn"] }
 ]
 
@@ -346,7 +346,7 @@ function settingStep(row, st, dx) {
   if (row === "quiet_now") return { key: "quiet_override", value: st.quiet ? "off" : "on", sample: false }
   if (row === "quiet_schedule") return { key: "quiet_schedule", value: !st.quiet_schedule, sample: false }
   if (row === "orb_over_fullscreen") return { key: row, value: !st.orb_over_fullscreen, sample: false }
-  if (row === "orb_satellites") return { key: row, value: !st.orb_satellites, sample: false }
+  if (row === "orb_satellites" || row === "orb_moods" || row === "orb_idle_motion") return { key: row, value: !st[row], sample: false }
   if (row === "progress_digest") return { key: row, value: !st.progress_digest, sample: false }
   if (row === "agents_voice") return { key: row, value: !st.agents_voice, sample: false }
   if (row === "screencast_privacy" || row === "hush_summary") return { key: row, value: !st[row], sample: false }
