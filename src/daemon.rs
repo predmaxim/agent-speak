@@ -855,7 +855,7 @@ impl State {
         self.quiet_why.screencast = on;
         self.quiet_over |= on;
         if !self.quiet_why.any() {
-            self.quiet_over &= !self.board.is_empty(); // за тишину ничего не накопилось — сводки не будет, дальше обычные новости
+            self.quiet_over &= self.board.overview(QUIET_OVER).is_some(); // сводке нечего считать (ни итогов, ни вопросов) — её не будет, дальше обычные новости
         }
         true
     }
@@ -5013,6 +5013,35 @@ mod tests {
         snap(&mut st, serde_json::json!({"at": 1500, "idle_since": 0}));
         st.tick();
         assert_eq!(texts(&st), ["плуг: Фича готова."]);
+    }
+
+    /// За показ на доску легло только class (срочное или восстановление), показ кончился в созвоне;
+    /// итог после показа — своим текстом: сводке «Пока было тихо» считать нечего.
+    fn kept_only_while_busy(class: Class) -> Vec<String> {
+        let (mut st, now) = presence_state(1000);
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 0, "screencast": true, "mic": true}));
+        st.board.push(News { session: "t".into(), class, say: "плуг: агент завис.".into(), born: 1000 });
+        *now.lock().unwrap() = 1030;
+        snap(&mut st, serde_json::json!({"at": 1030, "idle_since": 0, "mic": true}));
+        st.tick();
+        assert!(!st.quiet_over, "считать нечего — сводки не будет");
+        texts(&st); // срочное звучит и в созвоне, восстановление ждёт
+        *now.lock().unwrap() = 1500;
+        final_s(&mut st);
+        st.tick();
+        snap(&mut st, serde_json::json!({"at": 1500, "idle_since": 0}));
+        st.tick();
+        texts(&st)
+    }
+
+    #[test]
+    fn urgent_only_kept_no_summary_later() {
+        assert_eq!(kept_only_while_busy(Class::Urgent), ["плуг: Фича готова."]);
+    }
+
+    #[test]
+    fn restore_only_kept_no_summary_later() {
+        assert_eq!(kept_only_while_busy(Class::Restore), ["плуг: агент завис.", "плуг: Фича готова."]);
     }
 
     #[test]
