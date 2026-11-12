@@ -468,6 +468,7 @@ async def main():
         last = {}
 
         def on_status(d):
+            oma.brain.memory = d.get("memory") is not False  # настройка памяти — с нового подключения мозга
             for ev in status_events(d, last):
                 events.put_nowait(ev)
 

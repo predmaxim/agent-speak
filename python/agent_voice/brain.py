@@ -9,6 +9,7 @@ import time
 from claude_agent_sdk import (ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, create_sdk_mcp_server,
                               get_session_messages, list_sessions, tag_session, tool)
 
+from . import memory
 from .context import _blocks, selection, transcript_tail
 from .conversation import MORE
 from .orders import Orders
@@ -19,7 +20,10 @@ TOOLS = ["Read", "Glob", "Grep", "WebSearch"]  # без WebFetch: наружу �
 # Read, Glob и Grep — только в проектах: рабочие папки claude — OMA_DIR и PROJECTS, чтение вне них Claude Code отклоняет
 # (blockReadsOutsideWorkingDirectories); 2026-10-30 Grep мозга по всему ~ (855 ГБ) дал пик памяти 44,2 ГБ
 PROJECTS = os.path.expanduser("~/Projects")
-READ_ONLY_IN_PROJECTS = json.dumps({"permissions": {"blockReadsOutsideWorkingDirectories": True}})
+READ_ONLY_IN_PROJECTS = {"permissions": {"blockReadsOutsideWorkingDirectories": True}}
+# память вкл: Write/Edit — только для неё. Правила на них нет: вне каталога памяти запись отклоняет dontAsk, в нём Claude
+# Code разрешает её сам (auto memory), а хук PreToolUse (memory.gate) пускает лишь слова пользователя в MEMORY.md
+MEMORY_TOOLS = ["Write", "Edit"]
 OMA_TOOLS = ["mcp__oma__agents", "mcp__oma__agent_feed", "mcp__oma__agent_tail", "mcp__oma__selection",
              "mcp__oma__presence", "mcp__oma__tell", "mcp__oma__projects", "mcp__oma__launch"]
 STALE_HOURS = 2
@@ -276,6 +280,7 @@ class Brain:
         os.makedirs(OMA_DIR, exist_ok=True)
         self.orders = orders or Orders()
         self.events, self.snapshot, self.tools = events, snapshot, oma_tools(snapshot, send, self.orders)
+        self.memory = True  # настройка memory из строки состояния службы; действует с нового подключения
         self.fresh = fresh  # ход начинается: служба отвечает строкой агентов с фокусом этой минуты (link.turn); None — нет
         self.key, self.sid, self.client, self.reader = "new", None, None, None
         self.st, self.used, self.turns = {"skip": False}, time.time(), 0  # turns: запросов без ResultMessage
@@ -313,19 +318,33 @@ class Brain:
         if self.key.startswith("agent:"):
             aid = self.key[6:]
             prompt = agent_prompt(pick_agent(self.snapshot(), aid)[0] or {"id": aid, "title": aid, "cwd": "?"})
+        on = self.memory
+        if on:
+            memory.ensure()
         client = ClaudeSDKClient(ClaudeAgentOptions(
-            cwd=OMA_DIR, add_dirs=[PROJECTS], model=MODEL, system_prompt=prompt, tools=TOOLS,
+            cwd=OMA_DIR, add_dirs=[PROJECTS], model=MODEL, system_prompt=prompt + memory.prompt(on),
+            tools=TOOLS + (MEMORY_TOOLS if on else []),
             # чтение в рабочих папках разрешений не просит; остальное, что спросило бы, — отказ: спрашивать некого
-            allowed_tools=["WebSearch"] + OMA_TOOLS, permission_mode="dontAsk", settings=READ_ONLY_IN_PROJECTS,
+            allowed_tools=["WebSearch"] + OMA_TOOLS, permission_mode="dontAsk",
+            # «Помню» — штатная auto memory в своём каталоге: её MEMORY.md CLI кладёт в контекст нового чата сам
+            settings=json.dumps({**READ_ONLY_IN_PROJECTS, **({"autoMemoryDirectory": memory.prefs_dir()} if on else {})}),
             mcp_servers={"oma": create_sdk_mcp_server("oma", tools=self.tools)}, strict_mcp_config=True,
-            resume=self.sid, include_partial_messages=True, setting_sources=[], env={"AGENT_SPEAK": "1"},
-            hooks={"PostToolUse": [HookMatcher(matcher=ORDER_TOOLS, hooks=[self._asked])]}))
+            resume=self.sid, include_partial_messages=True, setting_sources=[],
+            env={"AGENT_SPEAK": "1", **({} if on else {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"})},
+            hooks={"PostToolUse": [HookMatcher(matcher=ORDER_TOOLS, hooks=[self._asked])],
+                   "PreToolUse": [HookMatcher(matcher="Write|Edit", hooks=[self._remember])]}))
         await client.connect()  # упал — клиента нет, следующий send попробует снова
         self.client, self.reader = client, asyncio.create_task(self._read(client))
 
     async def _asked(self, inp, tool_use_id, ctx):
         """После tell или launch: Ома спросила подтверждение — ход кончается, второго прохода модели нет."""
         return {"continue_": False, "stopReason": ASKED} if self.orders.tripped else {}
+
+    async def _remember(self, inp, tool_use_id, ctx):
+        """Перед Write/Edit: в память — только слова пользователя из этой реплики (orders.heard), иначе отказ."""
+        why = memory.gate(inp.get("tool_input") or {}, self.orders.heard)
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": why}} if why else {}
 
     async def _read(self, client):
         try:
