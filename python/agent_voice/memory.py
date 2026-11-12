@@ -6,6 +6,7 @@ Write/Edit, а gate() — хук PreToolUse — пропускает тольк�
 Дни — заметки Haiku по таймеру systemd (`python -m agent_voice.memory`, 05:00): чаты Омы и пересказы агентов,
 которые служба пишет в news/<день>.jsonl (src/memory.rs). Свежие 7 дней идут в системный промпт новых чатов (block())."""
 import asyncio
+import contextlib
 import datetime
 import fcntl
 import glob
@@ -139,15 +140,19 @@ def prompt(on):
     return " " + REMEMBER.format(path=prefs_file()) + block() if on else " " + NO_MEMORY
 
 
+def _days():
+    """Дни с заметками, свежие первыми; файл, чьё имя не дата, — не день."""
+    try:
+        return sorted((n[:-3] for n in os.listdir(os.path.join(DIR, "days")) if n.endswith(".md") and NAME.fullmatch(n[:-3])),
+                      reverse=True)
+    except OSError:
+        return []
+
+
 def block():
     """Заметки дней для промпта: свежие первыми, не больше KEEP_DAYS и BLOCK_MAX знаков; нет заметок — пусто."""
-    try:
-        names = sorted((n[:-3] for n in os.listdir(os.path.join(DIR, "days")) if n.endswith(".md") and NAME.fullmatch(n[:-3])),
-                       reverse=True)[:KEEP_DAYS]
-    except OSError:
-        return ""
     lines, room = [], BLOCK_MAX - len(HEAD) - len(TAIL)
-    for day in names:
+    for day in _days()[:KEEP_DAYS]:
         try:
             with open(os.path.join(DIR, "days", day + ".md")) as f:
                 text = " ".join(l.strip() for l in f.read().splitlines() if l.strip())
@@ -159,6 +164,62 @@ def block():
             break
         lines.append(line)
     return HEAD + "\n".join(lines) + TAIL if lines else ""
+
+
+def view():
+    """Страница «Память» окна: строки «Помню» как в MEMORY.md и заметки дней, свежие первыми; не прочесть — пропуск."""
+    try:
+        with open(prefs_file()) as f:
+            prefs = [l.strip() for l in f.read().splitlines() if l.strip()]
+    except (OSError, ValueError):
+        prefs = []
+    days = []
+    for d in _days():
+        try:
+            with open(os.path.join(DIR, "days", d + ".md")) as f:
+                days.append({"id": d, "text": f.read().strip()})
+        except (OSError, ValueError):
+            continue
+    return {"prefs": prefs, "days": days}
+
+
+def set_pref(old, text):
+    """Правка «Помню» из окна: строка old → text одной строкой, пусто — строки нет. Такой строки нет (окно смотрело
+    старый вид) — ничего."""
+    text = " ".join(text.split())
+    try:
+        with open(prefs_file()) as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return
+    for i, l in enumerate(lines):
+        if l.strip() == old:
+            lines[i:i + 1] = [text] if text else []
+            ensure()
+            _write(prefs_file(), "".join(l + "\n" for l in lines))
+            return
+
+
+def drop(kind, id):
+    """Удаление из окна: строка «Помню» (pref), заметка дня (day: id — только дата, путь из окна не выйдет из days/),
+    всё (all)."""
+    if kind == "pref":
+        set_pref(id, "")
+    elif kind == "day" and NAME.fullmatch(id):
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(os.path.join(DIR, "days", id + ".md"))
+    elif kind == "all":
+        forget()
+
+
+def forget():
+    """«Забыть всё»: сначала всё сказанное до сих пор — сжатым (mark_seen), иначе таймер восстановил бы вчерашний день
+    из чатов; потом «Помню», заметки и пересказы — насовсем. mark_seen упал — не удалено ничего.
+    shortcut: сжатие, которое идёт в эту секунду (таймер в 05:00), может дописать заметку после; если мешает — общий замок."""
+    mark_seen()
+    for f in [prefs_file(), *glob.glob(os.path.join(DIR, "days", "*.md")), *glob.glob(os.path.join(DIR, "news", "*.jsonl"))]:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(f)
 
 
 def _run_in(quote, heard):
