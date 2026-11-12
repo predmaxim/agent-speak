@@ -1059,6 +1059,16 @@ Item {
                   onToggled: root.step("progress_digest", 1)
                 }
               }
+
+              SettingRow {
+                key: "memory"
+                label: root.tr("Remember past days")
+                ToggleSwitch {
+                  checked: root.speech.memory === true
+                  foreground: root.fg
+                  onToggled: root.step("memory", 1)
+                }
+              }
             }
           }
         }

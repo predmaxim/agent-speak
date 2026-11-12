@@ -20,6 +20,7 @@ var TABLES = {
     "No chats yet": "Чатов пока нет", "Quiet now": "Сейчас тихо", "On schedule": "По расписанию", "From / to": "С / до",
     "Orb": "Орб", "Over fullscreen windows": "Над полноэкранными окнами",
     "Agents": "Агенты", "General chat": "Общий чат", "Copy": "Копировать", "Copied": "Скопировано", "Retell progress": "Пересказывать промежуточное",
+    "Remember past days": "Помнить прошлые дни",
     "Watch agents": "Следить за агентами", "Oma is off": "Ома выключена", "Turn Oma on": "Включить Ому", "Turn Oma off": "Выключить Ому",
     "Turn sound off": "Выключить звук", "Turn sound on": "Включить звук", "Oma: sound off": "Ома: звук выключен"
   }
