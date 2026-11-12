@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, QUIET_WHY, bubblesKept, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById, toPause, toResume, memoryRows, wheelStep, rateStep, TEMPO, level, listenLeft, seenDone, doneUnseen, NEWS_EVERY, newsEvery")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, QUIET_WHY, bubblesKept, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById, toPause, toResume, memoryRows, wheelStep, rateStep, TEMPO, level, listenLeft, seenDone, doneUnseen, NEWS_EVERY, newsEvery, dropText")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -362,6 +362,14 @@ assert.strictEqual(M.asks("a:working", "a:waiting"), true)
 assert.strictEqual(M.asks("a:health", "a:waiting"), true)
 for (const [was, key] of [["", "a:waiting"], ["b:working", "a:waiting"], ["a:waiting", "a:waiting"], ["a:waiting", "a:working"], ["a:working", ""]])
   assert.strictEqual(M.asks(was, key), false, was + " -> " + key)
+// A drop on a satellite or the orb (orb-address B): local files as paths (with spaces — in quotes), other links as they
+// are, by spaces; no links — the text; an undecodable link stays as it came
+assert.strictEqual(M.dropText(["file:///home/u/shot.png"], "file:///home/u/shot.png"), "/home/u/shot.png")
+assert.strictEqual(M.dropText(["file:///home/u/My%20Shots/a%20b.png", "file:///tmp/x.txt"], ""), '"/home/u/My Shots/a b.png" /tmp/x.txt')
+assert.strictEqual(M.dropText(["https://example.com/a?b=1"], ""), "https://example.com/a?b=1")
+assert.strictEqual(M.dropText([], "  посмотри это \n"), "посмотри это")
+assert.strictEqual(M.dropText(null, ""), "")
+assert.strictEqual(M.dropText({ 0: "file:///bad%E0", length: 1 }, ""), "file:///bad%E0")
 // Music pause (media_hold): only what plays and can pause; after, only those, if still paused, and nothing if
 // anything plays by then (the user started it). PAUSED is MprisPlaybackState.Paused, passed in by MediaHold.qml.
 const PAUSED = 2

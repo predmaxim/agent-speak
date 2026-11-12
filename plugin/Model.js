@@ -184,6 +184,18 @@ function asks(was, key) {
   return /:waiting$/.test(key) && was !== key && id !== "" && was.indexOf(id) === 0
 }
 
+// A drop on a satellite or the orb (DropArea's urls and text) -> what goes into the chat's field: local files as paths
+// (one with spaces in quotes), other links as they are, by spaces; no links — the text; "" — nothing to put.
+function dropText(urls, text) {
+  var parts = Array.prototype.slice.call(urls || []).map(function(u) {
+    var s = String(u)
+    if (s.indexOf("file://") !== 0) return s
+    try { s = decodeURIComponent(s.slice(7)) } catch (e) { return s }   // undecodable: as it came
+    return /\s/.test(s) ? '"' + s + '"' : s
+  })
+  return parts.length ? parts.join(" ") : String(text || "").trim()
+}
+
 var BUBBLES_MAX = 3
 var BUBBLE_TTL = 10000
 

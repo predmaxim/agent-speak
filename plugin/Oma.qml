@@ -106,6 +106,11 @@ Item {
     onDismissed: function(key) { root.bubbles = Model.dismiss(root.bubbles, key) }
     onWindowToggled: omaWindow.toggle()
     onChatOpened: function(key) { omaWindow.open(key) }
+    // A drop: the chat with it in the field — the user sends it with Enter, a typed message, no confirmation.
+    onAttached: function(key, text) {
+      omaWindow.open(key)
+      omaWindow.typeIn(text)
+    }
   }
 
   // Music pauses while Oma speaks or listens; the setting off or the daemon gone — what it paused plays again.

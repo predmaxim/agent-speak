@@ -30,6 +30,7 @@ PanelWindow {
   signal dismissed(string key)
   signal windowToggled()
   signal chatOpened(string key)   // a bubble's chat: "agent:<id>", or "" for Oma's current one
+  signal attached(string key, string text)   // a drop: on a satellite its chat "agent:<id>", on the orb "general"; the text for the field
 
   // Fixed status colours (FixedColors.qml, rules.md §9): a theme's red or yellow can be any colour.
   readonly property QtObject fixedColors: FixedColors {}
@@ -102,6 +103,9 @@ PanelWindow {
   // dot's place (Model.satSlots); none while not watching agents, with the setting off or under Oma's window.
   readonly property bool satsShown: link.speech.agents_voice === true && link.speech.orb_satellites === true && !win.covered
   property var sats: []   // Model.satSlots: places hold from one agent line to the next
+  // The chat Oma's conversation is in (her `chat` line with was "*", sent as each conversation starts): while she
+  // listens there, that agent's dot is ringed — a hold on it took.
+  property string talkKey: ""
   Component.onCompleted: sats = Model.satSlots(sats, link.agents, Model.SAT_MAX)
   Connections {
     target: win.link
@@ -111,6 +115,7 @@ PanelWindow {
     }
     // news she does not say now: one wave instead of words (the daemon sends it only with orb_moods on)
     function onRipple(r) { orbFace.ripple(r.tone) }
+    function onChat(c) { if (c.was === "*") win.talkKey = c.key || "" }
   }
   readonly property int satDot: Style.space(8)     // what is seen
   readonly property int satZone: Style.space(14)   // what takes the pointer
@@ -186,7 +191,7 @@ PanelWindow {
       limit: (win.link.speech.limit || "") !== ""
       ring: win.moods && Model.doneUnseen(win.link.agents, win.seen)
       droop: win.moods && win.link.speech.struggling > 0
-      awake: orbArea.containsMouse
+      awake: orbArea.containsMouse || (orbDrop.item !== null && orbDrop.item.containsDrag)
       idleMotion: win.link.speech.orb_idle_motion === true && !UPower.onBattery && !win.covered
       ringColor: win.fixedColors.values.green || "#57ab5a"
       limitColor: win.fixedColors.values.yellow || "#d4a72c"
@@ -251,6 +256,14 @@ PanelWindow {
         wheelAcc = w.acc
         if (w.steps) win.link.send(Model.rateStep(w.steps))
       }
+    }
+
+    // A file, a screenshot or text dropped on the orb: the general chat in Oma's window with it in the field.
+    Loader {
+      id: orbDrop
+      anchors.fill: parent
+      source: "DropTarget.qml"
+      onLoaded: item.took.connect(function(t) { win.attached("general", t) })
     }
   }
 
@@ -415,13 +428,44 @@ PanelWindow {
         }
       }
 
-      // Left: the agent's chat in Oma's window; «more» — the window with them all.
+      // Oma listens in this agent's chat (a hold on the dot took, or her answer window for it), or a drag is over the
+      // dot: a green ring round it.
+      Rectangle {
+        anchors.centerIn: parent
+        width: win.satZone
+        height: width
+        radius: width / 2
+        color: "transparent"
+        border.width: Math.max(1, Style.space(2))
+        border.color: win.fixedColors.values.green || "#57ab5a"
+        visible: (win.mode === "listening" && win.talkKey === "agent:" + sat.sid) || (satDrop.item !== null && satDrop.item.containsDrag)
+      }
+
+      // Left: the agent's chat in Oma's window; «more» — the window with them all. Held (0,45 s): talk to this agent
+      // without naming it — Oma listens in its chat; a voiced order there still waits for «да, передай»; the release
+      // after a hold is no click.
       MouseArea {
         id: satArea
         anchors.fill: parent
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
-        onClicked: sat.more ? win.windowToggled() : win.chatOpened("agent:" + sat.sid)
+        pressAndHoldInterval: 450
+        property bool held: false
+        onPressed: held = false
+        onPressAndHold: if (!sat.more) {
+          held = true
+          win.link.send(Model.omaCmd({ do: "talk", key: "agent:" + sat.sid }))
+        }
+        onClicked: if (!held) sat.more ? win.windowToggled() : win.chatOpened("agent:" + sat.sid)
+      }
+
+      // A file, a screenshot or text dropped on the dot: its chat in Oma's window with that in the field.
+      Loader {
+        id: satDrop
+        anchors.fill: parent
+        active: sat.agent !== null
+        source: "DropTarget.qml"
+        onLoaded: item.took.connect(function(t) { win.attached("agent:" + sat.sid, t) })
       }
 
       // «Astral.Edo — ждёт · 15 мин», counted when the pointer comes
