@@ -435,6 +435,22 @@ def test_phrase_after_a_wake_keeps_its_sound_for_the_whole_utterance(monkeypatch
     run(go())
 
 
+def test_name_listening_follows_presence_after_are_you_there_in_the_speakers(monkeypatch):
+    # «Ты тут?» в динамики слушает ноутбуком (speakers True); слух на имя после него — снова по сервису присутствия:
+    # иначе в наушниках он брал бы mic_aec и выбрасывал кадры, пока она говорит («Ома, стоп» не слышен)
+    m, sent, ears, oma = _woke_oma(monkeypatch)
+    monkeypatch.setattr(m, "mic_outputs", lambda: [])
+
+    async def go():
+        await oma.command({"do": "wake", "on": True})
+        await oma.command({"do": "listen", "secs": 20, "kind": "here", "said": "Эй, ты тут?", "speakers": True})
+        assert oma.ear.speakers is True
+        oma.conv.clock.t += 21
+        await oma.event(("tick",))  # окно кончилось тишиной — слух снова на имя
+        assert not oma.conv.active and oma.ear.calls[-1] == "wake" and oma.ear.speakers is None
+    run(go())
+
+
 def test_whole_utterance_from_a_wake_drops_the_name(monkeypatch):
     m, sent, ears, oma = _woke_oma(monkeypatch)
     oma.whisper = SimpleNamespace(ready=True, get=lambda: _value("m"))

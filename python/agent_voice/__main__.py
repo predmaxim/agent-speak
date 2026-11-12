@@ -479,6 +479,7 @@ class Oma:
         return "no_mic" if self.no_mic else self.mic_why or "on"
 
     async def _wake_open(self):
+        self.ear.speakers = None  # слух на имя — по сервису присутствия: «Ты тут?» в динамики (listen) — не его случай
         try:
             self.no_mic = not await self.ear.start(wake=True)
         except Exception as e:  # модель Vosk не грузится — побудки нет, слух — как раньше
