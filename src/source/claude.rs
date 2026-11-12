@@ -502,6 +502,14 @@ mod tests {
     }
 
     #[test]
+    fn recap_record_is_not_a_turn() {
+        // away_summary Claude Code пишет через минуты после конца хода: ни новый ход, ни реплика агента
+        const RECAP: &str = include_str!("../../tests/fixtures/recap.jsonl");
+        assert_eq!(last_turn(RECAP), ["Причина найдена: баг движка обоев owe 0.2.13, исправлен в 0.2.14. Запусти `omarchy-update` в обычном терминале."]);
+        assert!(turn_over(RECAP) && in_flight(RECAP).is_none() && last_api_error(RECAP).is_none());
+    }
+
+    #[test]
     fn sub_in_flight_reads_sidechain_records() {
         let side = |v: serde_json::Value| { let mut v = v; v["isSidechain"] = true.into(); v.to_string() };
         let c = side(serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"s1","name":"Bash","input":{"command":"git push"}}]}}));

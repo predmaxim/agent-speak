@@ -251,6 +251,39 @@ fn history_line(l: &[u8], images: &Path) -> Option<Line> {
         .then(|| Line { at: v["timestamp"].as_str().and_then(epoch).unwrap_or(0), kind, text: text.chars().take(LINE_MAX).collect(), images: pics })
 }
 
+/// Recap Claude Code — запись `away_summary`, которую сессия пишет сама, пока терминал не в фокусе (docs:
+/// interactive-mode, «Session recap»): первое предложение, без приписки « (disable recaps in /config)». Только свежий:
+/// после него не было ни реплики пользователя, ни агента, иначе он о прошлом ходе. Хвост не дальше 1 МиБ.
+pub fn recap(transcript: &Path) -> Option<String> {
+    let mut found = None;
+    tail_lines(transcript, 1 << 20, |l| {
+        let has = |pat: &[u8]| l.windows(pat.len()).any(|w| w == pat);
+        if !(has(b"\"away_summary\"") || has(b"\"type\":\"user\"") || has(b"\"type\":\"assistant\"")) {
+            return false;
+        }
+        let Ok(v) = serde_json::from_slice::<Value>(l) else { return false };
+        match v["type"].as_str() {
+            Some("system") if v["subtype"] == "away_summary" => {
+                found = v["content"].as_str().map(|t| opening(t.trim().trim_end_matches("(disable recaps in /config)")).to_string());
+                true
+            }
+            Some("user" | "assistant") => true,
+            _ => false,
+        }
+    });
+    found.filter(|t| !t.is_empty())
+}
+
+/// Первое предложение: конец — . ! ? … перед пробелом и заглавной буквой или в конце текста («300 тыс. ₽» — не конец).
+fn opening(text: &str) -> &str {
+    let t = text.trim();
+    let end = t.char_indices().find(|&(i, c)| {
+        let rest = &t[i + c.len_utf8()..];
+        ".!?…".contains(c) && rest.starts_with(char::is_whitespace) && rest.trim_start().starts_with(char::is_uppercase)
+    });
+    end.map_or(t, |(i, c)| &t[..i + c.len_utf8()])
+}
+
 /// Кэш картинок промптов: `$XDG_CACHE_HOME/agent-speak/images` (по умолчанию `~/.cache/…`).
 // ponytail: кэш не чистится — скриншоты по сотне КиБ; чистить по возрасту, если разрастётся.
 pub fn images_dir() -> PathBuf {
@@ -823,6 +856,30 @@ mod tests {
         let a = r.get("a").unwrap();
         let got: Vec<(&str, &str)> = a.feed.iter().map(|l| (l.kind, l.text.as_str())).collect();
         assert_eq!(got, [("prompt", "сделай"), ("final", "Готово:\n\n- **один**\n- два схема")]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recap_is_the_first_sentence_of_the_latest_away_summary_after_the_turn() {
+        // хвост настоящего транскрипта Claude Code 2.1.322 (обезличен): конец хода, recap, снимок файлов
+        const FX: &str = include_str!("../tests/fixtures/recap.jsonl");
+        let root = std::env::temp_dir().join(format!("oma-recap-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let p = root.join("t.jsonl");
+        let read = |text: &str| {
+            std::fs::write(&p, text).unwrap();
+            recap(&p)
+        };
+        let said = "Ищем, почему после сна экран полминуты чёрный: это баг движка обоев owe 0.2.13, исправленный в 0.2.14.";
+        assert_eq!(read(FX).as_deref(), Some(said), "первое предложение, без «Дальше …» и приписки про /config");
+        let prompt = FX.lines().next().unwrap();
+        assert_eq!(read(&format!("{FX}{prompt}\n")), None, "после recap пользователь написал — он о прошлом ходе");
+        let no_recap: String = FX.lines().filter(|l| !l.contains("away_summary")).map(|l| format!("{l}\n")).collect();
+        assert_eq!(read(&no_recap), None);
+        // старые версии пишут без приписки; «тыс. ₽» — не конец предложения
+        let plain = FX.replace("Ищем, почему после сна экран полминуты чёрный", "Ищем дело на 300 тыс. ₽ в месяц").replace(" (disable recaps in /config)", "");
+        assert_eq!(read(&plain).as_deref(), Some("Ищем дело на 300 тыс. ₽ в месяц: это баг движка обоев owe 0.2.13, исправленный в 0.2.14."));
+        assert_eq!(recap(&root.join("нет.jsonl")), None);
         let _ = std::fs::remove_dir_all(root);
     }
 
