@@ -48,6 +48,9 @@ pub struct Facts {
     pub video: bool,
     #[serde(deserialize_with = "buds_from")]
     pub buds: Buds,
+    /// Экран показывают (поток показа портала: Video/Source без device.id). Пока только читается — тишину по показу
+    /// строит волна 2 (A) дизайна «Джарвис».
+    pub screencast: bool,
 }
 
 pub fn parse_facts(s: &str) -> Option<Facts> {
@@ -195,6 +198,9 @@ mod tests {
         assert_eq!(parse_facts(r#"{"buds":"in"}"#).unwrap().buds, Buds::In);
         assert_eq!(parse_facts(r#"{"buds":"out"}"#).unwrap().buds, Buds::Out);
         assert_eq!(parse_facts(r#"{"buds":"x"}"#).unwrap().buds, Buds::Unknown);
+        // показ экрана (волна «Джарвис»): в старом снимке поля нет — не показывают
+        assert!(parse_facts(r#"{"screencast":true}"#).unwrap().screencast);
+        assert!(!parse_facts(r#"{"at":1}"#).unwrap().screencast);
     }
 
     #[test]
