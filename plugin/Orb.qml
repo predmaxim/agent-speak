@@ -177,7 +177,7 @@ PanelWindow {
         id: tipLabel
         anchors.centerIn: parent
         textFormat: Text.PlainText
-        text: win.tr(win.tip[0], win.tip[1])
+        text: win.tip.map(function(l) { return win.tr(l[0], l[1]) }).join("\n")
         color: Color.tooltip.text
         font.family: Style.font.family
         font.pixelSize: Style.font.body

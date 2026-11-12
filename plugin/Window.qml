@@ -369,7 +369,7 @@ Item {
           anchors.right: parent.right
           anchors.top: parent.top
           title: root.page === "history" ? root.tr("Chat history") : root.page === "settings" ? root.tr("Settings") : root.tr("Oma")
-          meta: root.tr(root.tip[0], root.tip[1]) + (root.speech.running ? " · " + root.tr("%1 agents", root.agents.length) : "")
+          meta: root.tip.map(function(l) { return root.tr(l[0], l[1]) }).join(" · ") + (root.speech.running ? " · " + root.tr("%1 agents", root.agents.length) : "")
           foreground: root.fg
           fontFamily: root.font
           // Idle while hidden: no animation runs for a window nobody sees.

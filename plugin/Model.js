@@ -50,13 +50,13 @@ function headItems(page, running) {
   return running ? ["talk", "new", "history", "sound", "settings", "power"] : ["power"]
 }
 
-// Tooltip: a key for tr(key, arg).
+// Tooltip: its lines, each a key for tr(key, arg); the orb's tooltip and the window header draw them all.
 function orbTip(st) {
   var mode = orbMode(st)
   var tips = { off: "Oma is not running", loading: "Oma is loading", listening: "Oma is listening", thinking: "Oma is thinking",
     speaking: "Oma is speaking", paused: "Paused", quiet: "Quiet mode", idle: "Oma" }
-  if (mode === "trouble") return ["%1 need help", st.trouble]
-  return mode === "waiting" ? ["%1 waiting", st.waiting] : [tips[mode], ""]
+  if (mode === "trouble") return [["%1 need help", st.trouble]]
+  return [mode === "waiting" ? ["%1 waiting", st.waiting] : [tips[mode], ""]]
 }
 
 var BUBBLES_MAX = 3
