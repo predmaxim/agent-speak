@@ -45,6 +45,13 @@ fn main() {
             });
             return done(told.map(|chosen| if !chosen.is_empty() { println!("{chosen}") }));
         }
+        // агента — на экран (вкладка Orca или панель herdr и окно); next или без аргумента — следующий ждущий по кругу.
+        // В терминал ничего не пишется. Зовёт сама Ома (AGENT_SPEAK от службы) — исход скажет она, пузыря службы не нужно
+        Some("show") if args.len() <= 2 => {
+            let agent = args.get(1).filter(|a| *a != "next").cloned().unwrap_or_default();
+            let quiet = std::env::var_os("AGENT_SPEAK").is_some();
+            return done(ipc::request(&Msg::Show { agent, quiet }).map(|name| println!("{name}")));
+        }
         // пункты меню агента с экрана — только чтение, без службы: Ома называет пункт в вопросе подтверждения до tell
         Some("menu") if args.len() == 2 => {
             return done(orders::menu_of(&args[1]).map(|items| items.iter().enumerate().for_each(|(i, t)| println!("{}. {t}", i + 1))));
@@ -79,7 +86,7 @@ fn main() {
             Msg::Hook { kind, payload: serde_json::from_str(&raw).unwrap_or_default() }
         }
         _ => {
-            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | set <ключ> <значение> | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | menu <session> | launch <path> <text> [orca|herdr] | projects [orca|herdr]");
+            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | set <ключ> <значение> | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | menu <session> | show [<session>|next] | launch <path> <text> [orca|herdr] | projects [orca|herdr]");
             std::process::exit(2);
         }
     };

@@ -1697,6 +1697,24 @@ def test_format_agents_shows_question_options():
     assert format_agents([waiting], now=1000).endswith("; ждёт ответа: Ждёт ответа на AskUserQuestion: Какой цвет? Варианты: Красный; Синий")
 
 
+def test_show_tool_brings_agent_without_confirmation():
+    # «Ома, покажи его»: только фокус, в терминал ничего не уходит — подтверждения «да, передай» нет, голосом тоже
+    from agent_voice import brain
+    o, calls = _orders(out="omarchy-mail")
+    o.turn(True, "покажи почту")
+    r = run(_tool("show", E, o).handler({"agent": "почтов"}))["content"][0]["text"]
+    assert calls == [("show", "s1")] and "omarchy-mail" in r and o.pending is None and not o.tripped
+    run(_tool("show", E, o).handler({}))
+    assert calls[-1] == ("show", "next"), "пусто — следующий ждущий"
+    o, _ = _orders(ok=False, out="Orca закрыта — открой её")
+    r = run(_tool("show", E, o).handler({"agent": "s2"}))["content"][0]["text"]
+    assert "Orca закрыта — открой её" in r
+    r = run(_tool("show", [E[0], dict(E[0], id="s3")], o).handler({"agent": "почт"}))["content"][0]["text"]
+    assert "несколько агентов" in r, "из двух — не случайному"
+    assert "mcp__oma__show" in brain.OMA_TOOLS and "show" not in brain.ORDER_TOOLS and "show" in brain.OMA_PROMPT
+    assert FILLERS["mcp__oma__show"] == (), "мгновенный — без слова"
+
+
 def test_prompt_knows_orders():
     from agent_voice import brain
     assert all(w in brain.OMA_PROMPT for w in ("tell", "launch", "projects")) and "пока не умеешь" not in brain.OMA_PROMPT

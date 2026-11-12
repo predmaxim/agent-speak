@@ -349,6 +349,7 @@ fn first_sentence(text: &str) -> String {
 #[derive(Default)]
 pub struct Registry {
     entries: Vec<Entry>,
+    jumped: String, // кого `show` показал последним: следующий ждущий — после него
 }
 
 impl Registry {
@@ -509,6 +510,21 @@ impl Registry {
         changed
     }
 
+    /// Агент для `show`: id — он; пусто — следующий ждущий по кругу, старший (по since) первым, после показанного
+    /// прошлым разом; тот уже не ждёт — с начала. Показанного запоминает.
+    pub fn jump(&mut self, id: &str) -> Option<&Entry> {
+        let id = if id.is_empty() {
+            let mut w: Vec<&Entry> = self.entries.iter().filter(|e| e.state == State::Waiting).collect();
+            w.sort_by_key(|e| e.since);
+            let after = w.iter().position(|e| e.id == self.jumped).map_or(0, |i| i + 1);
+            w.get(after).or(w.first())?.id.clone()
+        } else {
+            self.get(id)?.id.clone()
+        };
+        self.jumped = id;
+        self.get(&self.jumped)
+    }
+
     pub fn waiting(&self) -> usize {
         self.entries.iter().filter(|e| e.state == State::Waiting).count()
     }
@@ -569,6 +585,26 @@ mod tests {
     fn live(id: &str, busy: bool) -> Live {
         let state = if busy { State::Working } else { State::Idle };
         Live { id: id.into(), agent: "claude", pid: 1, title: id.into(), cwd: format!("/p/{id}"), transcript: PathBuf::new(), state, status_at: 0 }
+    }
+
+    #[test]
+    fn jump_goes_round_the_waiting_oldest_first() {
+        let mut r = Registry::new();
+        let id = |r: &mut Registry, q: &str| r.jump(q).map(|e| e.id.clone());
+        r.sync(vec![live("a", true), live("b", true), live("c", true), live("d", true)], 100);
+        assert_eq!(id(&mut r, ""), None, "никто не ждёт");
+        r.question("c", "?", 110);
+        r.question("a", "?", 120);
+        r.question("b", "?", 130);
+        let round: Vec<_> = (0..4).map(|_| id(&mut r, "")).collect();
+        assert_eq!(round, [Some("c".into()), Some("a".into()), Some("b".into()), Some("c".into())], "старший первым, по кругу");
+        r.status("c", "работаю", 140); // показанный больше не ждёт — с начала
+        assert_eq!(id(&mut r, ""), Some("a".into()));
+        assert_eq!(id(&mut r, "d"), Some("d".into()), "показать можно и не ждущего");
+        assert_eq!(id(&mut r, ""), Some("a".into()));
+        assert_eq!(id(&mut r, "b"), Some("b".into()));
+        assert_eq!(id(&mut r, ""), Some("a".into()), "после показанного явно — следующий за ним");
+        assert_eq!(id(&mut r, "нет"), None);
     }
 
     #[test]

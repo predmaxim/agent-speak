@@ -679,9 +679,9 @@ ESpeech отклонён: +1–3 с на фразу на GPU, до 3,2 ГБ VRAM
   - Окна нет — ни одного вызова CLI, ошибка «Orca/herdr закрыт — открой». Так Ома сама ничего не открывает: это правило уже записано (Проверил: ~/omarchy-dotfiles/docs/rules.md, раздел agent-speak: «Закрытые Orca или herdr Ома называет закрытыми и сама не открывает»).
 - **Потом вкладка** — новый метод трейта `Mux::focus(&Pane)`, по умолчанию `Err`:
   - Orca: `orca terminal switch --terminal <handle> --json` (Проверил: `orca terminal switch --help`, 2026-11-12).
-  - herdr: `herdr agent focus <target>` (Проверил: `herdr agent focus --help`, herdr 0.9.5). Что такое target — id панели или имя агента — Не проверял.
+  - herdr: `herdr agent focus <target>` (Проверил: `herdr agent focus --help`, herdr 0.9.5). Target — id панели или уникальное имя агента (Проверил: `herdr --skill`, раздел «Use IDs and caller context», 2026-11-12: «Use `--current`, an explicit pane ID, or a unique agent name»); строится с id панели.
   - Агент вне мультиплексора — только окно.
-- **Потом окно:** `hyprctl dispatch focuswindow pid:<pid>` (Не проверял на Hyprland с Lua-конфигом).
+- **Потом окно:** по адресу из `hyprctl clients -j`: `hyprctl dispatch 'hl.dsp.focus({ window = "address:0x…" })'`, как док оболочки (/usr/share/omarchy/shell/plugins/dock/Dock.qml:208). Прежний `hyprctl dispatch focuswindow …` на Hyprland 0.56.2 с конфигом Lua — ошибка синтаксиса (Проверил 2026-11-12: «')' expected near 'address'», код 7). Успех — ответ `ok`, окна нет — `warning: … window not found` с кодом 0 (Проверил на несуществующем адресе и на окне в фокусе).
 - Вызовы CLI — в потоке действий (`Work::Other`), не в цикле событий (Проверил: src/daemon.rs:418-420, src/mux/mod.rs:188-191).
 - В терминал ничего не пишется — проверка «да, передай» не нужна и не затронута.
 

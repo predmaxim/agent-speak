@@ -144,6 +144,21 @@ Item {
     root.showPage("main")
   }
 
+  // Ctrl+Enter or a double click on an agent: its Orca tab or herdr pane and
+  // window come to the front (`agent-speak show`; an error is Oma's bubble),
+  // and this window closes, or it would cover them. Not an agent: false.
+  function jump(key) {
+    if (key.indexOf("agent:") !== 0) return false
+    Quickshell.execDetached([Quickshell.env("HOME") + "/.local/bin/agent-speak", "show", key.slice(6)])
+    root.shown = false
+    return true
+  }
+
+  // Enter in the field; Ctrl+Enter shows the agent under the cursor, else the one whose chat is open.
+  function enterWith(modifiers) {
+    if (!(modifiers & Qt.ControlModifier) || !root.jump(root.onHead || root.cursor < 0 ? root.chatKey : root.cursorKey)) root.enter()
+  }
+
   function newChat() {
     root.chatKey = "new"
     root.messages = []
@@ -583,6 +598,7 @@ Item {
                   if (pointerGate.moved(agentArea, mouse)) { root.onHead = false; root.setCursor(agentRow.index + 1) }
                 }
                 onClicked: root.openChat("agent:" + agentRow.modelData.id)
+                onDoubleClicked: root.jump("agent:" + agentRow.modelData.id)
               }
 
               Rectangle {
@@ -810,8 +826,8 @@ Item {
               Keys.onDownPressed: root.move(0, 1)
               Keys.onLeftPressed: function(event) { event.accepted = root.onHead && root.move(-1, 0) }
               Keys.onRightPressed: function(event) { event.accepted = root.onHead && root.move(1, 0) }
-              Keys.onReturnPressed: root.enter()
-              Keys.onEnterPressed: root.enter()
+              Keys.onReturnPressed: function(event) { root.enterWith(event.modifiers) }
+              Keys.onEnterPressed: function(event) { root.enterWith(event.modifiers) }
               Keys.onTabPressed: {}   // Tab does nothing in a centred modal
             }
 
