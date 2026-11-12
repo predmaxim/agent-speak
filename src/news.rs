@@ -196,6 +196,11 @@ impl Board {
         Some(say)
     }
 
+    /// На доске есть новость сессии этого класса — ждёт, Ома её ещё не сказала.
+    pub fn has(&self, session: &str, class: Class) -> bool {
+        self.items.iter().any(|i| i.session == session && i.class == class)
+    }
+
     pub fn finals(&self) -> usize {
         self.items.iter().filter(|i| i.class == Class::Final).count()
     }
@@ -236,6 +241,15 @@ mod tests {
     fn n(session: &str, class: Class, say: &str, born: u64) -> News { News { session: session.into(), class, say: say.into(), born } }
 
     fn sp(b: &mut Board, now: u64) -> Option<String> { b.take(now, None) }
+
+    #[test]
+    fn has_is_news_of_session_and_class_on_the_board() {
+        let mut b = Board::default();
+        b.push(n("s", Class::Final, "s: готов.", 1));
+        assert!(b.has("s", Class::Final) && !b.has("s", Class::Question) && !b.has("t", Class::Final));
+        sp(&mut b, 1000);
+        assert!(!b.has("s", Class::Final), "сказана — с доски снята");
+    }
 
     #[test]
     fn take_logs_spoken() {

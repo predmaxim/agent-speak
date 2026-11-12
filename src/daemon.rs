@@ -1208,10 +1208,28 @@ impl State {
                 self.board.answered(&d.session); // новый вопрос — прежний уже решён
             }
             let say = format!("{}: {}", d.project, d.say);
-            self.board.push(News { session: d.session, class, say, born: (self.now_secs)() });
+            self.board.push(News { session: d.session.clone(), class, say, born: (self.now_secs)() });
         }
         self.push_agents();
         self.speak_news(); // пересказ готов — звучит сразу, а не со следующим тиком
+        if let Some(class) = class {
+            self.ripple(&d.session, class);
+        }
+    }
+
+    /// Волна на орбе вместо слов: новость пришла, а Ома её сейчас не говорит — тихий режим (на доску она не легла)
+    /// или ждёт на доске (занят, отошёл, разговор, тишина по причине). Агент, которым он занят, — без волны: он на него смотрит.
+    fn ripple(&mut self, session: &str, class: Class) {
+        let tone = match class {
+            Class::Final => "final",
+            Class::Question => "question",
+            Class::Progress => "status",
+            Class::Urgent | Class::Restore => return,
+        };
+        if !self.cfg.orb_moods || !(self.quiet() || self.board.has(session, class)) || self.engaged().as_deref() == Some(session) {
+            return;
+        }
+        self.broadcast_line(&format!("{}\n", serde_json::json!({"ripple": {"tone": tone}})));
     }
 
     /// Новости — когда Ома молчит, ничего не звучит и пользователь слушает; слух греется заранее, чтобы ответ услышать сразу.
@@ -3823,6 +3841,39 @@ mod tests {
         assert_eq!(b.len(), 1);
         assert_eq!((b[0]["kind"].as_str(), b[0]["text"].as_str(), b[0]["who"].as_str()), (Some("final"), Some("Фича готова."), Some("T-s")));
         assert_eq!(pop1(&st), "плуг: Фича готова.", "звучит сразу, а не со следующим тиком");
+    }
+
+    #[test]
+    fn unspoken_news_ripples_the_orb_once() {
+        let ripples = |r: &mut BufReader<UnixStream>| drain(r).into_iter().filter_map(|v| v["ripple"]["tone"].as_str().map(String::from)).collect::<Vec<_>>();
+        let mut st = test_state();
+        with_agents(&mut st, &["s", "t"]);
+        let mut r = sub(&mut st);
+        st.on_digest(dg("s", Ask::Final, false, "Фича готова."));
+        assert!(ripples(&mut r).is_empty(), "сказала сразу — волны нет");
+        pop1(&st);
+        // идёт разговор с Омой: новости ждут за ней — волна цветом события
+        st.on_msg(Msg::VoiceState { state: "listening".into(), talking: true });
+        st.registry.question("t", "Клоду нужно разрешение", 1000);
+        st.on_digest(dg("t", Ask::Question, false, "Можно удалить ветку?"));
+        st.on_digest(dg("s", Ask::Final, false, "Ещё готово."));
+        assert_eq!(ripples(&mut r), ["question", "final"]);
+        // тихий режим: новость на доску не кладётся, а волна есть
+        st.cfg.quiet_override = "on".into();
+        st.registry.status("s", "правлю", 1000);
+        st.on_digest(dg("s", Ask::Progress, true, "Половина готова."));
+        assert_eq!(ripples(&mut r), ["status"]);
+        st.on_digest(dg("s", Ask::Progress, false, "Правлю."));
+        assert!(ripples(&mut r).is_empty(), "неважное промежуточное — не новость");
+        // его чат открыт в окне — он и так это видит
+        st.on_msg(Msg::View { agent: "s".into() });
+        st.on_digest(dg("s", Ask::Final, false, "Готово."));
+        assert!(ripples(&mut r).is_empty());
+        // настроение орба выключено — волн нет
+        st.on_msg(Msg::View { agent: String::new() });
+        st.cfg.orb_moods = false;
+        st.on_digest(dg("s", Ask::Final, false, "Готово."));
+        assert!(ripples(&mut r).is_empty());
     }
 
     #[test]
