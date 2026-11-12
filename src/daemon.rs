@@ -1320,8 +1320,11 @@ impl State {
                 self.board.drop_focused(focused.as_deref()); // не в обзор и не в сводку
                 parts.push(Chunk::oma(self.rotor.next(phrases::WELCOME)));
                 parts.extend(self.board.overview(self.rotor.next(phrases::AWAY), None).map(Chunk::oma));
-                if self.board.finals() > SUMMARY_OVER {
-                    let lines: Vec<String> = self.board.take_finals().iter().map(News::line).collect();
+                // итог агента Claude со свежим recap Claude Code — его первым предложением; Haiku — только остальным
+                let registry = &self.registry;
+                let recapped = self.board.recap(|s| registry.get(s).filter(|e| e.agent == "claude").and_then(|e| agents::recap(Path::new(&e.transcript))));
+                if self.board.finals() - recapped.len() > SUMMARY_OVER {
+                    let lines: Vec<String> = self.board.take_finals(&recapped).iter().map(News::line).collect();
                     let job = Job { session: SUMMARY.into(), project: String::new(), ask: Ask::Summary, text: lines.join("\n"), context: String::new(), fallback: Some(lines.join(" ")) };
                     let _ = self.digest.send(job);
                 }
@@ -5901,6 +5904,51 @@ mod tests {
         st.on_digest(d);
         st.tick();
         assert_eq!(texts(&st), ["плуг: Фича готова.", "плуг: Тесты зелёные.", "плуг: Баг найден.", "плуг: Сборка прошла."]);
+    }
+
+    #[test]
+    fn return_speaks_claude_recaps_and_summarizes_only_the_rest() {
+        // транскрипты настоящего вида (tests/fixtures/recap.jsonl): у a и b — свежий recap Claude Code, у c он устарел
+        // (после него промпт), d — Codex, e и f — без транскрипта; у g свежий recap, но итога за время отсутствия нет
+        const FX: &str = include_str!("../tests/fixtures/recap.jsonl");
+        let root = std::env::temp_dir().join(format!("oma-recap-back-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = |name: &str, text: String| {
+            let p = root.join(name);
+            std::fs::write(&p, text).unwrap();
+            p
+        };
+        let fresh = |what: &str| FX.replace("Ищем, почему после сна экран полминуты чёрный: это баг движка обоев owe 0.2.13, исправленный в 0.2.14.", what);
+        let stale = format!("{}{}\n", fresh("Старое."), FX.lines().next().unwrap());
+        let lives = vec![
+            Live { transcript: file("a.jsonl", fresh("Чиним сон ноутбука.")), ..live("a") },
+            Live { transcript: file("b.jsonl", fresh("Пишем голос Омы.")), ..live("b") },
+            Live { transcript: file("c.jsonl", stale), ..live("c") },
+            Live { transcript: file("d.jsonl", fresh("Не Claude.")), agent: "codex", ..live("d") },
+            live("e"),
+            live("f"),
+            Live { transcript: file("g.jsonl", fresh("Без итога.")), ..live("g") },
+        ];
+        let mut st = test_state();
+        st.scan = Box::new(move || lives.clone());
+        st.rescan();
+        let now = secs_at(&mut st, 1600);
+        let rx = jobs(&mut st);
+        snap(&mut st, serde_json::json!({"at": 1600, "idle_since": 1000}));
+        for id in ["a", "b", "c", "d", "e", "f"] {
+            st.on_digest(dg(id, Ask::Final, false, "Готово."));
+        }
+        st.tick();
+        assert!(texts(&st).is_empty());
+        *now.lock().unwrap() = 1700;
+        snap(&mut st, serde_json::json!({"at": 1700, "idle_since": 0}));
+        st.tick();
+        assert_eq!(texts(&st), ["С возвращением.", "Пока тебя не было: шесть проектов закончили.", "плуг: Чиним сон ноутбука.", "плуг: Пишем голос Омы."]);
+        let job = rx.try_recv().unwrap();
+        assert_eq!((job.ask, job.text.lines().count()), (Ask::Summary, 4), "Haiku — только итогам без свежего recap");
+        st.tick();
+        assert!(texts(&st).is_empty() && rx.try_recv().is_err(), "recap — не новый конец хода: сам по себе не звучит");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Минуты местного времени под рукой теста: граница тихого расписания.
