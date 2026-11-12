@@ -23,7 +23,7 @@ var TABLES = {
     "Tempo: very slow": "Темп: очень медленно", "Tempo: slow": "Темп: медленно", "Tempo: normal": "Темп: обычно",
     "Tempo: fast": "Темп: быстро", "Tempo: very fast": "Темп: очень быстро", "Breathes at rest": "Дышит в покое", "%1 more": "ещё %1",
     "Agents": "Агенты", "General chat": "Общий чат", "Copy": "Копировать", "Copied": "Скопировано", "Retell progress": "Пересказывать промежуточное",
-    "Warn about the limit": "Предупреждать о лимите",
+    "Warn about the limit": "Предупреждать о лимите", "Agents write to Oma": "Агенты пишут Оме", "Needs: %1": "нужно: %1",
     "Remember past days": "Помнить прошлые дни", "Memory": "Память", "I remember": "Помню", "Days": "Дни",
     "Forget everything": "Забыть всё", "Edit": "Изменить", "Delete": "Удалить", "Cancel": "Отмена", "Forget": "Забыть",
     "Forget everything? The day notes and «I remember» go for good.": "Забыть всё? Заметки дней и «Помню» удалятся насовсем.",

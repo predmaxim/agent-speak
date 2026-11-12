@@ -746,6 +746,20 @@ Item {
                   font.pixelSize: Style.font.body
                   elide: Text.ElideRight
                 }
+
+                // the agent's own note to Oma (`agent-speak note`): what it needs from the user, until the user answers it
+                Text {
+                  visible: text !== ""
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  text: agentRow.modelData.note ? root.tr("Needs: %1", agentRow.modelData.note) : ""
+                  color: fixedColors.red
+                  font.family: root.font
+                  font.pixelSize: Style.font.body
+                  wrapMode: Text.Wrap
+                  maximumLineCount: 2
+                  elide: Text.ElideRight
+                }
               }
 
               Text {
@@ -1474,6 +1488,16 @@ Item {
                   color: root.dim
                   font.family: root.font
                   font.pixelSize: Style.font.title
+                }
+              }
+
+              SettingRow {
+                key: "agent_inbox"
+                label: root.tr("Agents write to Oma")
+                ToggleSwitch {
+                  checked: root.speech.agent_inbox === true
+                  foreground: root.fg
+                  onToggled: root.step("agent_inbox", 1)
                 }
               }
 

@@ -119,9 +119,9 @@ function rateStep(step) {
 }
 
 // An agent's dot (the window's, the orb's card and satellites): its state; the watch's word (orange) is above any but
-// waiting — the question's red stays first.
+// waiting — the question's red stays first. An agent's note to Oma («needs», `agent-speak note`) waits for the user too.
 function dotKind(a) {
-  if (a.state === "waiting") return "waiting"
+  if (a.state === "waiting" || a.note) return "waiting"
   if (a.health) return "health"
   return a.state === "working" || a.state === "done" ? a.state : "idle"
 }
@@ -147,13 +147,13 @@ var FAILS_DROOP = 3   // as agents::FAILS_DROOP
 
 // The orb's hover card: {rows, more} — up to PEEK_MAX agents, the most urgent first, and how many more. A row: its
 // dot, name, time in its state (a tr key, at `now`) and a second line up to 60 chars — the question's first line for
-// a waiting one, the watch's word, else the status (or the count of failed calls, `fails`).
+// a waiting one (or its note), the watch's word, else the status (or the count of failed calls, `fails`).
 function peekRows(agents, now) {
   var all = byUrgency(agents)
   return { more: Math.max(0, all.length - PEEK_MAX), rows: all.slice(0, PEEK_MAX).map(function(a) {
     var dot = dotKind(a)
     var ask = String(a.ask || "").split("\n").filter(function(l) { return l.trim() !== "" })[0]
-    var text = dot === "waiting" ? ask || a.status : dot === "health" ? a.health : a.status
+    var text = dot === "waiting" ? ask || a.note || a.status : dot === "health" ? a.health : a.status
     // fails: tool calls that could not run this turn (the daemon's FAILS_DROOP and up) — a working row counts them instead
     return { id: a.id, dot: dot, name: a.title || a.project || "", ago: ago(a.since, now), text: clip(text, 60),
       fails: dot === "working" && a.fails >= FAILS_DROOP ? a.fails : 0 }
@@ -387,7 +387,7 @@ var SETTINGS_SECTIONS = [
   { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours", "screencast_privacy", "hush_summary"] },
   { title: "Hearing", rows: ["music_pause"] },
   { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites", "orb_moods", "orb_idle_motion"] },
-  { title: "Agents", rows: ["agents_voice", "progress_digest", "news_every", "memory", "memory_page", "limit_warn"] }
+  { title: "Agents", rows: ["agents_voice", "progress_digest", "news_every", "memory", "memory_page", "agent_inbox", "limit_warn"] }
 ]
 
 // «Results aloud at most every»: minutes between batches of finished turns (news_every); 0 — each at once, no batch.
@@ -413,7 +413,7 @@ function settingStep(row, st, dx) {
   if (row === "agents_voice") return { key: row, value: !st.agents_voice, sample: false }
   if (row === "screencast_privacy" || row === "hush_summary") return { key: row, value: !st[row], sample: false }
   if (row === "music_pause") return { key: row, value: !st.music_pause, sample: false }
-  if (row === "limit_warn") return { key: row, value: !st.limit_warn, sample: false }
+  if (row === "limit_warn" || row === "agent_inbox") return { key: row, value: !st[row], sample: false }
   if (row === "memory") return { key: row, value: !st.memory, sample: false }
   if (row === "intonation" || row === "earcons") return { key: row, value: !st[row], sample: false }
   if (row === "news_every") {
