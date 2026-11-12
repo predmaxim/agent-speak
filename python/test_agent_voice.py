@@ -863,12 +863,40 @@ def test_oma_listen_command_opens_window_unless_locked(monkeypatch):
         monkeypatch.setattr(m, "locked", lambda: True)
         await oma.command({"do": "listen", "secs": 5})
         assert not oma.ear.open  # экран заблокирован: чужие уши не включаем
+        assert sent[-1] == {"cmd": "voice_state", "state": "idle", "talking": False}  # отказ — тоже ответ: пауза музыки не залипнет
         monkeypatch.setattr(m, "locked", lambda: False)
         await oma.command({"do": "listen", "secs": 5})
         assert oma.ear.open and sent[-1] == {"cmd": "voice_state", "state": "listening", "talking": True}
         clk.t += 5.1
         await oma.event(("tick",))
         assert not oma.ear.open and sent[-1]["talking"] is False
+
+    asyncio.run(run())
+
+
+def test_oma_answers_every_listen_with_voice_state(monkeypatch):
+    # служба держит музыку на паузе, пока listen ушёл, а ответа нет: Ома отвечает строкой voice_state и когда окно не
+    # открыла (идёт разговор, тихо) — по одной строке на listen
+    import agent_voice.__main__ as m
+    monkeypatch.setattr(m, "locked", lambda: False)
+    monkeypatch.setattr(m, "mic_outputs", lambda: [])
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+
+    async def run():
+        await oma.command({"do": "talk"})
+        sent.clear()
+        await oma.command({"do": "listen", "secs": 5})
+        assert sent == [{"cmd": "voice_state", "state": "listening", "talking": True}]
+        await oma.command({"do": "talk"})  # клик — конец разговора
+        oma.conv.set_quiet(True)
+        sent.clear()
+        await oma.command({"do": "listen", "secs": 5})
+        assert sent == [{"cmd": "voice_state", "state": "idle", "talking": False}]
+        oma.conv.set_quiet(False)
+        sent.clear()
+        await oma.command({"do": "listen", "secs": 5})
+        assert [c["state"] for c in sent] == ["listening"], "окно открылось — одна строка, без повтора"
 
     asyncio.run(run())
 
@@ -993,7 +1021,8 @@ def test_oma_listen_command_skips_when_foreign_mic_capture(monkeypatch):
 
     async def run():
         await oma.command({"do": "listen", "secs": 5})
-        assert not oma.ear.open and not oma.conv.active and sent == []  # слух закрыт — conv.mic ещё не знает о чужой записи
+        assert not oma.ear.open and not oma.conv.active  # слух закрыт — conv.mic ещё не знает о чужой записи
+        assert sent == [{"cmd": "voice_state", "state": "idle", "talking": False}]  # отказала — служба узнаёт это ответом
         monkeypatch.setattr(m, "mic_outputs", lambda: [{"corked": True, "properties": {"application.process.id": "7"}}])
         await oma.command({"do": "listen", "secs": 5})
         assert oma.ear.open  # поток на паузе — не помеха
