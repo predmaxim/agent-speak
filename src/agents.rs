@@ -1,5 +1,6 @@
 //! Реестр живых агентов пользователя: кто работает, ждёт ответа или закончил; лента событий каждого.
 use crate::text::clean::plain;
+use crate::text::plural;
 use crate::focus;
 use serde::Serialize;
 use serde_json::Value;
@@ -525,6 +526,41 @@ impl Registry {
         v.sort_by_key(|e| group(e.state));
         format!("{}\n", serde_json::json!({ "agents": v }))
     }
+
+    /// Сводка одной фразой — средний клик по орбу: кодом, без модели. Слово сторожа, затем ждут ответа, работают,
+    /// готовы; свободных не называем. В группе до трёх — по имени (папка проекта), больше — числом.
+    pub fn brief(&self) -> String {
+        if self.entries.is_empty() {
+            return "Агентов нет.".into();
+        }
+        let sick: Vec<&Entry> = self.entries.iter().filter(|e| !e.health.is_empty()).collect();
+        let mut parts: Vec<String> = if sick.len() > 3 {
+            vec![format!("нужна помощь {} {}", sick.len(), plural(sick.len(), ["агенту", "агентам", "агентам"]))]
+        } else {
+            sick.iter().map(|e| format!("{} {}", e.project, e.health)).collect()
+        };
+        for (state, one, many) in [(State::Waiting, "ждёт ответа", "ждут ответа"), (State::Working, "работает", "работают"), (State::Done, "готов", "готовы")] {
+            let names: Vec<&str> = self.entries.iter().filter(|e| e.health.is_empty() && e.state == state).map(|e| e.project.as_str()).collect();
+            parts.push(match names.as_slice() {
+                [] => continue,
+                [a] => format!("{one} {a}"),
+                [a, b] => format!("{many} {a} и {b}"),
+                [a, b, c] => format!("{many} {a}, {b} и {c}"),
+                _ => format!("{} {} {}", plural(names.len(), [one, many, many]), names.len(), plural(names.len(), ["агент", "агента", "агентов"])),
+            });
+        }
+        if parts.is_empty() {
+            return "Все свободны.".into();
+        }
+        let s = parts.join(", ");
+        // фраза с имени проекта (слово сторожа) — имя как есть, а не с заглавной
+        let mut c = s.chars();
+        let s = match c.next() {
+            Some(f) if !(1..=3).contains(&sick.len()) => f.to_uppercase().chain(c).collect(),
+            _ => s,
+        };
+        format!("{s}.")
+    }
 }
 
 #[cfg(test)]
@@ -820,5 +856,38 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&r.line()).unwrap();
         assert_eq!(v["agents"][0]["health"], "завис");
         assert!(v["agents"][0].get("pid").is_none());
+    }
+
+    #[test]
+    fn brief_one_sentence_by_code() {
+        let mut r = Registry::new();
+        assert_eq!(r.brief(), "Агентов нет.");
+        r.sync(vec![live("x", false), live("y", false)], 0);
+        assert_eq!(r.brief(), "Все свободны.");
+        // слово сторожа первым (и имя первым — без заглавной), затем ждут, работают, готовы; свободных не называем
+        r.sync(vec![live("vpn", true), live("astral", true), live("a", true), live("b", true), live("dtc", true), live("x", false)], 0);
+        r.set_health("vpn", "завис");
+        r.question("astral", "вопрос", 1);
+        r.finished("dtc", "Готово.", 2);
+        assert_eq!(r.brief(), "vpn завис, ждёт ответа astral, работают a и b, готов dtc.");
+        r.set_health("vpn", "");
+        r.finished("b", "Готово.", 3);
+        assert_eq!(r.brief(), "Ждёт ответа astral, работают vpn и a, готовы b и dtc.");
+        // до трёх в группе — по имени, больше — числом
+        let mut r = Registry::new();
+        r.sync(["a", "b", "c"].iter().map(|id| live(id, true)).collect(), 0);
+        assert_eq!(r.brief(), "Работают a, b и c.");
+        r.sync(["a", "b", "c", "d"].iter().map(|id| live(id, true)).collect(), 0);
+        assert_eq!(r.brief(), "Работают 4 агента.");
+        for id in ["a", "b", "c", "d"] {
+            r.question(id, "вопрос", 1);
+        }
+        r.sync(["a", "b", "c", "d", "e"].iter().map(|id| live(id, true)).collect(), 0);
+        r.question("e", "вопрос", 1);
+        assert_eq!(r.brief(), "Ждут ответа 5 агентов.");
+        for id in ["a", "b", "c", "d"] {
+            r.set_health(id, "завис");
+        }
+        assert_eq!(r.brief(), "Нужна помощь 4 агентам, ждёт ответа e.");
     }
 }
