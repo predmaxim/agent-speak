@@ -97,17 +97,18 @@ def _seen():
         return {}
 
 
-def mark_seen(marks=None, sids=None):
+def mark_seen(marks=None):
     """seen.json — сколько сообщений каждого чата Омы уже сжато или отмечено: compress их не возьмёт. marks — {чат:
-    сообщений}, sids — все чаты (ушедших в файле не остаётся); без них — все чаты до конца: память включили, сказанное
-    при выключенной в заметки дней не попадёт. Смещение только растёт: файл пишут и Ома, и таймер."""
+    сообщений}; без них — все чаты до конца: память включили, сказанное при выключенной в заметки дней не попадёт.
+    Смещение только растёт; ушедшие чаты выбрасываются по списку, прочитанному под тем же замком: файл пишут и Ома,
+    и таймер — чужая свежая запись не теряется."""
     from . import brain  # SDK — тяжёлый импорт, только задаче
     ensure()
     with open(os.path.join(DIR, "seen.lock"), "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)  # чтение-изменение-запись целиком: Ома и таймер не перетрут друг друга
+        fcntl.flock(lock, fcntl.LOCK_EX)  # чтение-изменение-запись целиком
         seen = _seen()
+        sids = {i.session_id for i in brain.list_sessions(brain.OMA_DIR)}
         if marks is None:
-            sids = {i.session_id for i in brain.list_sessions(brain.OMA_DIR)}
             marks = {s: seen.get(s, 0) + len(brain.get_session_messages(s, directory=brain.OMA_DIR, offset=seen.get(s, 0)))
                      for s in sids}
         seen.update({s: max(n, seen.get(s, 0)) for s, n in marks.items()})
@@ -115,15 +116,19 @@ def mark_seen(marks=None, sids=None):
 
 
 def switched(on):
-    """Настройка памяти в строке службы (и первая после запуска Омы). Выключена — метка off на диске; включена при метке —
-    всё сказанное до сих пор отмечено (mark_seen), метка снята: включили и тогда, когда Омы не было, — сжатие этого не возьмёт."""
+    """Настройка памяти: из строки службы (и первой после запуска Омы) и из таймера перед сжатием. Выключена — метка off
+    на диске; включена при метке — всё сказанное до сих пор отмечено (mark_seen), метка снята: включили и тогда, когда
+    Омы не было, — сжатие этого не возьмёт, кто бы ни пришёл первым. Под своим замком: «вкл, сразу выкл» из двух
+    потоков или Ома и таймер разом метку не потеряют."""
     ensure()
     off = os.path.join(DIR, "off")
-    if not on:
-        os.close(os.open(off, os.O_WRONLY | os.O_CREAT, 0o600))
-    elif os.path.exists(off):
-        mark_seen()
-        os.remove(off)
+    with open(os.path.join(DIR, "switch.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not on:
+            os.close(os.open(off, os.O_WRONLY | os.O_CREAT, 0o600))
+        elif os.path.exists(off):
+            mark_seen()
+            os.remove(off)
 
 
 def prompt(on):
@@ -257,6 +262,7 @@ async def compress(now=None, ask=None):
         return
     if not on:
         log("выключена: прошлые дни только отмечены, не сжимаются")
+    switched(on)  # включили, пока Омы не было, и таймер пришёл первым: сказанное при выключенной уже отмечено
     from . import brain  # SDK — тяжёлый импорт, только задаче
     now, ask = time.time() if now is None else now, ask or haiku
     today = day_of(now)
@@ -265,9 +271,8 @@ async def compress(now=None, ask=None):
     for d in ("days", "news"):
         os.makedirs(os.path.join(DIR, d), mode=0o700, exist_ok=True)
     seen = _seen()
-    work, sids = {}, set()
+    work = {}
     for i in brain.list_sessions(brain.OMA_DIR):
-        sids.add(i.session_id)
         d = day_of(i.last_modified / 1000)
         if d >= today:
             continue
@@ -292,7 +297,7 @@ async def compress(now=None, ask=None):
             if note and note != "-":
                 _write(os.path.join(DIR, "days", d + ".md"), note)
             log(f"{d}: заметка {len(note)} знаков" if note and note != "-" else f"{d}: помнить нечего")
-        mark_seen({sid: seen.get(sid, 0) + len(msgs) for sid, msgs in w["chats"].items()}, sids)
+        mark_seen({sid: seen.get(sid, 0) + len(msgs) for sid, msgs in w["chats"].items()})
         if w["news"]:
             os.remove(w["news"])
     _drop_old(today)

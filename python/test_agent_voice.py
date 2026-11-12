@@ -3719,3 +3719,42 @@ def test_memory_switched_on_while_oma_was_down_marks_on_first_line(monkeypatch, 
     memory.switched(True)
     assert json.load(open(os.path.join(memory.DIR, "seen.json"))) == {"p": 2}
     assert not os.path.exists(os.path.join(memory.DIR, "off"))
+
+
+def test_memory_timer_before_oma_honours_off_marker(monkeypatch, tmp_path):
+    # выключил, поговорил, Омы нет, включил; таймер в 05:00 приходит раньше первой строки Омы — сказанное при выключенной не сжимает
+    m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
+    d10, d11 = _local(2026, 11, 10, 20), _local(2026, 11, 11, 20)
+    memory, _ = _compress_env(monkeypatch, tmp_path, [info("p", mod=int(d10 * 1000))], {"p": [m("user", "личное"), m("assistant", "Поняла.")]})
+    memory.switched(False)
+    open(memory.CONFIG, "w").write("memory = true\n")
+    asked = []
+
+    async def ask(prompt):
+        asked.append(prompt)
+        return "Разговоры: что-то."
+    run(memory.compress(now=d11, ask=ask))
+    assert asked == [], "метка off — сказанное при выключенной памяти не сжимается"
+    assert not os.path.exists(os.path.join(memory.DIR, "off")), "таймер сам отметил и снял метку"
+
+
+def test_memory_quick_on_off_keeps_the_marker(monkeypatch, tmp_path):
+    # «вкл» долго отмечает чаты, «выкл» приходит из другого потока посреди — метка остаётся: память выключена
+    import threading
+    m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
+    memory, _ = _compress_env(monkeypatch, tmp_path, [info("p", mod=int(_local(2026, 11, 10, 20) * 1000))], {"p": [m("user", "x")]})
+    memory.switched(False)
+    real, entered = memory.mark_seen, threading.Event()
+
+    def slow():
+        entered.set()
+        time.sleep(0.3)
+        real()
+    monkeypatch.setattr(memory, "mark_seen", slow)
+    on = threading.Thread(target=memory.switched, args=(True,))
+    on.start()
+    entered.wait(2)
+    off = threading.Thread(target=memory.switched, args=(False,))
+    off.start()
+    on.join(); off.join()
+    assert os.path.exists(os.path.join(memory.DIR, "off")), "последним было «выкл» — метка на месте"
