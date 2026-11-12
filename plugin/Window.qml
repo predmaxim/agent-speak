@@ -11,7 +11,8 @@ import "I18n.js" as I18n
 // namespace is in Hyprland's no_anim rule). Main page: the agents on the
 // left, the current chat with Oma on the right with the field under it; an
 // agent's chat starts with its feed. The chat history and the settings are
-// pages behind header buttons, with Back in the gear's place. The window
+// pages behind header buttons, with Back in the gear's place; Oma's memory is
+// a page behind the settings' «Memory ›» row. The window
 // keeps the current chat's key: Oma's chat lines apply only to that chat.
 Item {
   id: root
@@ -51,8 +52,17 @@ Item {
   readonly property string font: Style.font.family
 
   property var openScreen: null
-  property string page: "main"       // main | history | settings
+  property string page: "main"       // main | history | settings | memory
   property string chatKey: "new"     // "new", "chat:<id>", "agent:<agent id>"; "general" until Oma names it
+  property var memView: null         // Oma's answer for the memory page, {prefs, days}; null until it comes
+  // While the screen is shared (quiet for that reason) the memory page shows none of its text.
+  readonly property bool memHidden: speech.quiet_why === "screencast"
+  readonly property var memRows: memHidden ? [] : Model.memoryRows(memView)
+  property int editRow: -1           // the «I remember» row being edited; its line as it was is editId
+  property string editId: ""
+  property string openDay: ""        // the day note shown whole
+  property var pendingDel: null      // the memory row the confirm dialog asks about
+  onMemHiddenChanged: if (memHidden && editRow >= 0) stopEdit()
   property var messages: []
   property var chatList: []
   property real now: Date.now() / 1000
@@ -82,7 +92,8 @@ Item {
     return null
   }
   // Main page: row 0 — the general chat with Oma, then the agents.
-  readonly property int rowCount: page === "main" ? agents.length + 1 : page === "history" ? chatList.length : Model.SETTINGS_ROWS.length
+  readonly property int rowCount: page === "main" ? agents.length + 1 : page === "history" ? chatList.length
+    : page === "memory" ? memRows.length : Model.SETTINGS_ROWS.length
   // Main page: talk, new chat, history, sound, settings, the power switch; Oma off: the switch; a page: Back.
   readonly property var headItems: Model.headItems(page, speech.running === true)
   readonly property int headCount: headItems.length
@@ -180,7 +191,12 @@ Item {
 
   function showPage(p) {
     if (p === "history") root.send({ do: "chats" })
+    if (p === "memory") { root.memView = null; root.send({ do: "memory" }) }   // nothing stale to act on before her answer
     settingsView.contentY = 0
+    memoryView.contentY = 0
+    root.editRow = -1
+    root.openDay = ""
+    confirm.opened = false
     root.page = p
     root.cursorKey = ""
     root.cursorRow = -1
@@ -194,9 +210,16 @@ Item {
   // The keys: the field on the main page, the catcher on the others.
   function refocus() { (root.page === "main" ? field : keyCatcher).forceActiveFocus() }
 
-  // Esc step by step: a screenshot → a page → clear the field → the agent's chat → close.
+  // Esc step by step: a screenshot → an edit → a page (memory: back to the settings, on its row) → clear the field →
+  // the agent's chat → close.
   function back() {
     if (root.viewing) root.viewing = ""
+    else if (root.editRow >= 0) root.stopEdit()
+    else if (root.page === "memory") {
+      root.showPage("settings")
+      root.setCursor(Model.SETTINGS_ROWS.indexOf("memory_page"))
+      Qt.callLater(root.showRow, settingsView, settingsPage, root.cursor)
+    }
     else if (root.page !== "main") root.showPage("main")
     else if (field.text !== "") field.text = ""
     else if (root.agentChat) root.openChat("general")
@@ -236,21 +259,49 @@ Item {
     var view = root.page === "main" ? agentList : root.page === "history" ? chatsView : null
     if (view === agentList && root.cursor === 0) agentList.positionViewAtBeginning()  // the Oma row is the list's header
     else if (view && root.cursor >= 0) view.positionViewAtIndex(root.cursor - (view === agentList ? 1 : 0), ListView.Contain)
-    if (root.page === "settings" && root.cursor >= 0) root.showSettingRow(root.cursor)
+    if (root.page === "settings" && root.cursor >= 0) root.showRow(settingsView, settingsPage, root.cursor)
+    if (root.page === "memory" && root.cursor >= 0) root.showRow(memoryView, memoryPage, root.cursor)
     return true
   }
 
-  // The settings row `row` fully in view (its header too for the first one).
-  function showSettingRow(row) {
-    var kids = settingsPage.children
+  // The row `row` of a scrolled page (the flickable `view`, its column `col`) fully in view (its header too for the first one).
+  function showRow(view, col, row) {
+    var kids = col.children
     for (var i = 0; i < kids.length; i++) {
       if (kids[i].row !== row) continue
       var top = row === 0 ? 0 : kids[i].y, bottom = kids[i].y + kids[i].height
-      var maxY = Math.max(0, settingsView.contentHeight - settingsView.height)
-      if (top < settingsView.contentY) settingsView.contentY = top
-      else if (bottom > settingsView.contentY + settingsView.height) settingsView.contentY = Math.min(maxY, bottom - settingsView.height)
+      var maxY = Math.max(0, view.contentHeight - view.height)
+      if (top < view.contentY) view.contentY = top
+      else if (bottom > view.contentY + view.height) view.contentY = Math.min(maxY, bottom - view.height)
       return
     }
+  }
+
+  // The memory page: Enter or a click edits an «I remember» line, shows a day note whole (or folds it), asks to forget all.
+  function memActivate(r) {
+    if (r.kind === "pref") { root.editRow = root.cursor; root.editId = r.id }
+    else if (r.kind === "day") root.openDay = root.openDay === r.id ? "" : r.id
+    else root.askDel(r)
+  }
+
+  function stopEdit() {
+    root.editRow = -1
+    root.editId = ""
+    root.refocus()
+  }
+
+  // Oma answers with the new view; an empty line deletes it.
+  function saveEdit(text) {
+    root.send({ do: "memory_set", kind: "pref", id: root.editId, text: text })
+    root.stopEdit()
+  }
+
+  // Deleting is for good: the dialog asks first, Cancel preselected.
+  function askDel(r) {
+    if (root.editRow >= 0) root.stopEdit()
+    root.pendingDel = r
+    confirm.selectedIndex = 0
+    confirm.opened = true
   }
 
   // Enter or a click: the header button, the agent's chat, the chat from
@@ -260,7 +311,9 @@ Item {
     if (root.cursor < 0 || root.cursor >= root.rowCount) return
     if (root.page === "main") return root.openChat(root.cursorKey)
     if (root.page === "history") return root.openChat(root.chatList[root.cursor].key)
+    if (root.page === "memory") return root.memActivate(root.memRows[root.cursor])
     var row = Model.SETTINGS_ROWS[root.cursor]
+    if (row === "memory_page") return root.showPage("memory")
     var box = { speaker: speakerBox, rate: rateBox, quiet_hours: root.hoursCol ? toBox : fromBox }[row]
     if (box) box.open()
     else root.step(row, 1)
@@ -326,6 +379,7 @@ Item {
       if (d.key === root.chatKey) root.setMessages(Model.chatApply(root.messages, d))
     }
     function onChats(list) { root.chatList = list }
+    function onMemory(m) { root.memView = m }
   }
 
   Timer {
@@ -360,6 +414,9 @@ Item {
 
       MouseArea { anchors.fill: parent }   // clicks on the card stay on it
 
+      // What the blocked catcher lets through: the confirm dialog's keys.
+      Keys.onPressed: function(event) { if (confirm.handleKey(event)) event.accepted = true }
+
       // The field keeps the keys on the main page (its ↑/↓/Enter move and
       // press, typing goes into it); what it leaves, Esc above all, falls
       // through to here. On the pages the catcher holds them itself.
@@ -370,11 +427,28 @@ Item {
         anchors.rightMargin: card.contentRightInset
         anchors.bottomMargin: card.contentBottomInset
         anchors.leftMargin: card.contentLeftInset
-        blocked: speakerBox.popupOpen || rateBox.popupOpen || fromBox.popupOpen || toBox.popupOpen
+        blocked: speakerBox.popupOpen || rateBox.popupOpen || fromBox.popupOpen || toBox.popupOpen || confirm.opened || root.editRow >= 0
         onMoveRequested: function(dx, dy) { root.move(dx, dy) }
         onActivateRequested: root.activate()
         onCloseRequested: root.back()
+        onDeleteRequested: if (root.page === "memory" && root.cursor >= 0) root.askDel(root.memRows[root.cursor])
         onTextKey: function(t) { if (root.page === "main") root.typeIn(t) }
+
+        // The memory page's deletes: a day, a line, everything — for good.
+        ConfirmDialog {
+          id: confirm
+          anchors.fill: parent
+          z: 10
+          message: !root.pendingDel ? ""
+            : root.pendingDel.kind === "all" ? root.tr("Forget everything? The day notes and «I remember» go for good.")
+            : root.pendingDel.kind === "day" ? root.tr("Delete the note of %1?", root.pendingDel.id)
+            : root.tr("Delete this line from memory?")
+          cancelText: root.tr("Cancel")
+          confirmText: root.pendingDel && root.pendingDel.kind === "all" ? root.tr("Forget") : root.tr("Delete")
+          fontFamily: root.font
+          onConfirmed: { opened = false; root.send({ do: "memory_del", kind: root.pendingDel.kind, id: root.pendingDel.id }) }
+          onCanceled: opened = false
+        }
 
         PointerMoveGate { id: pointerGate; referenceItem: card }
 
@@ -383,7 +457,8 @@ Item {
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.top: parent.top
-          title: root.page === "history" ? root.tr("Chat history") : root.page === "settings" ? root.tr("Settings") : root.tr("Oma")
+          title: root.page === "history" ? root.tr("Chat history") : root.page === "settings" ? root.tr("Settings")
+            : root.page === "memory" ? root.tr("Memory") : root.tr("Oma")
           meta: root.tip.map(function(l) { return root.tr(l[0], l[1]) }).join(" · ") + (root.speech.running ? " · " + root.tr("%1 agents", root.agents.length) : "")
           foreground: root.fg
           fontFamily: root.font
@@ -918,6 +993,183 @@ Item {
             font.pixelSize: Style.font.heading
           }
 
+          // ---- Memory page: «I remember» (Enter edits a line), the day notes (Enter shows one whole), «Forget
+          //      everything»; Delete deletes a row — each after the dialog. While the screen is shared — no text.
+          Flickable {
+            id: memoryView
+            visible: root.page === "memory"
+            anchors.fill: parent
+            clip: true
+            contentHeight: memoryPage.implicitHeight
+            boundsBehavior: Flickable.StopAtBounds
+
+            Column {
+              id: memoryPage
+              width: memoryView.width
+              spacing: Style.spacing.xs
+
+              Repeater {
+                model: root.memRows
+
+                // A row with its section's header above the first of its kind.
+                Column {
+                  id: memRow
+                  required property var modelData
+                  required property int index
+                  readonly property int row: index
+                  readonly property bool editing: root.editRow === index
+                  readonly property bool whole: modelData.kind === "day" && root.openDay === modelData.id
+                  width: memoryPage.width
+                  spacing: Style.spacing.xs
+
+                  PanelSectionHeader {
+                    visible: memRow.modelData.kind !== "all" && (memRow.index === 0 || root.memRows[memRow.index - 1].kind !== memRow.modelData.kind)
+                    leftPadding: Style.spacing.rowPaddingX
+                    topPadding: memRow.index === 0 ? 0 : Style.space(14)
+                    bottomPadding: Style.space(4)
+                    text: (memRow.modelData.kind === "pref" ? root.tr("I remember") : root.tr("Days")).toUpperCase()
+                    foreground: root.fg
+                    fontFamily: root.font
+                    fontSize: Style.font.body
+                    font.letterSpacing: 1.2
+                  }
+
+                  CursorSurface {
+                    width: parent.width
+                    implicitHeight: Math.max(Style.space(50), memText.implicitHeight + Style.spacing.xs * 2)
+                    foreground: root.fg
+                    current: memRow.editing || memRow.whole
+                    hasCursor: !root.onHead && root.cursor === memRow.index && !current
+
+                    MouseArea {
+                      id: memArea
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onPositionChanged: function(mouse) {
+                        if (pointerGate.moved(memArea, mouse)) { root.onHead = false; root.setCursor(memRow.index) }
+                      }
+                      onClicked: { root.onHead = false; root.setCursor(memRow.index); root.activate() }
+                    }
+
+                    Column {
+                      id: memText
+                      anchors.left: parent.left
+                      anchors.leftMargin: Style.spacing.rowPaddingX
+                      anchors.right: memIcons.left
+                      anchors.rightMargin: Style.space(10)
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(4)
+
+                      Text {
+                        visible: memRow.modelData.kind === "day"
+                        textFormat: Text.PlainText
+                        text: memRow.modelData.id
+                        color: root.dim
+                        font.family: root.font
+                        font.pixelSize: Style.font.body
+                      }
+
+                      Text {
+                        visible: !memRow.editing
+                        width: parent.width
+                        textFormat: Text.PlainText
+                        text: memRow.modelData.kind === "all" ? root.tr("Forget everything") : memRow.modelData.text
+                        color: memRow.modelData.kind === "all" ? Color.urgent : root.fg
+                        font.family: root.font
+                        font.pixelSize: Style.font.title
+                        wrapMode: Text.Wrap
+                        maximumLineCount: memRow.modelData.kind === "day" && !memRow.whole ? 2 : undefined
+                        elide: Text.ElideRight
+                      }
+
+                      // Enter saves (empty — the line goes), Esc leaves it as it was.
+                      TextField {
+                        visible: memRow.editing
+                        width: parent.width
+                        height: Math.max(Style.space(34), Style.font.title + Style.spacing.controlPaddingY * 2)
+                        leftPadding: 0; rightPadding: 0; topPadding: 0; bottomPadding: 0
+                        background: null
+                        foreground: root.fg
+                        font.family: root.font
+                        font.pixelSize: Style.font.title
+                        onVisibleChanged: if (visible) { text = memRow.modelData.text; forceActiveFocus() }
+                        onAccepted: root.saveEdit(text)
+                        Keys.onEscapePressed: root.stopEdit()
+                        Keys.onTabPressed: {}
+                      }
+                    }
+
+                    // The mouse's targets; the keys are Enter and Delete.
+                    Row {
+                      id: memIcons
+                      anchors.right: parent.right
+                      anchors.rightMargin: Style.spacing.rowPaddingX
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(14)
+
+                      Repeater {
+                        model: memRow.modelData.kind === "pref" ? ["edit", "delete"] : memRow.modelData.kind === "day" ? ["delete"] : []
+
+                        Text {
+                          id: memIcon
+                          required property string modelData
+                          textFormat: Text.PlainText
+                          text: modelData === "edit" ? "\u{F03EB}" : "\u{F0156}"
+                          color: memIconArea.containsMouse ? root.fg : root.dim
+                          font.family: root.font
+                          font.pixelSize: Style.font.title
+
+                          MouseArea {
+                            id: memIconArea
+                            anchors.fill: parent
+                            anchors.margins: -Style.space(6)
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                              root.onHead = false
+                              root.setCursor(memRow.index)
+                              if (memIcon.modelData === "edit") root.memActivate(memRow.modelData)
+                              else root.askDel(memRow.modelData)
+                            }
+                          }
+                          PanelToolTip { visible: memIconArea.containsMouse; text: memIcon.modelData === "edit" ? root.tr("Edit") : root.tr("Delete") }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+              // Off, the files stay until «Forget everything»; on, the brain takes them with a new chat.
+              Text {
+                visible: root.memRows.length > 0
+                width: parent.width
+                leftPadding: Style.spacing.rowPaddingX
+                rightPadding: Style.spacing.rowPaddingX
+                topPadding: Style.space(8)
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                text: root.speech.memory === true ? root.tr("Changes apply from a new chat.")
+                  : root.tr("Memory is off: nothing new is kept, what is here stays until «Forget everything».")
+                color: root.dim
+                font.family: root.font
+                font.pixelSize: Style.font.body
+              }
+            }
+          }
+
+          Text {
+            visible: root.page === "memory" && text !== ""
+            anchors.centerIn: parent
+            textFormat: Text.PlainText
+            text: root.memHidden ? root.tr("Hidden while the screen is shared") : !root.omaUp ? root.tr("Oma is not running")
+              : root.memRows.length === 1 ? root.tr("Nothing remembered yet") : ""
+            color: root.dim
+            font.family: root.font
+            font.pixelSize: Style.font.heading
+          }
+
           // ---- Settings page: sections and rows in Model.SETTINGS_SECTIONS order. The
           //      controls are the value's picture and the mouse's target;
           //      the keys stay with the catcher (rules.md §9).
@@ -1136,6 +1388,19 @@ Item {
                   checked: root.speech.memory === true
                   foreground: root.fg
                   onToggled: root.step("memory", 1)
+                }
+              }
+
+              // A page, not a value: Enter or a click opens what Oma remembers.
+              SettingRow {
+                key: "memory_page"
+                label: root.tr("Memory")
+                Text {
+                  textFormat: Text.PlainText
+                  text: "\u{F0142}"
+                  color: root.dim
+                  font.family: root.font
+                  font.pixelSize: Style.font.title
                 }
               }
 

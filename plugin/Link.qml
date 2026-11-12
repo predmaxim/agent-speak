@@ -5,7 +5,7 @@ import "Model.js" as Model
 
 // The connection to agent-speakd: subscribes on connect and keeps the latest
 // state line in `speech`, the agent list in `agents`, the permission cards in
-// `permissions` and the deferred orders in `later`; bubbles, chats and the
+// `permissions` and the deferred orders in `later`; bubbles, chats, the memory page and the
 // orb's ripples come as signals; commands go out with send(). No daemon (or it
 // restarted) — `speech` is Model.OFFLINE and a retry runs every 5 s.
 Item {
@@ -18,6 +18,7 @@ Item {
   signal chatDelta(var d)
   signal chats(var list)
   signal ripple(var r)   // {tone: "final" | "question" | "status"}: news came, Oma does not say it now
+  signal memory(var m)   // {prefs, days}: Oma's answer for the window's memory page
 
   property var agents: []
   property var permissions: []
@@ -92,6 +93,7 @@ Item {
           else if (m.type === "chat_delta") link.chatDelta(m.value)
           else if (m.type === "chats") link.chats(m.value)
           else if (m.type === "ripple") link.ripple(m.value)
+          else if (m.type === "memory") link.memory(m.value)
           else if (m.type === "permissions") link.permissions = m.value
           else if (m.type === "later") link.later = m.value
         }

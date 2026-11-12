@@ -199,6 +199,12 @@ class Oma:
                     await self.act([("state", c.state)])
         elif do == "chats":
             self.emit({"chats": await asyncio.to_thread(self.brain.chats)})
+        elif do in ("memory", "memory_set", "memory_del"):  # страница «Память» окна: вид; правка «Помню» и удаление — и новый вид
+            if do == "memory_set" and cmd.get("kind") == "pref":
+                await asyncio.to_thread(memory.set_pref, str(cmd.get("id", "")), str(cmd.get("text", "")))
+            elif do == "memory_del":
+                await asyncio.to_thread(memory.drop, cmd.get("kind"), str(cmd.get("id", "")))
+            self.emit({"memory": await asyncio.to_thread(memory.view)})
         elif do == "open" and not cmd.get("key"):  # окно спрашивает текущий чат: без переключения, was "*" — принять его ключ
             self.emit({"chat": {"key": self.brain.key, "was": "*", "messages": self.history}})
         elif do == "open":  # окно смотрит чат (клик по агенту): мозг не переключается — её ответ не обрывается, claude живёт

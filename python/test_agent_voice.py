@@ -3798,3 +3798,76 @@ def test_memory_switch_follows_the_config_not_the_event_order(monkeypatch, tmp_p
     open(memory.CONFIG, "w").write("memory = true\n")
     memory.switched(False)  # устаревшее событие
     assert not os.path.exists(os.path.join(memory.DIR, "off")), "в файле включена — метку не ставить, сказанное отмечено"
+
+
+def test_memory_page_view_edit_delete_and_forget(monkeypatch, tmp_path):
+    # страница «Память» окна: «Помню» как в MEMORY.md и дни, свежие первыми; правка и удаление строки «Помню»,
+    # удаление дня (id — только дата: путь из окна не выйдет из days/), «Забыть всё» — и таймер забытого не вернёт
+    m = lambda t, x: SimpleNamespace(type=t, message={"content": [{"type": "text", "text": x}]})
+    d10, d12 = _local(2026, 11, 10, 20), _local(2026, 11, 12, 12)
+    msgs = {"a": [m("user", "личный разговор"), m("assistant", "Поняла.")]}
+    memory, _ = _compress_env(monkeypatch, tmp_path, [info("a", mod=int(d10 * 1000))], msgs)
+    assert memory.view() == {"prefs": [], "days": []}, "памяти ещё нет"
+    memory.ensure()
+    prefs = memory.prefs_file()
+    open(prefs, "w").write("2026-11-10 · «говори короче»\n\n- 2026-11-11 · «не напоминай про тесты»\n")
+    days = os.path.join(memory.DIR, "days")
+    os.makedirs(days)
+    open(os.path.join(days, "2026-11-10.md"), "w").write("Разговоры: site.\nАгенты: site — откат.\n")
+    open(os.path.join(days, "2026-11-11.md"), "w").write("Агенты: почта — готово.")
+    open(os.path.join(days, "заметки.md"), "w").write("не день")
+    v = memory.view()
+    assert v["prefs"] == ["2026-11-10 · «говори короче»", "- 2026-11-11 · «не напоминай про тесты»"]
+    assert v["days"] == [{"id": "2026-11-11", "text": "Агенты: почта — готово."},
+                         {"id": "2026-11-10", "text": "Разговоры: site.\nАгенты: site — откат."}], "свежие первыми, не дни — нет"
+
+    memory.set_pref("2026-11-10 · «говори короче»", "2026-11-10 · «говори\nкороче, пожалуйста»")
+    assert memory.view()["prefs"][0] == "2026-11-10 · «говори короче, пожалуйста»", "одна строка — одна запись"
+    assert (os.stat(prefs).st_mode & 0o777) == 0o600 and (os.stat(os.path.dirname(prefs)).st_mode & 0o777) == 0o700
+    memory.set_pref("такой строки нет", "чужое")
+    assert "чужое" not in open(prefs).read(), "окно смотрело старый вид — ничего"
+    memory.drop("pref", "- 2026-11-11 · «не напоминай про тесты»")
+    assert memory.view()["prefs"] == ["2026-11-10 · «говори короче, пожалуйста»"]
+    memory.set_pref("2026-11-10 · «говори короче, пожалуйста»", "  ")
+    assert memory.view()["prefs"] == [], "пустая правка — строки нет"
+
+    open(prefs, "w").write("2026-11-10 · «говори короче»\n")
+    memory.drop("day", "../prefs/MEMORY")
+    memory.drop("day", "2026-11-1*")
+    assert os.path.exists(prefs) and len(memory.view()["days"]) == 2, "id дня — только дата"
+    memory.drop("day", "2026-11-10")
+    assert [d["id"] for d in memory.view()["days"]] == ["2026-11-11"]
+
+    news = os.path.join(memory.DIR, "news")
+    os.makedirs(news)
+    open(os.path.join(news, "2026-11-10.jsonl"), "w").write(json.dumps({"t": d10, "project": "site", "ask": "Final", "say": "x"}) + "\n")
+    memory.drop("all", "")
+    assert memory.view() == {"prefs": [], "days": []} and os.listdir(news) == []
+    assert json.load(open(os.path.join(memory.DIR, "seen.json"))) == {"a": 2}, "сказанное до «Забыть всё» — сжатым"
+    asked = []
+
+    async def ask(prompt):
+        asked.append(prompt)
+        return "Разговоры: личное."
+    run(memory.compress(now=d12, ask=ask))
+    assert asked == [] and memory.view()["days"] == [], "таймер забытый день из чатов не восстановил"
+
+
+def test_memory_page_commands(monkeypatch, tmp_path):
+    # окно ↔ Ома: memory — вид; memory_set (только «Помню») и memory_del — правка, в ответ — новый вид
+    memory, _ = _compress_env(monkeypatch, tmp_path, [], {})
+    memory.ensure()
+    open(memory.prefs_file(), "w").write("2026-11-10 · «говори короче»\n")
+    os.makedirs(os.path.join(memory.DIR, "days"))
+    open(os.path.join(memory.DIR, "days", "2026-11-11.md"), "w").write("Агенты: почта — готово.")
+    sent, emitted = [], []
+    _, oma = _oma(sent, emitted)
+    shown = lambda: [e["line"]["memory"] for e in emitted if "memory" in e["line"]]
+    run(oma.command({"do": "memory"}))
+    assert shown() == [{"prefs": ["2026-11-10 · «говори короче»"], "days": [{"id": "2026-11-11", "text": "Агенты: почта — готово."}]}]
+    run(oma.command({"do": "memory_set", "kind": "day", "id": "2026-11-11", "text": "чужое"}))
+    assert shown()[-1]["days"][0]["text"] == "Агенты: почта — готово.", "дни в окне не правятся"
+    run(oma.command({"do": "memory_set", "kind": "pref", "id": "2026-11-10 · «говори короче»", "text": "2026-11-10 · «короче»"}))
+    assert shown()[-1]["prefs"] == ["2026-11-10 · «короче»"]
+    run(oma.command({"do": "memory_del", "kind": "day", "id": "2026-11-11"}))
+    assert shown()[-1] == {"prefs": ["2026-11-10 · «короче»"], "days": []} and len(shown()) == 4
