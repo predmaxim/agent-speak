@@ -4577,3 +4577,17 @@ def test_ear_log_is_off_without_its_dir_and_keeps_last_ten(monkeypatch, tmp_path
     monkeypatch.setattr(earlog, "_on", True)  # кэш ещё «вкл», а каталог уже удалён
     earlog.phrase(14, b"\0" * 3200, "после удаления")
     assert not d.exists(), "удалённый каталог запись не создаёт заново"
+
+
+def test_aec_frame_is_picked_by_record_time_not_by_count():
+    # 2026-11-13: mic_aec открывается позже сырого, сырой отстаёт (замер 110–210 мс) — пара по счёту давала кадры
+    # разного времени, и после played_at в сырых кадрах был конец её голоса. Кадр mic_aec — по времени записи
+    from agent_voice.ear import Aligned, FRAME, RATE
+    dt = FRAME / RATE
+    al = Aligned(proc="p")
+    for i in range(1, 21):
+        al.add(bytes([i]) * 4, 100.0 + i * dt)  # mic_aec читается вовремя: кадр i записан в 100 + i·dt
+    assert al.at(100.0 + 7 * dt) == bytes([7]) * 4, "сырой кадр, записанный в 100+7dt, — в паре с кадром 7, а не 20-м"
+    assert al.at(100.0 + 7.4 * dt) == bytes([7]) * 4
+    assert al.at(100.0 - 3 * dt) is None, "записан до открытия mic_aec — остаётся сырой"
+    assert Aligned("p").at(1.0) is None
