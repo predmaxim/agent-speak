@@ -2251,6 +2251,12 @@ def test_brain_knows_its_own_sound():
     assert "в динамиках" in run(ask("где звук"))
     run(oma.event(("out", "headphones")))
     assert "в наушниках" in run(ask("а теперь"))
+    assert "Лимит" not in oma.brain.sound, "окна у порога нет — строки нет"
+    run(oma.event(("limit", "Лимит Claude почти кончился, сброс в 17:40.")))  # limit службы: окно лимита у порога
+    assert run(ask("сколько осталось")).endswith("в наушниках.\nЛимит Claude почти кончился, сброс в 17:40.")
+    run(oma.event(("limit", "")))
+    assert "Лимит" not in run(ask("а сейчас"))
+    assert "«Лимит" in OMA_PROMPT
 
 
 def test_brain_warms_once_and_send_reuses_it():
@@ -2810,6 +2816,9 @@ def test_status_line_events_only_on_change_and_her_sound_by_voiced():
     assert status_events(line(True, 0, 0.0, "headphones"), last) == [("out", "headphones")]
     assert status_events(line(False, 1, 12.5, "headphones"), last) == [("audio", False, 12.5, 1, False)]
     assert status_events(line(False, 2, 12.5, "headphones"), last) == [("audio", False, 12.5, 2, False)], "реплика без звука в хвосте"
+    assert status_events(dict(line(False, 2, 12.5, "headphones"), limit="Лимит Codex почти кончился, сброс в 21:00."), last) == [
+        ("limit", "Лимит Codex почти кончился, сброс в 21:00.")], "фраза лимита — при смене"
+    assert status_events(line(False, 2, 12.5, "headphones"), last) == [("limit", "")], "погасла — тоже смена"
     assert status_events({"running": True, "speaking": False}, {})[0] == ("audio", False, None, None, False), \
         "played_at нет — None (конец звука — сейчас), а не 0.0"
 
