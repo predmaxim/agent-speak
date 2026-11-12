@@ -305,6 +305,17 @@ def test_order_answer_in_auto_window_late_or_in_two_parts_is_heard():
     assert ("send", "да передай", "") in cv.tick()
 
 
+def test_typed_answer_to_order_question_closes_the_window_after_reply():
+    # ревью 2026-11-12: ответ на вопрос набран в окне — окно не должно ещё 5 с слушать комнату для Claude
+    clk, cv = _conv()
+    cv.listen(5, "news", "agent-speak: готово")
+    _say(clk, cv, "передай ему: проверь тесты")
+    cv.question("Передать? Скажи: да, передай."); cv.audio(True); cv.done(); cv.audio(False)
+    cv.ask("да, передай")
+    cv.delta("Передала. "); cv.audio(True); cv.done()
+    assert cv.audio(False)[-2:] == [("ear", False), ("state", "idle")]
+
+
 def test_order_question_in_auto_window_waits_its_silence_then_closes():
     clk, cv = _conv()
     cv.listen(5, "news", "agent-speak: готово")

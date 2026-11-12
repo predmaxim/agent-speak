@@ -337,6 +337,8 @@ class Conversation:
         t = text.strip()
         if not t:
             return []
+        if self.window and self.window.get("asked"):  # ответ на её вопрос подтверждения набран — окно ответа его уже не ждёт
+            self.window.update(asked=False, close=True)
         return self._stop_turn() + self._drop() + self._send(t, voiced=False)
 
     def _echoing(self, at):
