@@ -2360,8 +2360,12 @@ impl State {
         let r = match act.as_str() {
             "tell" => {
                 let e = self.registry.get(&session).ok_or("такого агента нет")?;
-                // агент уже закончил (пока Ома ждала «да, передай») — поручение уходит сразу: одно подтверждение — одна передача
-                let (who, free) = (e.project.clone(), matches!(e.state, agents::State::Done | agents::State::Idle));
+                // агент уже закончил (пока Ома ждала «да, передай») — поручение уходит сразу: одно подтверждение — одна
+                // передача; закончил вопросом — ждёт следующего конца хода, как в later_due. Итог — последняя строка
+                // ленты: после Stop лента Claude — заново по транскрипту, и итог в ней — status, а не final
+                let last = e.feed.back().filter(|l| l.kind != "prompt").map_or("", |l| l.text.as_str());
+                let free = matches!(e.state, agents::State::Done | agents::State::Idle) && !crate::later::ends_with_question(last);
+                let who = e.project.clone();
                 let r = self.later.tell(&session, &who, &text, &gist, now);
                 if r.is_ok() && free {
                     self.later.due(&session, true);
@@ -4503,6 +4507,29 @@ mod tests {
         st.focus_cache = None;
         st.tick();
         assert!(delivered(&acts), "перестал печатать в нём — со следующего тика");
+    }
+
+    #[test]
+    fn later_tell_to_an_agent_that_just_asked_waits_for_its_next_stop() {
+        // ревью wave4c-0: агент кончил ход вопросом, пока Ома ждала «да, передай» — поручение не станет ответом на него
+        // ход кончился хуком Stop: лента — заново по транскрипту, итог в ней — строкой status, а не final
+        let dir = std::env::temp_dir().join(format!("agent-speak-later-ask-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = dir.join("a.jsonl");
+        std::fs::write(&t, r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Сделал.\n\nЗапушить?"}]}}"#.to_string() + "\n").unwrap();
+        let mut st = test_state();
+        let a = Live { transcript: t.clone(), ..live("a") };
+        st.scan = Box::new(move || vec![a.clone()]);
+        st.rescan();
+        let acts = acts(&mut st);
+        st.on_hook("stop", &serde_json::json!({"session_id": "a", "transcript_path": t, "last_assistant_message": "Сделал.\n\nЗапушить?"}));
+        st.later_cmd(later_msg("tell", "a", "Прогони тесты")).unwrap();
+        assert!(!delivered(&acts), "кончил ход вопросом — ждём следующего конца хода");
+        st.tick();
+        assert!(!delivered(&acts));
+        stop(&mut st, "a", "Запушил.");
+        assert!(delivered(&acts));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
