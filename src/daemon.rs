@@ -1458,6 +1458,9 @@ impl State {
         // и не тогда, когда сказать есть только о чатах Orca под окном в фокусе: их знают события Hyprland
         let chats = self.chats_engaged();
         if !self.board.sayable(now, &chats) && !summary(&self.board, &chats) {
+            if mode != Mode::Unsure {
+                self.board.drop_focused(&chats); // итог чата под окном в фокусе снимается молча (пузырь остался), как ниже в take
+            }
             return;
         }
         let focused = self.engaged();
@@ -6576,6 +6579,22 @@ mod tests {
         assert_eq!(*calls.lock().unwrap(), 0, "ждущий вопрос чата hyprctl на каждом тике не спрашивает");
         st.on_window(Some(5)); // в фокусе другое окно
         assert_eq!(texts(&st), ["плуг: Удалить старый код?"], "по событию, тика не ждёт");
+    }
+
+    #[test]
+    fn orca_chat_final_alone_is_dropped_not_spoken_on_leaving_orca() {
+        // на доске только итог чата, окно Orca в фокусе: итог снимается молча (пузырь был) и не звучит, когда уходишь из Orca
+        let mut st = test_state();
+        let live = vec![Live { chat: true, pid: 11, ..live("s") }];
+        st.scan = Box::new(move || live.clone());
+        st.rescan();
+        st.under = |pid, win| win == 99 && pid > 10;
+        st.on_window(Some(99));
+        final_s(&mut st);
+        st.tick();
+        assert!(texts(&st).is_empty(), "итог чата под окном Orca — без голоса");
+        st.on_window(Some(5));
+        assert!(texts(&st).is_empty(), "ушёл из Orca — снятый итог не звучит");
     }
 
     #[test]
