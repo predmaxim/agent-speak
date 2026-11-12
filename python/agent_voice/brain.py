@@ -21,6 +21,8 @@ TOOLS = ["Read", "Glob", "Grep", "WebSearch"]  # без WebFetch: наружу �
 # (blockReadsOutsideWorkingDirectories); 2026-10-30 Grep мозга по всему ~ (855 ГБ) дал пик памяти 44,2 ГБ
 PROJECTS = os.path.expanduser("~/Projects")
 READ_ONLY_IN_PROJECTS = {"permissions": {"blockReadsOutsideWorkingDirectories": True}}
+FILES = f"Файлы ты только читаешь, и только в {PROJECTS}."
+FILES_MEMORY = f"Файлы ты только читаешь, и только в {PROJECTS}; пишешь — только свою память (ниже)."  # память вкл: Write/Edit — в неё
 # память вкл: Write/Edit — только для неё. Правила на них нет: вне каталога памяти запись отклоняет dontAsk, в нём Claude
 # Code разрешает её сам (auto memory), а хук PreToolUse (memory.gate) пускает лишь слова пользователя в MEMORY.md
 MEMORY_TOOLS = ["Write", "Edit"]
@@ -68,7 +70,7 @@ OMA_PROMPT = ("Ты — Ома, голосовой заместитель пол
               "строка «Твой голос: …» после него — твой звук сейчас: на «где звук?» отвечай по ней; "
               "строка «Лимит … почти кончился» — лимит агентов у края: о лимите отвечай по ней; "
               "лента агента — agent_feed; конец переписки агента — agent_tail (пустой аргумент — "
-              f"агент в фокусе); «это», «тут», «эта ошибка» — сначала selection, затем agent_tail. Файлы ты только читаешь, и только в {PROJECTS}. "
+              f"агент в фокусе); «это», «тут», «эта ошибка» — сначала selection, затем agent_tail. {FILES} "
               "Передать агенту ответ или задание — tell: разверни короткую просьбу в полное задание от лица пользователя (что "
               "сделать, где искать, что вернуть), фактов не выдумывай; ответ на вопрос агента передай полностью, с нужными "
               "деталями. Агент ждёт ответа с вариантами (в agents — «ждёт ответа: … Варианты: …») — option с номером варианта по "
@@ -323,7 +325,7 @@ class Brain:
         if on:
             memory.ensure()
         client = ClaudeSDKClient(ClaudeAgentOptions(
-            cwd=OMA_DIR, add_dirs=[PROJECTS], model=MODEL, system_prompt=prompt + memory.prompt(on),
+            cwd=OMA_DIR, add_dirs=[PROJECTS], model=MODEL, system_prompt=(prompt.replace(FILES, FILES_MEMORY) if on else prompt) + memory.prompt(on),
             tools=TOOLS + (MEMORY_TOOLS if on else []),
             # чтение в рабочих папках разрешений не просит; остальное, что спросило бы, — отказ: спрашивать некого
             allowed_tools=["WebSearch"] + OMA_TOOLS, permission_mode="dontAsk",

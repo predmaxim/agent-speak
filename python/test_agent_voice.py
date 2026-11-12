@@ -664,7 +664,10 @@ def test_brain_chat_keys_tag_and_stale(monkeypatch, tmp_path):
         await b.send("как дела")
         assert [await ev.get(), await ev.get()] == [("opened", "chat:sid-1", "new"), ("done", None)]
         o = made[0].opts
-        assert o.cwd == str(tmp_path) and o.resume is None and o.system_prompt == OMA_PROMPT + brain.memory.prompt(True)
+        assert o.cwd == str(tmp_path) and o.resume is None and o.system_prompt.endswith(brain.memory.prompt(True))
+        # память вкл — промпт не спорит с её хвостом: «только читаешь» и «допиши память» вместе
+        assert o.system_prompt == OMA_PROMPT.replace(brain.FILES, brain.FILES_MEMORY) + brain.memory.prompt(True) != OMA_PROMPT + brain.memory.prompt(True)
+        assert f"Файлы ты только читаешь, и только в {brain.PROJECTS}; пишешь — только свою память (ниже)." in o.system_prompt
         # память вкл: Write/Edit — только для неё (вне каталога памяти — отказ dontAsk, внутри — хук memory.gate)
         assert o.tools == brain.TOOLS + ["Write", "Edit"] and o.env == {"AGENT_SPEAK": "1"}
         # Read/Glob/Grep — только в ~/Projects (2026-10-30 Grep по ~ дал пик памяти 44 ГБ): чтение не разрешено правилом
@@ -678,7 +681,7 @@ def test_brain_chat_keys_tag_and_stale(monkeypatch, tmp_path):
         assert o.strict_mcp_config and list(o.mcp_servers) == ["oma"]
         assert await b.open("agent:s1") == [] and len(made) == 1  # open только читает историю: claude не запускается
         await b.send("что там")
-        assert "«Почтовый клиент»" in made[1].opts.system_prompt
+        assert "«Почтовый клиент»" in made[1].opts.system_prompt and brain.FILES_MEMORY in made[1].opts.system_prompt
         assert [await ev.get(), await ev.get()] == [("opened", "agent:s1", "agent:s1"), ("done", None)]
         assert tags == [("sid-2", "agent:s1", str(tmp_path))]
         assert await b.open("chat:sid-1") == [{"role": "me", "text": "привет"}] and len(made) == 2
@@ -2435,6 +2438,7 @@ def test_brain_memory_off_and_gate_hook(monkeypatch, tmp_path):
         off = made[0].opts
         assert off.tools == brain.TOOLS and off.env == {"AGENT_SPEAK": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
         assert "autoMemoryDirectory" not in json.loads(off.settings) and off.system_prompt.endswith(brain.memory.NO_MEMORY)
+        assert f"Файлы ты только читаешь, и только в {brain.PROJECTS}. " in off.system_prompt and "пишешь —" not in off.system_prompt
         b.memory = True
         await b.open("new")
         await b.warm()
