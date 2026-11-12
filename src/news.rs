@@ -158,8 +158,8 @@ impl Board {
         queued.chain(self.asked.iter().map(|(q, _)| q.session.clone())).collect()
     }
 
-    pub fn retain_classes(&mut self, keep: &[Class]) {
-        self.items.retain(|i| keep.contains(&i.class));
+    pub fn retain_classes(&mut self, keep: &[Class], sessions: &[String]) {
+        self.items.retain(|i| keep.contains(&i.class) || sessions.contains(&i.session)); // sessions — их новости остаются все
     }
 
     /// Куски следующей пачки; взятое с доски снимается, пусто — сказать нечего. skip — агенты, которыми он занят (в фокусе,
@@ -613,7 +613,7 @@ mod tests {
         b.push(n("a", Class::Final, "A.", 1));
         b.push(n("q", Class::Question, "Q?", 1));
         b.retain_sessions(|s| s != "gone");
-        b.retain_classes(&[Class::Restore, Class::Question]); // agents_voice выключен
+        b.retain_classes(&[Class::Restore, Class::Question], &[]); // agents_voice выключен
         assert_eq!(tk(&mut b, 10, None).unwrap(), "Q?");
         b.answered("q");
         assert_eq!(tk(&mut b, 11, None), None);
