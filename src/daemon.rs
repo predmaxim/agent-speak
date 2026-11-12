@@ -2062,7 +2062,7 @@ impl State {
         let line = news::Chunk { class: Some(Class::Now), project: project.clone(), text: say.clone() }.line();
         self.bubble(&id, &format!("note-{id}"), &who, &line, "question");
         if !self.quiet() {
-            self.board.push(News { session: id, class: Class::Now, project, say, important: false, born: (self.now_secs)() });
+            self.board.push(News { session: id, class: Class::Now, project, say, important: false, born: (self.now_secs)(), facts: Default::default() });
         }
         self.push_agents();
         Ok(NOTE_TAKEN.into())
