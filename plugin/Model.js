@@ -76,7 +76,8 @@ function orbTip(st, muted) {
 
 // The wake word (the daemon's wake) -> its line; "off" (the setting, a lock, no answer yet) and "quiet" have none.
 var WAKE = { on: "Hears its name", battery: "Not hearing its name: on battery", muted: "Not hearing its name: mic is off",
-  busy: "Not hearing its name: mic is busy", no_model: "Not hearing its name: no model", no_mic: "Not hearing its name: no built-in mic" }
+  busy: "Not hearing its name: mic is busy", no_model: "Not hearing its name: no model", no_mic: "Not hearing its name: no built-in mic",
+  error: "Not hearing its name: ear failure" }
 
 // The note under «Answer to «Oma»»: why it does not work now; "" — it works or is switched off.
 function wakeNote(st) {

@@ -23,7 +23,7 @@ var TABLES = {
     "Answer to «Oma»": "Отзываться на «Ома»", "Hears its name": "Слышит имя",
     "Not hearing its name: on battery": "Не слышит имя: от батареи", "Not hearing its name: mic is off": "Не слышит имя: микрофон выключен",
     "Not hearing its name: mic is busy": "Не слышит имя: микрофон занят", "Not hearing its name: no model": "Не слышит имя: нет модели",
-    "Not hearing its name: no built-in mic": "Не слышит имя: нет встроенного микрофона",
+    "Not hearing its name: no built-in mic": "Не слышит имя: нет встроенного микрофона", "Not hearing its name: ear failure": "Не слышит имя: сбой слуха",
     "Orb": "Орб", "Over fullscreen windows": "Над полноэкранными окнами", "Agent satellites": "Спутники агентов", "Orb mood": "Настроение орба", "Mic is off": "Микрофон выключен", "%1 failed calls this turn": "ошибок за ход: %1",
     "Tempo: very slow": "Темп: очень медленно", "Tempo: slow": "Темп: медленно", "Tempo: normal": "Темп: обычно",
     "Tempo: fast": "Темп: быстро", "Tempo: very fast": "Темп: очень быстро", "Breathes at rest": "Дышит в покое", "%1 more": "ещё %1",

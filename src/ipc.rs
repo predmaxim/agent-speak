@@ -50,7 +50,7 @@ pub enum Msg {
     /// Колесо над орбом, пока Ома говорит: темп этого ответа на step шагов RATES (+ быстрее); config.toml не пишется.
     RateStep { step: i64 },
     /// Слух Омы для орба: её вход (узел PipeWire; "" — вход по умолчанию), до когда она ещё слушает (эпоха, с; нет —
-    /// дуги нет) и длина этого окна, с; wake — слово-побудка у неё: on | off | battery | muted | busy | no_model | no_mic.
+    /// дуги нет) и длина этого окна, с; wake — слово-побудка у неё: on | off | battery | muted | busy | no_model | no_mic | error.
     /// Шлёт при смене, отдельно от voice_state: его повтор держал бы новости и чистил очередь.
     Ear { #[serde(default)] ear_in: String, #[serde(default)] until: Option<f64>, #[serde(default)] secs: f64, #[serde(default)] wake: String },
     /// `agent-speak note`: агент пишет Оме, что ему нужно от пользователя. Сессия — из CLAUDE_CODE_SESSION_ID; нет её

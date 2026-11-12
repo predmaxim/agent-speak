@@ -181,7 +181,7 @@ struct Status<'a> {
     done_facts: bool,         // настройка: факты git в итогах
     permission_buttons: bool, // настройка: кнопки разрешений
     agent_inbox: bool,        // настройка: агенты пишут Оме
-    wake: &'a str,            // слово-побудка: on | off | battery | muted | busy | no_model | no_mic
+    wake: &'a str,            // слово-побудка: on | off | quiet | battery | muted | busy | no_model | no_mic | error
     wake_word: bool,          // настройка: отзываться на «Ома»
     memory: bool,             // настройка: помнить прошлые дни
     headset_button: bool,     // настройка: кнопка наушников (MPRIS-плеер Омы, пока она говорит или спросила «Ты тут?»)

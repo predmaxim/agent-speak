@@ -313,8 +313,9 @@ class Ear:
         await self._died(proc, reason)
 
     async def _died(self, proc, reason):
-        """Читатель или MicWatch кончил сам (не stop): сообщить и привести Ear в закрытое состояние."""
-        await self.out.put(("error", reason))
+        """Читатель или MicWatch кончил сам (не stop): сообщить и привести Ear в закрытое состояние. Слух на имя —
+        событием wake_died, а не error: тик ac откроет его снова, уведомление не нужно."""
+        await self.out.put(("wake_died" if self._proc is proc and self.waking else "error", reason))
         if self._proc is proc:
             me = asyncio.current_task()
             tasks = [t for t in self._tasks + [self._confirming] if t and t is not me]

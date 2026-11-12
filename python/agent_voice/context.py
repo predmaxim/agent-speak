@@ -136,10 +136,10 @@ def mic_target(run=subprocess.run, out=None, wake=False) -> tuple:
         return "", bool(out), ""
 
 
-# MicWatch: pactl subscribe, пока слух открыт, — захват (source-output), mute и вход по умолчанию (source, server)
-# по событиям, а не опросом раз в секунду (слух на «Ома» открыт всегда)
+# MicWatch: pactl subscribe, пока слух открыт, — захват (source-output: новый, ушедший, cork/uncork), mute и вход по
+# умолчанию (source, server) по событиям, а не опросом раз в секунду (слух на «Ома» открыт всегда)
 MIC_WATCH = ["pactl", "subscribe"]
-MIC_EVENT = re.compile(r"'(?:new|remove)' on source-output|'change' on (?:source|server) ")
+MIC_EVENT = re.compile(r"'(?:new|remove|change)' on source-output|'change' on (?:source|server) ")
 
 
 def muted(target: str, run=subprocess.run) -> bool:

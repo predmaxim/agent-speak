@@ -139,11 +139,11 @@ def test_wake_mic_is_the_builtin_one_even_with_a_headset_in_the_ears():
 
 def test_mic_watch_events_table():
     from agent_voice.context import MIC_EVENT
-    for line in ("Event 'new' on source-output #12", "Event 'remove' on source-output #12", "Event 'change' on source #45",
-                 "Event 'change' on server #-1"):
+    # change on source-output — cork/uncork чужого потока записи: открытый на паузе поток заговорил (foreign_capture)
+    for line in ("Event 'new' on source-output #12", "Event 'remove' on source-output #12", "Event 'change' on source-output #12",
+                 "Event 'change' on source #45", "Event 'change' on server #-1"):
         assert MIC_EVENT.search(line + "\n"), line
-    for line in ("Event 'change' on client #1693", "Event 'change' on source-output #12", "Event 'new' on sink-input #3",
-                 "Event 'change' on sink #2"):
+    for line in ("Event 'change' on client #1693", "Event 'new' on sink-input #3", "Event 'change' on sink #2"):
         assert not MIC_EVENT.search(line + "\n"), line
 
 
@@ -391,6 +391,56 @@ def test_mic_watch_eof_is_an_error_and_closes_the_ear():
         assert ev[0] == "error" and "MicWatch" in ev[1]
         await asyncio.wait_for(proc.wait(), 5)  # pw-record не пишет без присмотра
         assert not e.open and e._sub is None
+    run(go())
+
+
+def test_wake_ear_death_is_its_own_event():
+    # слух на имя умер сам (перезапуск звукового стека) — не "error": Ома пишет его в журнал, без уведомления;
+    # смерть слуха в разговоре — "error", как раньше
+    from agent_voice.ear import Ear
+
+    async def died(wake, cmd, watch):
+        out = asyncio.Queue()
+        e = Ear(out, Whisper(load=lambda: "m"), cmd=cmd, vad_load=lambda: None, mic=lambda wake=False, out=None: ("alsa_input.pci", False, ""),
+                muted=lambda t: False, wake=LoadDet(), watch=watch)
+        await e.start(wake=wake)
+        while (ev := await asyncio.wait_for(out.get(), 5)) == ("mic_check",):
+            pass
+        assert not e.open and not e.waking
+        return ev
+    assert run(died(True, LIVE, ["sh", "-c", "exit 0"])) == ("wake_died", "MicWatch: pactl subscribe завершился")
+    assert run(died(True, ["sh", "-c", "exit 0", "-"], None)) == ("wake_died", "pw-record завершился")
+    assert run(died(False, ["sh", "-c", "exit 0", "-"], None)) == ("error", "pw-record завершился")
+
+
+def test_wake_ear_failure_is_error_in_the_orb_and_its_death_is_no_notification(monkeypatch):
+    # побудка разрешена, а слух на имя не открылся или умер сам — орб «Не слышит имя: сбой слуха», а не «Слышит имя»;
+    # смерть слуха на имя — в журнал, без уведомления: тик ac откроет его снова; смерть в разговоре — уведомление, как раньше
+    m, sent, ears, oma = _woke_oma(monkeypatch)
+    notes, start = [], oma.ear.start
+    oma.notify = notes.append
+
+    async def boom(wake=False):
+        raise OSError("pw-record не запустился")
+
+    async def go():
+        oma.ear.start = boom
+        await oma.command({"do": "wake", "on": True})
+        assert ears[-1]["wake"] == "error" and len(notes) == 1
+        oma.ear.start = start
+        await oma.event(("ac", True))
+        assert ears[-1]["wake"] == "on"
+        oma.ear.open = oma.ear.waking = False  # pw-record умер сам: Ear уже закрыт
+        await oma.event(("wake_died", "pw-record завершился"))
+        assert ears[-1]["wake"] == "error" and len(notes) == 1, "смерть слуха на имя — только в журнал"
+        await oma.event(("ac", True))
+        assert ears[-1]["wake"] == "on"
+        await oma.command({"do": "talk"})
+        assert oma.conv.active and ears[-1]["wake"] == "on", "в разговоре слух не на имени — это не сбой"
+        oma.ear.open = False
+        await oma.event(("error", "pw-record завершился"))
+        assert len(notes) == 2 and not oma.conv.active, "смерть слуха в разговоре — уведомление, как раньше"
+        assert ears[-1]["wake"] == "on", "конец разговора — снова слышит имя"
     run(go())
 
 

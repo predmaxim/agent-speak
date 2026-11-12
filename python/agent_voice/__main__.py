@@ -365,6 +365,9 @@ class Oma:
             await self._woke(ev[1], ev[2])
         elif kind == "opened":
             self.emit({"chat": {"key": ev[1], "was": ev[2], "messages": self.history}})
+        elif kind == "wake_died":  # слух на имя умер сам (перезапуск звука): тик ac откроет снова, орб — «сбой слуха»
+            print(f"agent_voice: слово-побудка: {ev[1]}", file=sys.stderr, flush=True)
+            self._ear_line()
         elif kind == "error":
             self._warn(ev[1])
             if not self.ear.open and c.active:  # слух умер сам
@@ -469,14 +472,18 @@ class Oma:
         return self.wake_on and self.ac is not False and self._model()
 
     def _wake_state(self):
-        """Побудка для строки состояния: on или почему нет."""
+        """Побудка для строки состояния: on или почему нет; error — в покое слух на имя не открылся или умер сам."""
         if not self.wake_on:
             return "off"
         if not self._model():
             return "no_model"
         if self.ac is False:
             return "battery"
-        return "no_mic" if self.no_mic else self.mic_why or "on"
+        if self.no_mic:
+            return "no_mic"
+        if not self.conv.active and not (self.ear.open and self.ear.waking):
+            return "error"
+        return self.mic_why or "on"
 
     async def _wake_open(self):
         self.ear.speakers = None  # слух на имя — по сервису присутствия: «Ты тут?» в динамики (listen) — не его случай
