@@ -377,6 +377,9 @@ Item {
             mode: root.shown ? Model.orbMode(root.speech) : "idle"
             size: Style.font.display
             line: Math.max(1, Style.space(2))
+            rate: root.speech.rate_now || root.speech.rate || "medium"
+            limit: (root.speech.limit || "") !== ""
+            limitColor: fixedColors.values.yellow || "#d4a72c"
           }
           // Right to left: the power switch at the edge, the buttons, the
           // count of agents waiting for an answer. A page has only Back.

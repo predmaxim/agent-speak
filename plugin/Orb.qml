@@ -2,6 +2,8 @@ import QtQuick
 import QtQuick.Effects
 import Quickshell
 import Quickshell.Hyprland
+import Quickshell.Services.Pipewire
+import Quickshell.Services.UPower
 import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
@@ -16,14 +18,15 @@ import "I18n.js" as I18n
 // drag only moves the circle inside it (a window that resized and re-anchored
 // for a drag made the compositor show a frame of the old buffer — the orb
 // jumped to the middle of the screen or blinked). The cost: while the circle
-// animates (a conversation only) the whole window repaints. The drop keeps
-// the place, near a corner it snaps.
+// animates (a conversation, short moves on events, a rare breath at rest on
+// mains) the whole window repaints. The drop keeps the place, near a corner it snaps.
 PanelWindow {
   id: win
 
   property var link
   property var bubbles: []
   property bool covered: false   // Oma's window is open
+  property string openChat: ""   // the chat Oma's window shows ("agent:<id>" …), "" while it is closed
   signal dismissed(string key)
   signal windowToggled()
   signal chatOpened(string key)   // a bubble's chat: "agent:<id>", or "" for Oma's current one
@@ -32,8 +35,39 @@ PanelWindow {
   readonly property QtObject fixedColors: FixedColors {}
 
   readonly property var tr: I18n.translator(I18n.textLanguage(function(name) { return Quickshell.env(name) }))
-  readonly property string mode: Model.orbMode(link.speech)
-  readonly property var tip: Model.orbTip(link.speech)
+  readonly property string mode: Model.orbMode(link.speech, micMuted)
+  readonly property var tip: Model.orbTip(link.speech, micMuted)
+
+  // The ear (ear-meter): her input — the daemon's ear_in, or the default one — its level while she listens and its
+  // mute, read as the stock audio panel and microphone widget do. The mute key mutes the default input only, and
+  // without a headset she records the laptop's mic past it: off is either one off. A virtual default input has no
+  // PwNode.audio in Quickshell: its mute through the stock UntypedInput, and no level meter (as the stock panel).
+  readonly property var defaultSource: Pipewire.defaultAudioSource
+  readonly property var earNode: {
+    var name = link.speech.ear_in || ""
+    if (!name) return defaultSource
+    var list = Pipewire.nodes.values
+    for (var i = 0; i < list.length; i++) if (list[i].name === name) return list[i]
+    return null
+  }
+  PwObjectTracker { objects: [win.defaultSource, win.earNode].filter(function(n) { return !!n }) }
+  readonly property bool defaultMuted: UntypedInput.active ? UntypedInput.known && UntypedInput.muted
+    : !!(defaultSource && defaultSource.audio && defaultSource.audio.muted)
+  readonly property bool micMuted: defaultMuted || !!(earNode && earNode.audio && earNode.audio.muted)
+  // Its own capture stream (quickshell-peak-monitor), only while she listens; not someone else's mic for Oma and
+  // presence (the stock isShellLevelMeter rule).
+  PwNodePeakMonitor {
+    id: earPeak
+    node: win.earNode && win.earNode.audio ? win.earNode : null
+    enabled: win.mode === "listening" && node !== null
+  }
+
+  // The «done» ring until seen (Model.seenDone): a done agent's tab in focus or its chat open in Oma's window.
+  property var seen: ({})
+  function markSeen() { win.seen = Model.seenDone(win.seen, win.link.agents, win.covered ? win.openChat : "") }
+  onOpenChatChanged: markSeen()
+  onCoveredChanged: markSeen()
+  readonly property bool moods: link.speech.orb_moods === true && link.speech.agents_voice === true
 
   readonly property int size: Style.space(48)
   readonly property real breathMax: 1.12
@@ -71,7 +105,12 @@ PanelWindow {
   Component.onCompleted: sats = Model.satSlots(sats, link.agents, Model.SAT_MAX)
   Connections {
     target: win.link
-    function onAgentsChanged() { win.sats = Model.satSlots(win.sats, win.link.agents, Model.SAT_MAX) }
+    function onAgentsChanged() {
+      win.sats = Model.satSlots(win.sats, win.link.agents, Model.SAT_MAX)
+      win.markSeen()
+    }
+    // news she does not say now: one wave instead of words (the daemon sends it only with orb_moods on)
+    function onRipple(r) { orbFace.ripple(r.tone) }
   }
   readonly property int satDot: Style.space(8)     // what is seen
   readonly property int satZone: Style.space(14)   // what takes the pointer
@@ -134,11 +173,24 @@ PanelWindow {
     y: Math.max(0, Math.min(parent.height - height, (win.atTop ? win.pos.dy : parent.height - height - win.pos.dy) + (win.dragging ? win.dragDY : 0)))
 
     OrbFace {
+      id: orbFace
       anchors.fill: parent
       mode: win.mode
       size: win.size
       line: win.line
       breathMax: win.breathMax
+      rate: win.link.speech.rate_now || win.link.speech.rate || "medium"
+      level: earPeak.enabled ? Model.level(earPeak.peak) : -1
+      listenUntil: win.link.speech.listen_until
+      listenSecs: win.link.speech.listen_secs || 0
+      limit: (win.link.speech.limit || "") !== ""
+      ring: win.moods && Model.doneUnseen(win.link.agents, win.seen)
+      droop: win.moods && win.link.speech.struggling > 0
+      awake: orbArea.containsMouse
+      idleMotion: win.link.speech.orb_idle_motion === true && !UPower.onBattery && !win.covered
+      ringColor: win.fixedColors.values.green || "#57ab5a"
+      limitColor: win.fixedColors.values.yellow || "#d4a72c"
+      alertColor: win.fixedColors.red
     }
 
     // Left click talks, right click toggles the window, the middle one asks for

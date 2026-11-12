@@ -32,9 +32,11 @@ function parseLine(line) {
   return null
 }
 
-// What the orb shows, by priority. Oma down is "off", yet a waiting agent still shows.
-function orbMode(st) {
+// What the orb shows, by priority. Oma down is "off", yet a waiting agent still shows. `muted`: the mic is off (the
+// default input or Oma's own, read by the orb from PipeWire) — while she hears, the grey disc with the crossed mic.
+function orbMode(st, muted) {
   if (!st || !st.running) return "off"
+  if (muted && ["loading", "listening", "paused"].indexOf(st.oma) >= 0) return "muted"
   if (["loading", "listening", "thinking", "speaking", "paused"].indexOf(st.oma) >= 0) return st.oma
   if (st.speaking) return "speaking"   // news or manual reading: the service speaks, Oma is idle
   if (st.trouble > 0 && st.agents_voice !== false) return "trouble"   // the watch needs the user, above waiting
@@ -54,10 +56,10 @@ function headItems(page, running) {
 }
 
 // Tooltip: its lines, each a key for tr(key, arg); the orb's tooltip and the window header draw them all.
-function orbTip(st) {
-  var mode = orbMode(st)
+function orbTip(st, muted) {
+  var mode = orbMode(st, muted)
   var tips = { off: "Oma is not running", loading: "Oma is loading", listening: "Oma is listening", thinking: "Oma is thinking",
-    speaking: "Oma is speaking", paused: "Paused", quiet: "Quiet mode", idle: "Oma" }
+    speaking: "Oma is speaking", paused: "Paused", quiet: "Quiet mode", idle: "Oma", muted: "Mic is off" }
   var why = st && QUIET_WHY[st.quiet_why]
   var lines = mode === "trouble" ? [["%1 need help", st.trouble]] : mode === "waiting" ? [["%1 waiting", st.waiting]]
     : mode === "quiet" && !st.quiet && why ? [] : [[tips[mode], ""]]   // quiet by reason only: the reason is the line
@@ -67,6 +69,39 @@ function orbTip(st) {
   // a limit window near its end: the daemon's phrase, already Russian, so no tr line — it passes tr() as is
   if (st && st.limit) lines.push([st.limit, ""])
   return lines
+}
+
+// The ear meter: PwNodePeakMonitor's peak (linear 0..1) in decibels, −50 dB → 0 … −10 dB → 1 (a calibration for the
+// laptop's mic and a headset: speech at arm's length is about −30); no node — −1.
+var LEVEL_FLOOR = -50
+var LEVEL_TOP = -10
+function level(peak) {
+  if (peak < 0) return -1
+  var db = peak > 0 ? 20 * Math.log(peak) / Math.LN10 : -Infinity
+  return Math.max(0, Math.min(1, (db - LEVEL_FLOOR) / (LEVEL_TOP - LEVEL_FLOOR)))
+}
+
+// How long she still listens, a share of the window: the daemon's listen_until (epoch, s) and listen_secs at `now`;
+// −1 — no arc.
+function listenLeft(until, secs, now) {
+  if (until === null || until === undefined || !(secs > 0)) return -1
+  return Math.max(0, Math.min(1, (until - now) / secs))
+}
+
+// The «done» ring, until seen: `seen` maps an agent id to the since of its done the user has seen — its tab in focus
+// or its chat open in Oma's window (`open`, a chat key). Gone agents are forgotten. Returns the new map.
+function seenDone(seen, agents, open) {
+  var out = {}
+  Array.prototype.slice.call(agents || []).forEach(function(a) {
+    if (a.state === "done" && (a.focused || open === "agent:" + a.id)) out[a.id] = a.since
+    else if (seen[a.id] !== undefined) out[a.id] = seen[a.id]
+  })
+  return out
+}
+
+// A done agent the user has not seen yet: the ring burns.
+function doneUnseen(agents, seen) {
+  return Array.prototype.slice.call(agents || []).some(function(a) { return a.state === "done" && seen[a.id] !== a.since })
 }
 
 // The tempo line by the daemon's rate (RATES in src/config.rs).
