@@ -1355,13 +1355,18 @@ impl State {
         self.broadcast();
     }
 
-    fn on_busy(&mut self) {
-        // ответ кончился: всё смолкло и удержания нет (оно стоит, пока Ома думает или говорит, — паузы между её фразами
-        // темп не сбрасывают) — темп из настроек; до speak_news: накопленные новости — уже обычным темпом
+    /// Ответ кончился: всё смолкло и удержания нет (оно стоит, пока Ома думает или говорит, — паузы между её фразами
+    /// темп не сбрасывают) — темп колеса уходит, дальше темп из настроек. Зовут оба конца: смолк звук (on_busy) и
+    /// снялось удержание (voice_state) — её последняя фраза смолкает раньше, чем она перестаёт «говорить».
+    fn rate_back(&mut self) {
         if self.rate_now.is_some() && self.silent() && !self.shared.queue.lock().unwrap().held() {
             self.rate_now = None;
             self.shared.voice.lock().unwrap().1 = self.cfg.rate.clone();
         }
+    }
+
+    fn on_busy(&mut self) {
+        self.rate_back(); // до speak_news: накопленные новости — уже темпом из настроек
         // смолкла — накопленное встаёт в очередь сейчас, а не со следующим tick: музыка не вклинивается на 0–1 с
         self.speak_news();
         self.broadcast();
@@ -1718,6 +1723,7 @@ impl State {
                     self.oma_pause(false); // разговор кончился — её пауза не должна держать новости и чтение
                 }
                 self.hold(matches!(state.as_str(), "thinking" | "speaking"));
+                self.rate_back();
                 self.oma.state = state;
                 self.oma.talking = talking;
                 self.listen_sent = false;
@@ -3147,6 +3153,16 @@ mod tests {
         st.oma.state = "speaking".into();
         st.on_msg(Msg::RateStep { step: -2 });
         assert_eq!(st.rate_now.as_deref(), Some("x-slow"));
+        // её ответ: последняя фраза смолкла, пока она «говорит» (удержание), — темп держится; её «слушаю» снимает
+        // удержание без нового звука — ответ кончился, темп из настроек, а не со следующей речью
+        st.on_msg(Msg::VoiceState { state: "speaking".into(), talking: true });
+        st.shared.busy.store(true, Ordering::SeqCst);
+        st.on_msg(Msg::RateStep { step: 1 });
+        st.shared.busy.store(false, Ordering::SeqCst);
+        st.on_busy();
+        assert_eq!(st.rate_now.as_deref(), Some("slow"), "Ома ещё говорит");
+        st.on_msg(Msg::VoiceState { state: "listening".into(), talking: true });
+        assert_eq!((st.rate_now.as_deref(), rate_now(&st)), (None, "".into()));
     }
 
     #[test]
