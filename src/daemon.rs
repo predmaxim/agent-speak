@@ -91,6 +91,9 @@ const ARE_YOU_THERE: &str = "Эй, ты тут? Есть новости."; // «
 /// Первая фраза после долгого отсутствия, перед обзором доски.
 const WELCOME: &str = "С возвращением.";
 
+/// Начало сводки, когда кончилась тишина по причине (показ экрана): «Пока было тихо: 2 проекта закончили».
+const QUIET_OVER: &str = "Пока было тихо";
+
 /// Итогов на доске к возвращению больше — их сжимает одна сводка модели, а не склейка подряд.
 const SUMMARY_OVER: usize = 3;
 
@@ -184,11 +187,47 @@ struct Oma {
     reap: Option<std::thread::JoinHandle<()>>, // прежнюю пожинают: пока не вышла, новую не поднимаем
 }
 
+/// Пузырь, пока экран показывают: вместо текста — метка по виду, у агента — папка проекта, а не заголовок сессии
+/// (он бывает содержательным). append снят: дельты ответа Омы иначе склеились бы в «ответ в окне ответ в окне».
+fn private_bubble(b: &mut serde_json::Value, project: Option<&str>) {
+    let label = match b["kind"].as_str().unwrap_or_default() {
+        "question" => "вопрос",
+        "final" => "готово",
+        "status" => "новости",
+        "oma" => "ответ в окне",
+        "me" => "реплика",
+        _ => "…", // черновик и всё незнакомое
+    };
+    b["text"] = label.into();
+    b["append"] = false.into();
+    if let Some(p) = project {
+        b["who"] = p.into();
+    }
+}
+
 /// Что звучит: тихий режим глушит всё, кроме чтения по хоткею и образца голоса.
 pub fn audible(kind: &Kind, quiet: bool) -> bool {
     match kind {
         Kind::Read | Kind::Preview => true,
         Kind::News | Kind::Voice => !quiet,
+    }
+}
+
+/// Тишина по причине — не по расписанию и не ручная: пока причина есть, Ома молчит, как в тихом режиме, а новости копятся.
+#[derive(Default, Clone, Copy)]
+struct QuietWhy {
+    dnd: bool,        // «Не беспокоить» Omarchy: ждёт документированного сигнала (docs/upstream/omarchy-dnd-signal.md), пока всегда false
+    screencast: bool, // экран показывают (снимок присутствия) и включено «При показе экрана — тихо и коротко»
+}
+
+impl QuietWhy {
+    fn any(self) -> bool {
+        self.dnd || self.screencast
+    }
+
+    /// Для строки состояния; при обеих — screencast: у него правила строже.
+    fn name(self) -> &'static str {
+        if self.screencast { "screencast" } else if self.dnd { "dnd" } else { "" }
     }
 }
 
@@ -231,6 +270,8 @@ struct State {
     viewing: String,            // чат какого агента открыт в окне Омы; пусто — никакого
     welcome: bool,              // вернулся после долгого отсутствия: следующие новости — с приветствием и обзором
     night_keep: bool,           // тишина настала, пока пользователя нет: накопленное ждёт утра
+    quiet_why: QuietWhy,        // тишина по причине: Ома молчит, новости копятся
+    quiet_over: bool,           // была тишина по причине: когда снимутся все причины — сводка «Пока было тихо»
     facts_src: Box<dyn Fn() -> Option<String>>, // снимок присутствия при старте; в тестах — подделка
     speakers: String,     // динамики ноутбука для Омы, пока наушники вынуты (Event::Outs)
     default_sink: String, // выход звука по умолчанию (Event::Outs); bluez_… — Bluetooth-наушники
@@ -425,6 +466,8 @@ pub fn run() {
         viewing: String::new(),
         welcome: false,
         night_keep: false,
+        quiet_why: QuietWhy::default(),
+        quiet_over: false,
         facts_src: Box::new(move || std::fs::read_to_string(&facts).ok()),
         speakers: String::new(),
         default_sink: String::new(),
@@ -775,6 +818,31 @@ impl State {
         self.cfg.quiet((self.minutes)())
     }
 
+    /// Звучит ли Ома: тихий режим или тишина по причине. Копить ли новости решает quiet(): тишина по причине их копит.
+    fn muted(&self) -> bool {
+        self.quiet() || self.quiet_why.any()
+    }
+
+    /// Причины тишины — по фактам: показ экрана из свежего снимка присутствия, если включена приватность.
+    /// Сменилась — true: очередь и подписчики — за вызывающим.
+    fn sync_quiet_why(&mut self) -> bool {
+        let seen = self.presence.screencast((self.now_secs)());
+        let on = self.cfg.screencast_privacy && seen == Some(true);
+        if on == self.quiet_why.screencast {
+            return false;
+        }
+        let why = match (on, seen) {
+            (true, _) => "начался — тихо и коротко",
+            (false, None) => "снимок присутствия устарел — считаю, что кончился",
+            (false, _) if !self.cfg.screencast_privacy => "приватность выключена",
+            _ => "кончился",
+        };
+        eprintln!("agent-speak: показ экрана: {why}");
+        self.quiet_why.screencast = on;
+        self.quiet_over |= on;
+        true
+    }
+
     /// Очередь и доска — только то, что слышно сейчас: настала тишина — лишнее выбросить. Звучащая фраза доигрывает.
     fn purge(&mut self) {
         if !self.cfg.progress_digest || !self.cfg.agents_voice {
@@ -785,22 +853,25 @@ impl State {
         let here = {
             let mut q = self.shared.queue.lock().unwrap();
             let had = q.count("here");
-            q.retain_audible(quiet);
+            q.retain_audible(self.muted());
             had - q.count("here")
         };
-        // новости тишины не ждут утра — кроме накопленного, пока пользователя не было; без «Озвучивать агентов» звучат только вопросы
+        // новости тишины не ждут утра — кроме накопленного, пока пользователя не было; без «Озвучивать агентов» звучат только вопросы;
+        // тишина по причине доску не трогает: накопленное прозвучит сводкой
         if quiet {
             if !self.night_keep {
                 self.board.retain_classes(&[]);
             }
+        } else if !self.cfg.agents_voice {
+            self.board.retain_classes(&[]); // за агентами не следим — о них ни слова
+        }
+        if self.muted() {
             // новости выброшены — окно ответа по чужой речи не откроется, невыпущенный «Ты тут?» не прозвучит
             (self.listen_after, self.listen_at) = (None, None);
             // тишина выбросила часть «Ты тут?» — вопрос снят целиком: дозвучавший остаток не откроет микрофон в тишине
             if here > 0 && matches!(self.here_ask, Some(HereAsk::Queued(_))) {
                 self.here_ask = None;
             }
-        } else if !self.cfg.agents_voice {
-            self.board.retain_classes(&[]); // за агентами не следим — о них ни слова
         }
         self.here_dropped(here);
     }
@@ -830,6 +901,7 @@ impl State {
             limits::clear_hints(&self.hints, |_| false); // не следим — и подсказок агентам нет
             self.limits_bad = false;
         }
+        self.sync_quiet_why(); // могла включиться приватность при показе экрана
         self.purge(); // могла включиться тишина
         self.broadcast();
     }
@@ -866,10 +938,10 @@ impl State {
             voiced: self.voices - self.voice_base - self.shared.voices_left(self.voice_base) as u64,
             user_paused: paused && !self.oma_paused,
             // волна 2 (A): тишина по причине
-            quiet_why: "",
-            dnd_quiet: false,
-            hush_summary: false,
-            screencast_privacy: false,
+            quiet_why: self.quiet_why.name(),
+            dnd_quiet: false, // «Не беспокоить» ждёт сигнала Omarchy (docs/upstream/omarchy-dnd-signal.md): настройки пока нет
+            hush_summary: self.cfg.hush_summary,
+            screencast_privacy: self.cfg.screencast_privacy,
             // волна 2 (C): спутники
             orb_satellites: false,
             // волна 2 (D): пауза музыки
@@ -998,7 +1070,11 @@ impl State {
             return;
         }
         let text = clean::mask_secrets(&clean::plain(text)); // разметка markdown пузырю не нужна, секреты — тоже
-        let b = serde_json::json!({"bubble": {"id": id, "agent": session, "who": who, "text": text, "kind": kind, "append": false, "drop": false}});
+        let mut b = serde_json::json!({"bubble": {"id": id, "agent": session, "who": who, "text": text, "kind": kind, "append": false, "drop": false}});
+        if self.quiet_why.screencast {
+            let project = self.registry.get(session).map(|e| e.project.clone());
+            private_bubble(&mut b["bubble"], project.as_deref());
+        }
         self.broadcast_line(&format!("{b}\n"));
     }
 
@@ -1092,7 +1168,7 @@ impl State {
     /// Новости — когда Ома молчит, ничего не звучит и пользователь слушает; слух греется заранее, чтобы ответ услышать сразу.
     fn speak_news(&mut self) {
         // идёт разговор или окно ответа: микрофон открыт — Ома услышала бы себя
-        if self.quiet() || self.oma.talking || !self.silent() || self.shared.queue.lock().unwrap().held() {
+        if self.muted() || self.oma.talking || !self.silent() || self.shared.queue.lock().unwrap().held() {
             return;
         }
         let now = (self.now_secs)();
@@ -1110,6 +1186,7 @@ impl State {
         // hyprctl — только когда и без учёта фокуса есть что сказать: итоги, ждущие ответа на вопрос, его не опрашивают каждый тик
         if !self.board.sayable(now, None) {
             self.welcome &= mode == Mode::Unsure; // вводить в курс нечем — приветствие следующих новостей не ждёт
+            self.quiet_over &= mode == Mode::Unsure; // и сводка тишины тоже
             return;
         }
         let focused = self.engaged();
@@ -1132,16 +1209,27 @@ impl State {
         } else {
             let mut parts = Vec::new();
             if std::mem::take(&mut self.welcome) {
+                self.quiet_over = false; // приветствие с обзором покрывает и сводку тишины
                 if !self.board.sayable(now, focused.as_deref()) {
                     return; // вводить в курс нечем — приветствие без новостей не нужно
                 }
                 self.board.drop_focused(focused.as_deref()); // не в обзор и не в сводку
                 parts.push(WELCOME.to_string());
-                parts.extend(self.board.overview());
+                parts.extend(self.board.overview("Пока тебя не было"));
                 if self.board.finals() > SUMMARY_OVER {
                     let lines: Vec<String> = self.board.take_finals().into_iter().map(|n| n.say).collect();
                     let job = Job { session: SUMMARY.into(), project: String::new(), ask: Ask::Summary, text: lines.join("\n"), context: String::new(), fallback: Some(lines.join(" ")) };
                     let _ = self.digest.send(job);
+                }
+            } else if std::mem::take(&mut self.quiet_over) {
+                // тишина по причине кончилась: накопленное — одной фразой кодом, посчитанное (и вопросы) — с доски;
+                // агент остаётся красным в орбе и окне, срочное сторожа звучит по своим правилам. Без сводки — как после тишины.
+                if self.cfg.hush_summary {
+                    self.board.drop_focused(focused.as_deref());
+                    parts.extend(self.board.overview(QUIET_OVER));
+                    self.board.retain_classes(&[Class::Urgent, Class::Restore]);
+                } else {
+                    self.board.retain_classes(&[Class::Urgent, Class::Restore, Class::Question]);
                 }
             }
             parts.extend(self.board.take(now, focused.as_deref()));
@@ -1235,7 +1323,7 @@ impl State {
         }
         self.listen_at = None;
         if self.silent() {
-            if let Some((kind, said)) = self.listen_after.take().filter(|_| !self.quiet()) {
+            if let Some((kind, said)) = self.listen_after.take().filter(|_| !self.muted()) {
                 // ответ на вопрос — в чат спросившего агента
                 let key = self.board.asked().filter(|_| kind == "question").map(|s| format!("agent:{s}"));
                 self.oma_send(&listen_cmd(kind, &said, key, false, LISTEN_SECS));
@@ -1245,7 +1333,7 @@ impl State {
 
     /// Подготовить и поставить в очередь; незнакомые слова — в фон. Возвращает число фраз.
     fn enqueue(&mut self, agent: Agent, session: &str, raw: &str, kind: Kind) -> usize {
-        if !audible(&kind, self.quiet()) {
+        if !audible(&kind, self.muted()) {
             eprintln!("agent-speak: пропущено (тихо): {}", raw.chars().take(40).collect::<String>());
             return 0;
         }
@@ -1481,6 +1569,10 @@ impl State {
         if self.seen_mode.replace(mode).is_some_and(|m| m != mode) {
             eprintln!("agent-speak: присутствие: {mode:?}");
         }
+        if self.sync_quiet_why() {
+            self.purge(); // снимок присутствия устарел — показа больше нет
+            self.broadcast();
+        }
         self.speak_news(); // раньше окна ответа: новые новости встают перед ним, а не поверх
         // «Ты тут?» решён, разговор кончился и всё стихло — гарнитуру, включённую Омой, — обратно в музыку;
         // смена профиля роняет звук наушников: новость, начатая после «да», ушла бы в тишину
@@ -1514,7 +1606,7 @@ impl State {
                 }
             }
             Msg::Chime => {
-                if audible(&Kind::Voice, self.quiet()) {
+                if audible(&Kind::Voice, self.muted()) {
                     crate::audio::chime(&self.shared.sink.lock().unwrap()); // туда же, куда её голос
                 }
             }
@@ -1532,6 +1624,9 @@ impl State {
                 // пузырь орба — простой текст, как у пузырей агентов; чат окна разметку рисует и получает её как есть
                 if let Some(t) = line["bubble"]["text"].as_str() {
                     line["bubble"]["text"] = clean::mask_secrets(&clean::plain(t)).into();
+                    if self.quiet_why.screencast {
+                        private_bubble(&mut line["bubble"], None);
+                    }
                 }
                 self.broadcast_line(&format!("{line}\n"))
             }
@@ -1614,6 +1709,10 @@ impl State {
         let back = self.presence.apply(f, now);
         self.on_back(back);
         self.route();
+        if self.sync_quiet_why() {
+            self.purge();
+            self.broadcast();
+        }
     }
 
     /// Поток режима наушников ответил: гарнитура готова — можно спрашивать; включилась после вопроса — вернуть потом.
@@ -1963,6 +2062,8 @@ mod tests {
             viewing: String::new(),
             welcome: false,
             night_keep: false,
+            quiet_why: QuietWhy::default(),
+            quiet_over: false,
             facts_src: Box::new(|| None), // снимка нет — как без сервиса присутствия
             speakers: "speakers".into(),
             default_sink: String::new(),
@@ -4427,6 +4528,159 @@ mod tests {
         st.on_digest(dg("t", Ask::Final, false, "Тесты зелёные."));
         st.tick();
         assert_eq!(texts(&st), ["плуг: Тесты зелёные."]);
+    }
+
+    // --- тишина по причине: показ экрана ---
+
+    /// Пользователь тут; экран показывают (show) или нет — снимок присутствия в момент t.
+    fn sharing(st: &mut State, t: u64, show: bool) {
+        snap(st, serde_json::json!({"at": t, "idle_since": 0, "screencast": show}));
+    }
+
+    fn status_json(st: &State) -> serde_json::Value {
+        serde_json::from_str(&st.status_line()).unwrap()
+    }
+
+    #[test]
+    fn screencast_mutes_voice_and_news_keeps_board() {
+        let (mut st, _now) = presence_state(1000);
+        sharing(&mut st, 1000, true);
+        let line = status_json(&st);
+        assert_eq!((line["quiet"].as_bool(), line["quiet_why"].as_str()), (Some(false), Some("screencast")), "тихий режим — свой, причина — отдельно");
+        assert_eq!((line["screencast_privacy"].as_bool(), line["hush_summary"].as_bool(), line["dnd_quiet"].as_bool()), (Some(true), Some(true), Some(false)));
+        st.on_msg(Msg::Voice { text: "Ответ Омы здесь.".into() });
+        final_s(&mut st);
+        question(&mut st, "t", true, "Удалить старый код?");
+        st.tick();
+        assert!(texts(&st).is_empty(), "при показе — ни новостей, ни её голоса");
+        assert_eq!(st.board.finals(), 1, "новости копятся на доске");
+        st.on_msg(Msg::Say { text: "Так звучит этот голос.".into() });
+        assert_eq!(texts(&st), ["Так звучит этот голос."], "образец голоса — как в тихом режиме");
+    }
+
+    #[test]
+    fn screencast_start_drops_queued_news() {
+        let (mut st, _now) = presence_state(1000);
+        sharing(&mut st, 1000, false);
+        st.hold(true); // Ома говорит — новость ждёт в очереди
+        st.enqueue(Agent::Claude, "news", "Фича готова.", Kind::News);
+        sharing(&mut st, 1001, true);
+        assert!(st.shared.queue.lock().unwrap().is_empty(), "начался показ — ждущая новость не прозвучит поверх него");
+    }
+
+    #[test]
+    fn screencast_end_speaks_one_summary() {
+        let (mut st, now) = presence_state(1000);
+        sharing(&mut st, 1000, true);
+        final_s(&mut st);
+        question(&mut st, "t", true, "Удалить старый код?");
+        st.tick();
+        *now.lock().unwrap() = 1030;
+        sharing(&mut st, 1030, false);
+        st.tick();
+        assert_eq!(texts(&st), ["Пока было тихо: один проект закончил, один ждёт ответа."]);
+        assert!(st.board.is_empty(), "посчитанное снято с доски, вопрос — тоже: агент остаётся красным в орбе и окне");
+        assert!(st.listen_after.is_some(), "после фразы — окно ответа, как после новостей");
+        final_s(&mut st);
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."], "сводка одна");
+    }
+
+    #[test]
+    fn nothing_kept_nothing_said() {
+        let (mut st, now) = presence_state(1000);
+        sharing(&mut st, 1000, true);
+        *now.lock().unwrap() = 1030;
+        sharing(&mut st, 1030, false);
+        st.tick();
+        assert!(texts(&st).is_empty() && !st.quiet_over, "ничего не копилось — Ома молчит, сводка не ждёт следующих новостей");
+    }
+
+    #[test]
+    fn summary_waits_for_every_reason() {
+        let (mut st, now) = presence_state(1000);
+        st.quiet_why.dnd = true; // «Не беспокоить» ждёт сигнала Omarchy; правило набора причин — то же
+        sharing(&mut st, 1000, true);
+        final_s(&mut st);
+        *now.lock().unwrap() = 1030;
+        sharing(&mut st, 1030, false);
+        st.tick();
+        assert!(texts(&st).is_empty(), "показ кончился, а вторая причина ещё стоит");
+        assert_eq!(status_json(&st)["quiet_why"], "dnd");
+        st.quiet_why.dnd = false;
+        st.tick();
+        assert_eq!(texts(&st), ["Пока было тихо: один проект закончил."]);
+    }
+
+    #[test]
+    fn quiet_end_without_summary_keeps_only_questions() {
+        let (mut st, now) = presence_state(1000);
+        st.cfg.hush_summary = false;
+        sharing(&mut st, 1000, true);
+        final_s(&mut st);
+        question(&mut st, "t", true, "Удалить старый код?");
+        *now.lock().unwrap() = 1030;
+        sharing(&mut st, 1030, false);
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Удалить старый код?"], "итоги выброшены, как после тишины; вопрос звучит");
+    }
+
+    #[test]
+    fn away_at_quiet_end_gets_the_welcome_only() {
+        let (mut st, now) = presence_state(1000);
+        sharing(&mut st, 1000, true);
+        final_s(&mut st);
+        *now.lock().unwrap() = 1700;
+        snap(&mut st, serde_json::json!({"at": 1700, "idle_since": 1000})); // показ кончился, а его нет на месте
+        st.tick();
+        assert!(texts(&st).is_empty());
+        *now.lock().unwrap() = 1800;
+        snap(&mut st, serde_json::json!({"at": 1800, "idle_since": 0}));
+        st.tick();
+        assert_eq!(texts(&st), GREETING);
+        final_s(&mut st);
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."], "приветствие покрыло сводку — второй нет");
+    }
+
+    #[test]
+    fn stale_snapshot_ends_screencast() {
+        let (mut st, now) = presence_state(1000);
+        sharing(&mut st, 1000, true);
+        *now.lock().unwrap() = 1001 + presence::STALE_AFTER;
+        st.tick();
+        assert_eq!(status_json(&st)["quiet_why"], "", "сервис присутствия упал — фактов нет, Ома как раньше");
+    }
+
+    #[test]
+    fn screencast_privacy_off_changes_nothing() {
+        let (mut st, _now) = presence_state(1000);
+        st.cfg.screencast_privacy = false;
+        sharing(&mut st, 1000, true);
+        final_s(&mut st);
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."]);
+        st.cfg.screencast_privacy = true; // включили на ходу — тихо сразу, без нового снимка
+        st.apply();
+        assert_eq!(status_json(&st)["quiet_why"], "screencast");
+    }
+
+    #[test]
+    fn screencast_bubbles_show_only_project_and_kind() {
+        let (mut st, _now) = presence_state(1000);
+        let mut r = sub(&mut st);
+        sharing(&mut st, 1000, true);
+        question(&mut st, "s", true, "Нужен доступ к базе клиентов, дать?");
+        final_s(&mut st);
+        for (kind, who) in [("oma", "Ома"), ("me", "Ты"), ("draft", "Ты")] {
+            st.on_msg(Msg::Emit { line: serde_json::json!({"bubble": {"id": kind, "who": who, "text": "Тесты прошли", "kind": kind, "append": true}}) });
+        }
+        let seen: Vec<(String, String, bool)> = bubbles(&mut r)
+            .iter()
+            .map(|b| (b["who"].as_str().unwrap().into(), b["text"].as_str().unwrap().into(), b["append"].as_bool().unwrap()))
+            .collect();
+        let want = [("s", "вопрос"), ("s", "готово"), ("Ома", "ответ в окне"), ("Ты", "реплика"), ("Ты", "…")];
+        assert_eq!(seen, want.map(|(w, t)| (w.to_string(), t.to_string(), false)), "у агента — папка проекта, а не заголовок сессии");
     }
 
     // --- возвращение ---

@@ -28,13 +28,17 @@ pub struct Config {
     pub hung_after: u64,
     /// процент лимита, с которого Ома считает прогноз и подсказывает агентам
     pub limit_threshold: u64,
+    /// пока экран показывают — Ома молчит, а пузыри только «проект: вопрос», без текста
+    pub screencast_privacy: bool,
+    /// кончилась тишина по причине (показ экрана) — одна фраза кодом о накопленном: «Пока было тихо: …»
+    pub hush_summary: bool,
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config { speaker: "xenia".into(), rate: "medium".into(),
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: true, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
-            orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95 }
+            orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95, screencast_privacy: true, hush_summary: true }
     }
 }
 
@@ -104,6 +108,8 @@ impl Config {
             "watch_every" if in_range(value, 15, 3600) => self.watch_every = value.as_u64().unwrap(),
             "hung_after" if in_range(value, 2, 240) => self.hung_after = value.as_u64().unwrap(),
             "limit_threshold" if in_range(value, 50, 100) => self.limit_threshold = value.as_u64().unwrap(),
+            "screencast_privacy" if value.is_boolean() => self.screencast_privacy = value.as_bool().unwrap(),
+            "hush_summary" if value.is_boolean() => self.hush_summary = value.as_bool().unwrap(),
             _ => return false,
         }
         true
@@ -212,6 +218,17 @@ mod tests {
         assert!(!c.set("progress_digest", &json!("true")));
         assert!(c.orb_over_fullscreen && c.set("orb_over_fullscreen", &json!(false)) && !c.orb_over_fullscreen);
         assert!(!c.set("orb_corner", &json!("top-left")));
+    }
+
+    #[test]
+    fn quiet_by_reason_switches_default_on() {
+        use serde_json::json;
+        let old = parse("speaker = \"baya\"").unwrap();
+        assert!(old.screencast_privacy && old.hush_summary, "старый файл без ключей — включены");
+        let mut c = Config::default();
+        assert!(c.set("screencast_privacy", &json!(false)) && !c.screencast_privacy);
+        assert!(c.set("hush_summary", &json!(false)) && !c.hush_summary);
+        assert!(!c.set("hush_summary", &json!("false")) && !c.set("dnd_quiet", &json!(true)), "«Не беспокоить» ждёт сигнала Omarchy — настройки нет");
     }
 
     #[test]
