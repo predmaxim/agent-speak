@@ -308,7 +308,7 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, rotor: &mut Rotor, ctx: &C
                     *limit_said = Some(key);
                     let v = rotor.next(phrases::LIMIT);
                     let text = e.resets_at.map_or(v.replace(", сброс в {t}", ""), |r| v.replace("{t}", &clock(r)));
-                    return say("limit", Class::Restore, "", text);
+                    return say("limit", Class::Now, "", text); // лимит кончился — работа стоит: сразу, не в пачке
                 }
             }
             "server_error" => {
@@ -765,7 +765,7 @@ mod tests {
         let five: Vec<Facts> = (0..5).map(|i| Facts { state: State::Idle, active_at: 100, error: err.clone(), ..f(&format!("a{i}")) }).collect();
         let says = w.check(&ctx(110, 0), five.clone(), |_| true, |_| false);
         assert_eq!(says.len(), 1, "{says:?}");
-        assert!(matches!(&says[0], Act::Say { session, class: Class::Restore, project, text } if session == "limit" && project.is_empty() && text.starts_with("Кончился лимит Claude, сброс в ")));
+        assert!(matches!(&says[0], Act::Say { session, class: Class::Now, project, text } if session == "limit" && project.is_empty() && text.starts_with("Кончился лимит Claude, сброс в ")));
         assert!(w.health("a0").starts_with("лимит до "));
         assert!(w.check(&ctx(5030, 0), five.clone(), |_| true, |_| false).is_empty(), "сброс + 60 с ещё не настал");
         let wakes = w.check(&ctx(5061, 0), five.clone(), |_| true, |_| false);

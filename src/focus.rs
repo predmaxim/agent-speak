@@ -147,7 +147,7 @@ fn codex_under(win: u32) -> Vec<(u32, SessionRef)> {
 pub fn bring(pid: u32) -> Result<(), String> {
     let pane = crate::mux::locate(pid);
     let clients = crate::mux::run(Command::new("hyprctl").args(["clients", "-j"]), HYPRCTL_TIMEOUT)?;
-    let win = app_window(&clients, |w| under(pid, w), |w| crate::mux::in_app_window(w, pid));
+    let win = app_window(&clients, pid, ppid, |w| crate::mux::in_app_window(w, pid));
     show_steps(pane.as_ref(), win.as_deref(), crate::mux::focus, raise)
 }
 
@@ -156,8 +156,21 @@ pub fn bring(pid: u32) -> Result<(), String> {
 /// shortcut: второе — первое окно с подстрокой «orca»/«herdr» в командной строке (терминал с такой папкой в аргументах
 /// стоит раньше — поднимется он), а окна однопроцессного терминала (foot --server) — предки всем его агентам, и берётся
 /// первое; станет мешать — спрашивать у мультиплексора окно его терминала.
-fn app_window(clients: &str, holds: impl Fn(u32) -> bool, app: impl Fn(u32) -> bool) -> Option<String> {
-    window_of(clients, holds).or_else(|| window_of(clients, app))
+fn app_window(clients: &str, pid: u32, parent: impl Fn(u32) -> Option<u32>, app: impl Fn(u32) -> bool) -> Option<String> {
+    nearest_window(clients, pid, parent).or_else(|| window_of(clients, app))
+}
+
+/// Окно агента — ближайший к нему предок, у которого есть окно (идём вверх от агента): Orca, запущенная из терминала, —
+/// это окно Orca, а не терминал, хотя предки агента оба.
+fn nearest_window(clients: &str, pid: u32, parent: impl Fn(u32) -> Option<u32>) -> Option<String> {
+    let mut p = pid;
+    while p > 1 {
+        if let Some(w) = window_of(clients, |w| w == p) {
+            return Some(w);
+        }
+        p = parent(p)?;
+    }
+    None
 }
 
 const HYPRCTL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -244,11 +257,14 @@ mod tests {
 
     #[test]
     fn the_window_holding_the_agent_before_one_named_like_its_app() {
-        // терминал с «orca» в аргументах стоит в списке раньше окна Orca, чей процесс держит pty-хост агента
+        // терминал (10) запустил Orca (20), её pty-хост (25) держит агента (30): оба окна — предки агента, первым в списке
+        // стоит терминал, а вперёд должна выйти Orca — ближайший к агенту предок с окном
         let clients = r#"[{"address":"0x1","pid":10},{"address":"0x2","pid":20}]"#;
-        assert_eq!(app_window(clients, |w| w == 20, |w| w == 10 || w == 20).as_deref(), Some("0x2"), "предок агента — не первое по имени");
-        assert_eq!(app_window(clients, |_| false, |w| w == 10 || w == 20).as_deref(), Some("0x1"), "pty-хост не под окном — по имени приложения");
-        assert_eq!(app_window(clients, |_| false, |_| false), None);
+        let tree = |p: u32| match p { 30 => Some(25), 25 => Some(20), 20 => Some(10), 10 => Some(1), _ => None };
+        assert_eq!(app_window(clients, 30, tree, |w| w == 10 || w == 20).as_deref(), Some("0x2"), "ближайший предок, а не первый в списке");
+        let apart = |p: u32| match p { 30 => Some(5), 5 => Some(1), _ => None };
+        assert_eq!(app_window(clients, 30, apart, |w| w == 10 || w == 20).as_deref(), Some("0x1"), "pty-хост не под окном — по имени приложения");
+        assert_eq!(app_window(clients, 30, apart, |_| false), None);
     }
 
     #[test]

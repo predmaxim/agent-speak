@@ -71,7 +71,8 @@ pub struct Live {
 
 /// Хук PostToolUseFailure: вызов инструмента агента не смог отработать. Не в счёт: прерванный пользователем
 /// (is_interrupt), вызов сабагента (agent_id — у него свой ход) и ненулевой код Bash («Exit code N»: команда
-/// отработала и ответила — ls, grep, красный прогон TDD; проба волны 0 — такой приходит сбоем).
+/// отработала и ответила — ls, grep, красный прогон TDD; проба волны 0 — такой приходит сбоем). Формат описан в доках хуков:
+/// «For Bash … first line `Exit code N`» (code.claude.com/docs/en/hooks, PostToolUseFailure; проверено 2026-11-11).
 pub fn tool_failed(p: &Value) -> bool {
     let bash_answered = p["tool_name"] == "Bash" && p["error"].as_str().is_some_and(|e| e.starts_with("Exit code "));
     p["is_interrupt"] != true && p["agent_id"].as_str().is_none_or(str::is_empty) && !bash_answered
