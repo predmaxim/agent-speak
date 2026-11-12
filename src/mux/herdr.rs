@@ -145,11 +145,13 @@ fn composer_text(ansi: &str) -> String {
     joined.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Строка с управляющими последовательностями → (весь текст, только буквы не dim и не в инверсии). CSI — до конечного
-/// байта `@`…`~`, OSC (`ESC ]`, ссылки) — до BEL или `ESC \`, их содержимое — не текст.
+/// Строка с управляющими последовательностями → (весь текст, только набранное: буквы не dim; буква в инверсии — курсор —
+/// набранная, если за ней не dim: так Claude Code рисует первую букву заглушки). CSI — до конечного байта `@`…`~`, OSC
+/// (`ESC ]`, ссылки) — до BEL или `ESC \`, их содержимое — не текст.
 fn strip(line: &str) -> (String, String) {
     let (mut all, mut typed) = (String::new(), String::new());
     let (mut dim, mut inverse) = (false, false);
+    let mut cursor: Option<char> = None; // буква в инверсии: чья она — решит следующая буква
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
@@ -198,8 +200,16 @@ fn strip(line: &str) -> (String, String) {
             continue;
         }
         all.push(c);
-        typed.push(if dim || inverse { ' ' } else { c });
+        if let Some(k) = cursor.take() {
+            typed.push(if dim { ' ' } else { k });
+        }
+        match (dim, inverse) {
+            (true, _) => typed.push(' '),
+            (false, true) => cursor = Some(c),
+            (false, false) => typed.push(c),
+        }
     }
+    typed.extend(cursor);
     (all, typed)
 }
 
@@ -286,6 +296,10 @@ mod tests {
         // (`m(t[0])+we.dim(t.slice(1))`); вживую в herdr не снята — у проб подсказки не было
         assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[7mп\x1b[0m\x1b[2mродолжай\x1b[22m\r"])), "");
         assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[7mп\x1b[27m\x1b[2;38;2;129;131;135mродолжай\x1b[0m\r"])), "");
+        // курсор внутри набранного и на единственной букве — буква набранная
+        assert_eq!(composer_text(&screen(&["❯\u{a0}печ\x1b[7mа\x1b[0mтаю\r"])), "печатаю");
+        assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[7mд\x1b[0m\r"])), "д");
+        assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[38;5;2mзелёный\x1b[0m \x1b[1;2mтусклый\x1b[0m\r"])), "зелёный", "38;5;2 — цвет, не dim; 1;2 — dim");
         let menu = " Do you want to proceed?\r\n ❯ 1. Yes\r\n   2. No\r\n Esc to cancel";
         assert_eq!(composer_text(menu), "", "меню — поля нет");
         assert_eq!(composer_text(&format!("{frame}\n ❯ 1. Yes\n{frame}")), "1. Yes", "рамки с «❯» внутри — поле; меню рамками «────» не обводится");
