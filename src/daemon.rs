@@ -918,10 +918,12 @@ impl State {
         self.route();
     }
 
-    /// Новому подписчику — строка состояния, затем строка агентов.
+    /// Новому подписчику — строка состояния, строка агентов, затем списки карточек разрешений и отложенных поручений
+    /// (волна 4 дизайна «Джарвис»; пока их нет — пустые: протокол подписки тот же, что будет).
     fn subscribe(&mut self, mut s: UnixStream) {
         let _ = s.set_write_timeout(Some(Duration::from_millis(100))); // зависший подписчик не держит цикл
-        if s.write_all((self.status_line() + &self.registry.line()).as_bytes()).is_ok() {
+        let lists = "{\"permissions\":[]}\n{\"later\":[]}\n";
+        if s.write_all((self.status_line() + &self.registry.line() + lists).as_bytes()).is_ok() {
             self.subs.push(s);
         }
     }
@@ -2396,8 +2398,7 @@ mod tests {
         let (ours, theirs) = UnixStream::pair().unwrap();
         let mut r = reader(ours);
         st.subscribe(theirs);
-        assert_eq!(next(&mut r)["oma"], "off");
-        next(&mut r); // строка агентов
+        assert_eq!(hello(&mut r)["oma"], "off");
         st.on_msg(Msg::VoiceState { state: "thinking".into(), talking: true });
         let s = next(&mut r);
         assert_eq!((s["oma"].as_str(), s["talking"].as_bool()), (Some("thinking"), Some(true)));
@@ -2517,8 +2518,7 @@ mod tests {
     fn emit_broadcast_verbatim() {
         let mut st = test_state();
         let mut r = sub(&mut st);
-        next(&mut r);
-        next(&mut r);
+        hello(&mut r);
         st.on_msg(Msg::Emit { line: serde_json::json!({"chat": {"key": "new", "messages": []}}) });
         assert_eq!(next(&mut r)["chat"]["key"], "new");
         // пузырь орба рисуется простым текстом: звёздочки markdown из ответа мозга ему не нужны; чат окна — с разметкой
@@ -2563,8 +2563,7 @@ mod tests {
         let (ours, theirs) = UnixStream::pair().unwrap();
         let mut r = reader(ours);
         st.subscribe(theirs);
-        assert_eq!(next(&mut r)["paused"], false);
-        next(&mut r); // строка агентов
+        assert_eq!(hello(&mut r)["paused"], false);
         st.on_msg(Msg::Pause);
         assert_eq!(next(&mut r)["paused"], true);
         st.shared.set_busy(Some("s"));
@@ -2585,8 +2584,7 @@ mod tests {
         drop(dead);
         st.on_msg(Msg::Stop);
         assert_eq!(st.subs.len(), 1);
-        next(&mut r); // при подписке
-        next(&mut r); // строка агентов
+        hello(&mut r);
         next(&mut r); // после стопа
     }
 
@@ -2616,8 +2614,7 @@ mod tests {
         st.cfg.quiet_override = "on".into(); // тишина: звука нет — Busy строку состояния не пришлёт
         with_agents(&mut st, &["s2"]);
         let mut r = sub(&mut st);
-        next(&mut r);
-        next(&mut r);
+        hello(&mut r);
         let waiting = |r: &mut BufReader<UnixStream>| -> Vec<u64> {
             drain(r).into_iter().filter(|v| v.get("running").is_some()).map(|v| v["waiting"].as_u64().unwrap()).collect()
         };
@@ -2685,8 +2682,7 @@ mod tests {
         let (ours, theirs) = UnixStream::pair().unwrap();
         let mut r = reader(ours);
         st.subscribe(theirs);
-        next(&mut r);
-        next(&mut r); // строка агентов
+        hello(&mut r);
         st.on_msg(Msg::Set { key: "speaker".into(), value: serde_json::json!("baya") });
         assert_eq!(next(&mut r)["speaker"], "baya");
         assert_eq!(st.shared.voice.lock().unwrap().0, "baya");
@@ -3161,6 +3157,15 @@ mod tests {
         let (a, b) = UnixStream::pair().unwrap();
         st.subscribe(a);
         reader(b)
+    }
+
+    /// Приветствие подписки — строка состояния, агенты, разрешения, отложенные; отдаёт строку состояния.
+    fn hello(r: &mut BufReader<UnixStream>) -> serde_json::Value {
+        let st = next(r);
+        for _ in 0..3 {
+            next(r);
+        }
+        st
     }
 
     /// Все строки до таймаута чтения.
@@ -3717,6 +3722,9 @@ mod tests {
         let mut r = sub(&mut st);
         assert_eq!(next(&mut r)["running"], true);
         assert_eq!(next(&mut r)["agents"][0]["title"], "T-s1");
+        // списки волны «Джарвис» — карточки разрешений и отложенные поручения: пока их нет, пустые
+        assert_eq!(next(&mut r), serde_json::json!({"permissions": []}));
+        assert_eq!(next(&mut r), serde_json::json!({"later": []}));
     }
 
     #[test]

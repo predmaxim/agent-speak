@@ -21,11 +21,12 @@ function parseLine(line) {
   try { s = JSON.parse(line) } catch (e) { return null }
   if (!s || typeof s !== "object") return null
   if (typeof s.running === "boolean") return { type: "state", value: s }
-  var types = ["agents", "bubble", "chat", "chat_delta", "chats"]
+  var types = ["agents", "bubble", "chat", "chat_delta", "chats", "ripple", "permissions", "later"]
+  var lists = ["agents", "chats", "permissions", "later"]
   for (var i = 0; i < types.length; i++)
     if (s[types[i]] !== undefined) {
       var v = s[types[i]]
-      if ((types[i] === "agents" || types[i] === "chats") && !Array.isArray(v)) v = []
+      if (lists.indexOf(types[i]) >= 0 && !Array.isArray(v)) v = []
       return { type: types[i], value: v }
     }
   return null

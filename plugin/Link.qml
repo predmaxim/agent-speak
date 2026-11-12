@@ -4,9 +4,10 @@ import Quickshell.Io
 import "Model.js" as Model
 
 // The connection to agent-speakd: subscribes on connect and keeps the latest
-// state line in `speech` and the agent list in `agents`; bubbles and chats
-// come as signals; commands go out with send(). No daemon (or it restarted) —
-// `speech` is Model.OFFLINE and a retry runs every 5 s.
+// state line in `speech`, the agent list in `agents`, the permission cards in
+// `permissions` and the deferred orders in `later`; bubbles, chats and the
+// orb's ripples come as signals; commands go out with send(). No daemon (or it
+// restarted) — `speech` is Model.OFFLINE and a retry runs every 5 s.
 Item {
   id: link
 
@@ -16,8 +17,11 @@ Item {
   signal chat(var c)
   signal chatDelta(var d)
   signal chats(var list)
+  signal ripple(var r)   // {tone: "final" | "question" | "status"}: news came, Oma does not say it now
 
   property var agents: []
+  property var permissions: []
+  property var later: []
   property bool up: false      // the live socket is connected
   property int attempt: 0      // a failed Socket never reconnects, so each retry builds a new one
 
@@ -49,7 +53,15 @@ Item {
   }
 
   visible: false
-  onWantedChanged: if (!wanted) { up = false; speech = Model.OFFLINE; agents = [] }
+  onWantedChanged: if (!wanted) { up = false; forget() }
+
+  // No daemon: nothing it said holds.
+  function forget() {
+    speech = Model.OFFLINE
+    agents = []
+    permissions = []
+    later = []
+  }
 
   Loader {
     id: sockLoader
@@ -67,7 +79,7 @@ Item {
       onConnectedChanged: {
         link.up = connected
         if (connected) { write(Model.cmd("subscribe")); flush() }
-        else { link.speech = Model.OFFLINE; link.agents = [] }
+        else link.forget()
       }
       parser: SplitParser {
         onRead: function(line) {
@@ -79,6 +91,9 @@ Item {
           else if (m.type === "chat") link.chat(m.value)
           else if (m.type === "chat_delta") link.chatDelta(m.value)
           else if (m.type === "chats") link.chats(m.value)
+          else if (m.type === "ripple") link.ripple(m.value)
+          else if (m.type === "permissions") link.permissions = m.value
+          else if (m.type === "later") link.later = m.value
         }
       }
     }
