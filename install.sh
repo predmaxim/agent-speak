@@ -23,10 +23,11 @@ sed -e "s|@BIN@|$HOME/.local/bin/agent-speak|" -e "s|@ICON@|$PWD/data/oma.svg|" 
 [[ -x $DATA/venv/bin/python ]] || python3 -m venv "$DATA/venv"
 "$DATA/venv/bin/pip" install -q -r python/requirements-torch.txt
 "$DATA/venv/bin/pip" install -q -r python/requirements-tts.txt
-[[ -f $DATA/v5_ru.pt ]] || {
-  curl -fsSL -o "$DATA/v5_ru.pt.tmp" https://models.silero.ai/models/tts/ru/v5_ru.pt &&
-    echo "7ba04d42340fe0398042eed2e0d12d62e23096d626b1b9feff4dcb1309197ab4  $DATA/v5_ru.pt.tmp" | sha256sum -c --quiet && mv "$DATA/v5_ru.pt.tmp" "$DATA/v5_ru.pt"
-} || { rm -f "$DATA/v5_ru.pt.tmp"; echo "модель Silero не скачалась или не та (sha256) — голоса не будет" >&2; exit 1; }
+# v5_6_ru: имя файла — константа MODEL в src/tts.rs; прежний v5_ru.pt не нужен, его можно удалить
+[[ -f $DATA/v5_6_ru.pt ]] || {
+  curl -fsSL -o "$DATA/v5_6_ru.pt.tmp" https://models.silero.ai/models/tts/ru/v5_6_ru.pt &&
+    echo "04cc9b1d08ce38bcaa9d02c488d80d3e6806d17f7eaa7c95982f36a3cbf50b2e  $DATA/v5_6_ru.pt.tmp" | sha256sum -c --quiet && mv "$DATA/v5_6_ru.pt.tmp" "$DATA/v5_6_ru.pt"
+} || { rm -f "$DATA/v5_6_ru.pt.tmp"; echo "модель Silero не скачалась или не та (sha256) — голоса не будет" >&2; exit 1; }
 
 # Голосовой разговор: отдельный venv на Python 3.12 (колёса faster-whisper/ctranslate2), whisper на GPU
 ln -sfn "$PWD/python/agent_voice" "$DATA/agent_voice"

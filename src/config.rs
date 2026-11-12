@@ -38,7 +38,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Config {
-        Config { speaker: "xenia".into(), rate: "medium".into(),
+        Config { speaker: "kseniya".into(), rate: "medium".into(),
             orb_satellites: true,
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: true, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
             orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95, screencast_privacy: true, hush_summary: true }
@@ -49,7 +49,7 @@ pub fn path() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/agent-speak/config.toml")
 }
 
-pub const SPEAKERS: [&str; 5] = ["xenia", "baya", "kseniya", "aidar", "eugene"];
+pub const SPEAKERS: [&str; 5] = ["kseniya", "xenia", "baya", "aidar", "eugene"];
 pub const RATES: [&str; 5] = ["x-slow", "slow", "medium", "fast", "x-fast"];
 pub const CORNERS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-right"];
 
@@ -262,7 +262,7 @@ mod tests {
     fn file_values_checked_like_set() {
         // hung_after = 0, вписанный руками, заставил бы сторожа жать Esc у всех работающих агентов
         let c = parse("hung_after = 0\nwatch_every = 1\nspeaker = \"nobody\"\nrate = \"fast\"\nquiet_from = \"25:00\"").unwrap();
-        assert_eq!((c.hung_after, c.watch_every, c.speaker.as_str(), c.rate.as_str(), c.quiet_from.as_str()), (12, 60, "xenia", "fast", "23:00"));
+        assert_eq!((c.hung_after, c.watch_every, c.speaker.as_str(), c.rate.as_str(), c.quiet_from.as_str()), (12, 60, "kseniya", "fast", "23:00"));
         assert!(parse("hung_after = ").is_err(), "битый файл — ошибка, а не умолчания");
         let good = Config { speaker: "baya".into(), hung_after: 30, ..Config::default() };
         let back = parse(&toml::to_string(&good).unwrap()).unwrap();

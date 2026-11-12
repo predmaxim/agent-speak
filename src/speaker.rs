@@ -581,7 +581,7 @@ mod tests {
         let mut tts = Tts::new(
             data.join("venv/bin/python"),
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/silero_tts.py"),
-            data.join("v5_ru.pt"),
+            data.join(crate::tts::MODEL),
             sock.clone(),
         );
         tts.synth("Проверка связи.", "xenia", "medium").unwrap(); // модель загружена и прогрета

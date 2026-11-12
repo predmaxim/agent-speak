@@ -72,6 +72,13 @@ mod tests {
     }
 
     #[test]
+    fn prepare_drops_every_asterisk() {
+        // в Silero v5_6 «*» включает фокус, а непарная «**» — ValueError: фраза молча пропала бы
+        let (s, _) = prepare("**Готово** *важно* a * b, ** хвост *", &Terms::from_str(""));
+        assert!(!s.is_empty() && s.iter().all(|x| !x.contains('*')), "{s:?}");
+    }
+
+    #[test]
     fn prepare_plus_is_not_stress() {
         let (s, _) = prepare("Стало +5 строк на C++, ударе\u{301}ние на месте.", &Terms::from_str(""));
         assert_eq!(s, vec!["Стало плюс пять строк на си плюс плюс, удар+ение на месте."]);

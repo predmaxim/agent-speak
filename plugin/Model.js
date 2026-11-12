@@ -3,7 +3,7 @@
 // agent-speakd's lines -> what the orb and the window show, and the
 // command lines the plugin writes to the daemon's socket.
 
-var SAMPLE = "Так звучит этот голос."
+var SAMPLE = "Так звучит этот голос. Слышно, что я спрашиваю?"
 
 // No connection to the daemon: the status-line fields, empty, in the line's order (struct Status, test.js checks).
 var OFFLINE = { running: false, speaking: false, paused: false, speaker: "", rate: "", project: "",
@@ -308,7 +308,7 @@ function say(text) {
 // The window's selectors. Values are exactly what the daemon's `set` accepts;
 // sample: play SAMPLE after the choice, to compare by ear.
 function sections(tr) {
-  var voices = ["xenia", "baya", "kseniya", "aidar", "eugene"]
+  var voices = ["kseniya", "xenia", "baya", "aidar", "eugene"] // как SPEAKERS в src/config.rs: умолчание первым
   return [
     { key: "speaker", caption: tr("VOICE"), sample: true,
       options: voices.map(function(v) { return { value: v, label: v.charAt(0).toUpperCase() + v.slice(1) } }) },
