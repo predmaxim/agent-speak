@@ -356,8 +356,8 @@ class Conversation:
         if self._echoing(at) and (self.audio_busy or self.state == "speaking"):
             self.started = n  # её голос или перебив — решит распознанный текст: обрывать её по эху нельзя
             return []
-        if self.window and not self.window["first"]:
-            return []  # на окно уже ответили: дальше — не Оме, её ответ не обрывать
+        if self.window and not self.window["first"] and not self.window.get("asked"):
+            return []  # на окно уже ответили: дальше — не Оме, её ответ не обрывать; ответ на её вопрос подтверждения — Оме
         if self.turn and self.state == "thinking" and not self.audio_busy:
             self.started = self.held = n  # кашель, пока она думает, не обрывает ответ: перебив решит текст (phrase)
             return [("draft", self.draft, True)]
