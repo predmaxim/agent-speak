@@ -344,7 +344,8 @@ class Oma:
             self.bg(asyncio.to_thread(memory.switched, ev[1]))
         elif kind == "mic":
             self.ear.paused = ev[1]  # микрофон пишет другой (voxtype и т. п.) — кадры не слушаем
-            await self.act(c.mic_busy(ev[1]))
+            # в покое (слух на имя) — только слух: окно ответа открывается, как раньше, и уже на паузе
+            await self.act(c.mic_busy(ev[1]) if c.active else [])
         elif kind == "mic_check":  # MicWatch: событие pactl — проверить захват и mute
             self.ear.mic_pending = False
             self.mic_now = await mic_poll(self, self.events, self.mic_now)
@@ -517,6 +518,8 @@ class Oma:
                 if a[1]:
                     await self.ear.start()
                     self.conv.echo = getattr(self.ear, "echo", False)  # в динамиках её голос просачивается в слух
+                    if self.conv.mic != self.mic_now:  # слух на имя уже знал: mute или чужая запись — разговор на паузе
+                        await self._act(self.conv.mic_busy(self.mic_now))
                     if not self.whisper.ready:  # от батареи: грузится по первому включению слуха
                         self.warm()
                 elif self._wake_ready():  # конец разговора — слух снова слушает имя

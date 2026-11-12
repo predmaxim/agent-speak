@@ -210,6 +210,12 @@ class Ear:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)  # до reap: дочитывать stdout, пока его ждёт _read, нельзя
         await reap(proc, aec, sub)
+        await self._closed()
+
+    async def _closed(self):
+        """Слух закрыт — для Омы микрофон свободен (как прежний опрос без pw-record): последняя проверка, MicWatch нет."""
+        if self._watch_cmd:
+            await self._mic_check()
 
     async def _recognize(self, phrases):  # отдельно: распознавание не задерживает чтение микрофона (перебивание)
         while True:
@@ -307,3 +313,4 @@ class Ear:
             for t in tasks:
                 t.cancel()
             await reap(proc, aec, sub)
+            await self._closed()

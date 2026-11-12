@@ -289,6 +289,7 @@ class Conversation:
         acts = self._stop_turn() + self._drop()
         self.quiet_at = None
         self.window = None
+        self.mic = False  # занятость микрофона — для разговора: следующий узнает её заново (Oma.mic_now)
         if self.active:
             self.active = False
             acts.append(("ear", False))

@@ -325,6 +325,44 @@ def test_oma_conversation_end_goes_back_to_the_name(monkeypatch):
     run(go())
 
 
+def test_mute_while_she_hears_her_name_does_not_close_are_you_there(monkeypatch):
+    # mute в покое: слух на имя глохнет (кадры выбрасываются), а окно «Ты тут?» открывается, как без побудки, — на паузе,
+    # с перечёркнутым микрофоном; разговор кончился на паузе — следующее окно не отказывает
+    m, sent, ears, oma = _woke_oma(monkeypatch)
+    monkeypatch.setattr(m, "mic_outputs", lambda: [])
+    monkeypatch.setattr(m, "muted", lambda t: True)
+
+    async def go():
+        await oma.command({"do": "wake", "on": True})
+        await oma.event(("mic_check",))
+        await oma.event(oma.events.get_nowait())  # ("mic", True)
+        assert oma.ear.paused and not oma.conv.mic and not oma.conv.active
+        await oma.command({"do": "listen", "secs": 20, "kind": "here", "said": "Эй, ты тут?"})
+        assert oma.conv.active and oma.conv.state == "paused", "окно открыто, но на паузе: микрофон выключен"
+        await oma.command({"do": "talk"})  # конец разговора
+        assert not oma.conv.active and not oma.conv.mic
+        await oma.command({"do": "listen", "secs": 5, "kind": "news", "said": "Новости."})
+        assert oma.conv.active, "окно ответа не застревает на прошлой занятости"
+    monkeypatch.setattr(m, "locked", lambda: False)
+    run(go())
+
+
+def test_ear_close_rechecks_the_mic_as_free():
+    # слух закрыт — микрофон для Омы свободен, как раньше по опросу: проверка в очереди, MicWatch уже нет
+    from agent_voice.ear import Ear
+    out = asyncio.Queue()
+    e = Ear(out, Whisper(load=lambda: "m"), cmd=LIVE, vad_load=lambda: None, mic=lambda: ("", False, ""), muted=lambda t: False,
+            watch=["sh", "-c", "sleep 60"])
+
+    async def go():
+        await e.start()
+        assert await asyncio.wait_for(out.get(), 5) == ("mic_check",)
+        e.mic_pending = False  # так её снимает Ома
+        await e.stop()
+        assert out.get_nowait() == ("mic_check",) and e.pid is None
+    run(go())
+
+
 def test_oma_name_alone_listens_with_a_chime_and_name_with_a_question_takes_the_phrase(monkeypatch):
     m, sent, ears, oma = _woke_oma(monkeypatch)
 
