@@ -289,15 +289,18 @@ PanelWindow {
 
     BorderSurface {
       id: tipCard
-      implicitWidth: tipColumn.implicitWidth + 20
-      implicitHeight: tipColumn.implicitHeight + 14
+      implicitWidth: tipColumn.implicitWidth + contentLeftInset + contentRightInset
+      implicitHeight: tipColumn.implicitHeight + contentTopInset + contentBottomInset
       color: Color.tooltip.background
       borderSpec: Border.surfaceSpec("tooltip", "border", Color.tooltip.border, 1)
+      // шире стоковой подсказки (controlPadding 10/6): у карточки строки агентов, и текст лип к рамке
+      padding: Style.spacing.xxxl
       radius: Style.cornerRadius
 
       Column {
         id: tipColumn
-        anchors.centerIn: parent
+        x: tipCard.contentLeftInset
+        y: tipCard.contentTopInset
         spacing: Style.space(6)
 
         Text {

@@ -1,5 +1,5 @@
 //! Ответы и задания агентам от Омы: как передать (текстом или клавишами меню), куда, запуск нового агента.
-//! Зовёт Ома через CLI `agent-speak tell | menu | launch | projects`: исход нужен её мозгу сразу. tell исполняет служба в своём
+//! Зовёт Ома через CLI `agent-speak tell | draft | menu | launch | projects`: исход нужен её мозгу сразу. tell и draft исполняет служба в своём
 //! потоке действий, в одной очереди с действиями сторожа: две записи в одну панель не перемешаются.
 
 use crate::mux::{self, Key, Step};
@@ -12,10 +12,11 @@ const MENU_PAUSE: u64 = 500;
 const DECLINE_PAUSE: u64 = 1500;
 const PLAN_FEEDBACK: &str = "Tell Claude what to change";
 
-/// Одной строкой: Enter внутри текста отправил бы задание по частям (Orca, поле меню).
+/// Одной строкой: Enter внутри текста отправил бы задание по частям (Orca, поле меню). Управляющие символы — тоже
+/// разрывы: без `--enter` Orca пишет текст в PTY как есть (`orca terminal send --help`), и `\x03` прервал бы агента.
 // shortcut: структура длинного задания теряется; начнут путаться — проверить многострочную вставку в Orca
 pub fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    text.split(|c: char| c.is_whitespace() || c.is_control()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
 fn digit(n: usize) -> Result<Step, String> {
@@ -170,16 +171,46 @@ const NO_PLAN_MENU: &str = "не вижу меню одобрения плана
 const TYPE_SOMETHING: &str = "Type something.";
 const CHAT_ABOUT: &str = "Chat about this";
 
+/// Терминал живого агента session и его вызов в полёте; why — конец отказа, если терминала нет.
+fn target(session: &str, why: &str) -> Result<(mux::Pane, Option<Value>), String> {
+    let live = crate::agents::scan_all().into_iter().find(|l| l.id == session).ok_or("агента нет среди живых")?;
+    let pane = pane_of(&live, why)?;
+    // у Codex меню не разбираем — всегда текст
+    let call = if live.agent == "claude" { claude::in_flight(&tail_of(&live.transcript.to_string_lossy(), |t| claude::has_record(t, false))) } else { None };
+    Ok((pane, call))
+}
+
 /// Передать агенту session текст или пункт меню (expect — его метка, пусто — не сверять); Ok — метка нажатого пункта.
 /// Зовётся из потока действий службы (`mux::Work::Other`): чтение экрана, сверка и нажатие — без чужих записей между ними.
 pub fn tell(session: &str, option: usize, text: &str, expect: &str) -> Result<String, String> {
-    let live = crate::agents::scan_all().into_iter().find(|l| l.id == session).ok_or("агента нет среди живых")?;
-    let pane = pane_of(&live, "передать не могу")?;
-    // у Codex меню не разбираем — всегда текст
-    let call = if live.agent == "claude" { claude::in_flight(&tail_of(&live.transcript.to_string_lossy(), |t| claude::has_record(t, false))) } else { None };
+    let (pane, call) = target(session, "передать не могу")?;
     let (steps, chosen) = steps(call.as_ref(), &one_line(text), option, expect, || mux::screen(&pane))?;
     mux::perform(&pane, &steps)?;
     Ok(chosen)
+}
+
+const DRAFT_MENU: &str = "агент ждёт выбора в меню — черновик туда не вставить, ответь в терминале";
+
+/// Черновик: текст в поле ввода без Enter и без Ctrl+U — отправит пользователь сам, недонабранное им не стирается.
+/// Агент ждёт в меню (вопрос, план, разрешение) — отказ: поля ввода там нет, а буквы и цифры выбирали бы пункты.
+/// Экран и вердикт терминала (waits) — всегда: у Codex вызова в полёте нет, у Claude он ложится в транскрипт не сразу,
+/// а подтверждения, которое у tell защищает от ослышки, у черновика нет. Не прочитались — отказ, не пишем вслепую.
+/// Вердикт — последним, ближе всего к вводу: меню Codex видно только по нему.
+// shortcut: меню, открывшееся между проверкой и вводом (~0,5 с), не поймать; станет бить — терминал с атомарным «введи, если не ждёт»
+fn draft_steps(call: Option<&Value>, text: &str, waits: impl FnOnce() -> Result<bool, String>, screen: impl FnOnce() -> Result<String, String>) -> Result<Vec<Step>, String> {
+    let text = text.trim();
+    match call.and_then(|c| c["name"].as_str()) {
+        _ if text.is_empty() => Err("пустой текст".into()),
+        Some("AskUserQuestion" | "ExitPlanMode") => Err(DRAFT_MENU.into()),
+        _ if menu_on(&screen()?) || waits()? => Err(DRAFT_MENU.into()),
+        _ => Ok(vec![Step::Type(text.into())]),
+    }
+}
+
+/// Вставить текст в поле ввода агента session, не отправляя (`agent-speak draft`): в том же потоке действий, что tell.
+pub fn draft(session: &str, text: &str) -> Result<(), String> {
+    let (pane, call) = target(session, "черновик не вставить")?;
+    mux::perform(&pane, &draft_steps(call.as_ref(), &one_line(text), || mux::waits(&pane), || mux::screen(&pane))?)
 }
 
 /// Мультиплексор по имени: orca или herdr.
@@ -359,11 +390,33 @@ mod tests {
     #[test]
     fn task_text_is_one_line() {
         assert_eq!(one_line("Сделай так:\n1. тесты\n\n2. доки  "), "Сделай так: 1. тесты 2. доки");
+        assert_eq!(one_line("стоп\x03 и\x1b[A дальше\x04"), "стоп и [A дальше", "Ctrl+C, Esc, Ctrl+D в PTY не уходят");
+    }
+
+    #[test]
+    fn draft_is_typed_without_enter_and_not_into_a_menu() {
+        let free = || Ok(false);
+        let prompt = || Ok("✻ Running…\n❯ \n  ⏵⏵ auto mode on".to_string());
+        // ни Ctrl+U (недонабранное пользователем остаётся), ни Enter (отправит он сам)
+        assert_eq!(draft_steps(None, " займись тестами ", free, prompt).unwrap(), [Step::Type("займись тестами".into())]);
+        let bash = json!({"name": "Bash", "input": {"command": "cargo test"}});
+        assert_eq!(draft_steps(Some(&bash), "займись тестами", free, prompt).unwrap(), [Step::Type("займись тестами".into())], "агент работает — черновик ждёт в поле");
+        let permission = || Ok(" Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again\n   3. No".to_string());
+        assert_eq!(draft_steps(Some(&bash), "нет", free, permission), Err(DRAFT_MENU.into()), "в меню буквы и цифры выбирали бы пункты");
+        assert_eq!(draft_steps(None, "нет", free, permission), Err(DRAFT_MENU.into()), "вызова в транскрипте ещё нет, а меню уже на экране");
+        assert_eq!(draft_steps(None, "add tests", || Ok(true), prompt), Err(DRAFT_MENU.into()), "терминал знает, что агент ждёт (Codex): экран не важен");
+        assert!(draft_steps(None, "дальше", free, no_screen).is_err(), "экран не прочитан — не пишем вслепую");
+        assert!(draft_steps(None, "дальше", || Err("таймаут".into()), prompt).is_err(), "вердикт терминала не получен — тоже");
+        assert_eq!(draft_steps(Some(&ask(2, false)), "зелёный", free, no_screen), Err(DRAFT_MENU.into()));
+        let plan = json!({"name": "ExitPlanMode", "input": {"plan": "создать файл"}});
+        assert_eq!(draft_steps(Some(&plan), "правки", free, no_screen), Err(DRAFT_MENU.into()));
+        assert!(draft_steps(None, " ", free, prompt).is_err());
     }
 
     #[test]
     fn tell_unknown_session_is_error() {
         assert!(tell("нет-такой-сессии", 0, "привет", "").unwrap_err().contains("нет среди живых"));
         assert!(menu_of("нет-такой-сессии").unwrap_err().contains("нет среди живых"));
+        assert!(draft("нет-такой-сессии", "привет").unwrap_err().contains("нет среди живых"));
     }
 }

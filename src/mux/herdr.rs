@@ -32,6 +32,9 @@ impl Mux for Herdr {
     fn type_text(&self, pane: &Pane, text: &str) -> Result<(), String> {
         ok(&cli(herdr(pane, &["pane", "send-text", &pane.id, text]))?)
     }
+    fn waits(&self, pane: &Pane) -> Result<bool, String> {
+        blocked(&cli(herdr(pane, &["pane", "get", &pane.id]))?)
+    }
     fn shown(&self, envs: &[&HashMap<String, String>]) -> Vec<Option<bool>> {
         // список панелей — один на сессию herdr (сокет), а не на каждого агента
         let mut lists: HashMap<String, Option<String>> = HashMap::new();
@@ -120,6 +123,18 @@ fn focused_pane(out: &str) -> Option<String> {
     panes.iter().find(|p| p["focused"] == true)?["pane_id"].as_str().map(str::to_string)
 }
 
+/// Ответ `pane get`: агент панели ждёт ввода — `blocked`, тот же признак, по которому herdr не пускает `agent prompt`;
+/// `unknown` (herdr агента не распознал) и мусор — ошибка: «не знаю» за «не ждёт» не выдаём.
+fn blocked(out: &str) -> Result<bool, String> {
+    ok(out)?;
+    let v: Value = serde_json::from_str(out.trim()).map_err(|_| out.chars().take(200).collect::<String>())?;
+    match v["result"]["pane"]["agent_status"].as_str() {
+        Some("blocked") => Ok(true),
+        Some("idle" | "working" | "done") => Ok(false),
+        _ => Err("herdr не знает, ждёт ли агент ввода".into()),
+    }
+}
+
 /// Отказ `agent prompt` — повод послать текст командой; агент в диалоге (agent_blocked) — нет: Enter выбрал бы пункт.
 fn as_command(err: &str) -> bool {
     !err.contains("blocked")
@@ -173,6 +188,18 @@ mod tests {
     fn blocked_agent_gets_no_command_fallback() {
         assert!(!as_command("agent w1:p1 is blocked and requires interactive input"), "текст с Enter в диалог — выбор пункта");
         assert!(as_command("agent target w1:p1 not found"), "herdr не распознал агента — команда в оболочку");
+    }
+
+    #[test]
+    fn blocked_pane_reply() {
+        // так отвечает herdr 0.9.5 на pane get
+        let get = |s: &str| format!(r#"{{"id":"cli:pane:get","result":{{"pane":{{"agent_status":"{s}","pane_id":"w5:p1"}},"type":"pane_info"}}}}"#);
+        assert_eq!(blocked(&get("blocked")), Ok(true));
+        assert_eq!(blocked(&get("idle")), Ok(false));
+        assert_eq!(blocked(&get("working")), Ok(false));
+        assert!(blocked(&get("unknown")).is_err(), "herdr агента не распознал — не «не ждёт»");
+        assert!(blocked(r#"{"error":{"code":"pane_not_found","message":"pane w5:p1 not found"}}"#).unwrap_err().contains("not found"));
+        assert!(blocked("мусор").is_err());
     }
 
     #[test]

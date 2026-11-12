@@ -1581,9 +1581,9 @@ def test_prompt_character_rules():
     assert "одна фраза до 15 слов" not in p
     # спор не ослабляет поручения: настоял — tell, а подтверждение «да, передай» спрашивает код
     assert "«Нет, гони так.» → tell; инструмент ответил, что подтверждение уже спрошено, → «[молчу]»" in p
-    # двенадцать примеров, прежние четыре — на месте
+    # тринадцать примеров (13-й — черновик), прежние четыре — на месте
     examples = p[p.index("Примеры:\n"):p.index("Состояние агентов")]
-    assert examples.count("\n«") == 12
+    assert examples.count("\n«") == 13
     for q in ("«Тесты прошли?» → «Да.»", "«Почта закончила?» → «Нет, ещё правит тесты.»", "«Как дела у агентов?»",
               "«Что делает агент спика?» → «Чинит эхо в слухе.»"):
         assert q in p
@@ -1774,14 +1774,52 @@ class FakeOrders:
     def __init__(self):
         self.told, self.voiced = [], False
 
-    async def tell(self, entry, text, gist, option=0):
-        self.told.append((entry["id"], text, gist, option))
+    async def tell(self, entry, text, gist, option=0, draft=False):
+        self.told.append((entry["id"], text, gist, option) + ((True,) if draft else ()))
         return "Передано"
 
 
 def _tool(name, entries, orders):
     from agent_voice import brain
     return next(t for t in brain.oma_tools(lambda: entries, None, orders) if t.name == name)
+
+
+def test_draft_is_typed_without_asking_even_by_voice():
+    # черновик ничего не отправляет — «да, передай» не нужно, и опасное слово в нём не повод спрашивать
+    o, calls = _orders()
+    o.turn(True, "напиши почте, чтобы запушила, но не отправляй")
+    r = run(o.tell(E[0], "Запушь изменения", "запушить", draft=True))
+    assert calls == [("draft", "s1", "Запушь изменения")] and o.pending is None and not o.tripped
+    assert r.startswith("Вставлено в поле ввода omarchy-mail, не отправлено") and "«Написала omarchy-mail, отправишь сам»" in r
+
+
+def test_draft_refuses_menu_option_chat_and_asked_turn():
+    o, calls = _orders()
+    o.turn(True, "выбери второй вариант, но не отправляй")
+    assert run(o.tell(E[0], "", "второй", option=2, draft=True)).startswith("Не вставлено: черновик — только текст") and not calls
+    r = run(o.tell(dict(E[0], chat=True), "Проверь логи", "логи", draft=True))
+    assert "в чат Orca передать не могу" in r and not calls, "у чата Orca поля ввода через CLI нет"
+    o, calls = _orders()
+    o.turn(True, "передай почте: прогони тесты, и ещё напиши, но не отправляй")
+    run(o.tell(E[0], "Прогони тесты", "тесты"))  # спросило «да, передай»
+    r = run(o.tell(E[0], "Потом обнови доки", "доки", draft=True))
+    assert r.startswith("Не вставлено: поручение уже ждёт") and calls == [], "«нет» на вопрос не снял бы текст из поля"
+    o, _ = _orders(ok=False, out="агент ждёт выбора в меню — черновик туда не вставить, ответь в терминале")
+    assert "ответь в терминале" in run(o.tell(E[0], "Привет", "привет", draft=True))
+
+
+def test_tell_tool_passes_draft_and_prompt_names_it():
+    from agent_voice import brain
+    o = FakeOrders()
+    tool = _tool("tell", E, o)
+    run(tool.handler({"agent": "s1", "text": "Прогони тесты", "gist": "тесты", "draft": True}))
+    run(tool.handler({"agent": "s1", "text": "Прогони тесты", "gist": "тесты"}))
+    run(tool.handler({"agent": "s1", "text": "Прогони тесты", "gist": "тесты", "draft": "True"}))
+    run(tool.handler({"agent": "s1", "text": "Прогони тесты", "gist": "тесты", "draft": False}))
+    run(tool.handler({"agent": "s1", "text": "Прогони тесты", "gist": "тесты", "draft": "yes"}))
+    d, t = ("s1", "Прогони тесты", "тесты", 0, True), ("s1", "Прогони тесты", "тесты", 0)
+    assert o.told == [d, t, d, t, d], "по умолчанию и явное false — отправить; любое другое — черновик, он ничего не шлёт"
+    assert "draft" in tool.input_schema["properties"] and "draft=true" in brain.OMA_PROMPT and "«я отправлю сам»" in brain.OMA_PROMPT
 
 
 def test_tell_refuses_ambiguous_agent():

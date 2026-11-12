@@ -49,6 +49,10 @@ fn main() {
             });
             return done(told.map(|chosen| if !chosen.is_empty() { println!("{chosen}") }));
         }
+        // черновик: текст в поле ввода агента без Enter, отправит пользователь; через ту же очередь действий службы
+        Some("draft") if args.len() == 3 => {
+            return done(ipc::request(&Msg::Draft { session: args[1].clone(), text: args[2].clone() }).map(|_| ()));
+        }
         // агента — на экран (вкладка Orca или панель herdr и окно); next или без аргумента — следующий ждущий по кругу.
         // В терминал ничего не пишется. Зовёт сама Ома (AGENT_SPEAK от службы) — исход скажет она, пузыря службы не нужно
         Some("show") if args.len() <= 2 => {
@@ -129,7 +133,7 @@ fn main() {
             Msg::Hook { kind, payload: serde_json::from_str(&raw).unwrap_or_default() }
         }
         _ => {
-            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | set <ключ> <значение> | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | menu <session> | show [<session>|next] | launch <path> <text> [orca|herdr] | projects [orca|herdr] | note <text> | later tell|checks|cancel|list …");
+            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | set <ключ> <значение> | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | draft <session> <text> | menu <session> | show [<session>|next] | launch <path> <text> [orca|herdr] | projects [orca|herdr] | note <text> | later tell|checks|cancel|list …");
             std::process::exit(2);
         }
     };

@@ -40,6 +40,9 @@ impl Mux for Orca {
         let out = cli(orca(pane, &["read", "--screen"]))?;
         screen_text(&out).ok_or_else(|| error_of(&out))
     }
+    fn waits(&self, pane: &Pane) -> Result<bool, String> {
+        agent_waits(&cli(orca(pane, &["show"]))?)
+    }
     fn shown(&self, envs: &[&HashMap<String, String>]) -> Vec<Option<bool>> {
         // открытую вкладку Orca хранит в своей базе (обновляет за секунду); CLI её не знает, а стоит полсекунды процессора;
         // запрос один на всех агентов окна, а не на каждого
@@ -147,6 +150,21 @@ pub fn accepted(out: &str) -> Result<(), String> {
     if v["ok"] == true && v["result"]["send"]["accepted"] == true { Ok(()) } else { Err(error_of(out)) }
 }
 
+/// Ответ `terminal show`: `agentWait` — вердикт Orca «агент ждёт ввода» (вопрос на экране, заголовок «permission», хук
+/// агента; Orca 1.4.256, `getTerminalInteractiveWait`): объект — ждёт, null — не ждёт; поля нет — Orca не решила
+/// (сбой, проверка хука дольше 2 с) — ошибка: «не знаю» за «не ждёт» не выдаём.
+fn agent_waits(out: &str) -> Result<bool, String> {
+    let v: Value = serde_json::from_str(out).map_err(|_| error_of(out))?;
+    if v["ok"] != true {
+        return Err(error_of(out));
+    }
+    match &v["result"]["terminal"]["agentWait"] {
+        Value::Null if v["result"]["terminal"].get("agentWait").is_some() => Ok(false),
+        Value::Object(_) => Ok(true),
+        _ => Err("Orca не знает, ждёт ли агент ввода".into()),
+    }
+}
+
 /// Ответ `terminal read --screen`: строки экрана.
 pub fn screen_text(out: &str) -> Option<String> {
     let v: Value = serde_json::from_str(out).ok()?;
@@ -172,6 +190,14 @@ mod tests {
         assert!(accepted(r#"{"ok":true,"result":{"send":{"accepted":false}}}"#).is_err());
         assert_eq!(screen_text(r#"{"ok":true,"result":{"terminal":{"tail":["a","b"]}}}"#).unwrap(), "a\nb");
         assert_eq!(screen_text("мусор"), None);
+    }
+
+    #[test]
+    fn agent_wait_from_terminal_show() {
+        assert_eq!(agent_waits(r#"{"ok":true,"result":{"terminal":{"handle":"t","agentWait":{"source":"title"}}}}"#), Ok(true));
+        assert_eq!(agent_waits(r#"{"ok":true,"result":{"terminal":{"handle":"t","agentWait":null}}}"#), Ok(false));
+        assert!(agent_waits(r#"{"ok":true,"result":{"terminal":{"handle":"t"}}}"#).is_err(), "поля нет — Orca не решила: не «не ждёт»");
+        assert!(agent_waits(r#"{"ok":false,"error":{"message":"terminal_not_found"}}"#).unwrap_err().contains("terminal_not_found"));
     }
 
     #[test]
