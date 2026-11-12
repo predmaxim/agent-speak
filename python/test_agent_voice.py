@@ -3,7 +3,7 @@ import sys, os, time
 sys.path.insert(0, os.path.dirname(__file__))
 from agent_voice.segment import Segmenter
 from agent_voice.chunker import Chunker
-from agent_voice.conversation import Conversation, SEND_PAUSE, SILENCE_END, WINDOW_END, is_ack, is_yes
+from agent_voice.conversation import Conversation, FILLERS, SEND_PAUSE, SILENCE_END, WINDOW_END, is_ack, is_yes
 
 
 def feed(seg, probs):
@@ -2184,6 +2184,18 @@ def test_tool_call_says_what_she_does():
     assert ("say", "Читаю переписку агента.") in cv.tool("mcp__oma__agent_tail"), "каждый инструмент — своё слово"
     assert cv.tool("thinking") == [], "раздумье после сказанного — без слова"
     assert cv.tool("mcp__oma__presence") == []
+
+
+def test_tool_filler_goes_round_in_order():
+    # одно слово на каждый вызов утомляет: варианты по кругу, по порядку (не случайно); Read, Glob и Grep — один круг
+    cv = _thinking("что в файлах")
+    got = []
+    for name in ("Read", "Glob", "Grep", "Read", "mcp__oma__agents", "Nope"):
+        got += [a[1] for a in cv.tool(name) if a[0] == "say"]
+        cv.audio(True)
+        cv.audio(False)
+    assert got == ["Смотрю файлы.", "Гляну в файлы.", "Ищу в файлах.", "Смотрю файлы.", "Смотрю агентов.", "Секунду."]
+    assert all(len(v) in (0, 3) for v in FILLERS.values())
 
 
 def test_order_filler_does_not_claim_delivery():
