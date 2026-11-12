@@ -1762,6 +1762,31 @@ def test_typed_order_needs_no_confirmation():
     assert oma.orders.voiced is True
 
 
+def test_talk_with_key_talks_to_that_agent():
+    # orb-address A: удержание спутника — разговор с этим агентом без имени. Слух сразу, мозг и окно — в его чат
+    # (was "*": по нему орб обводит точку), claude прогревается; не выход в общий чат, как у клика. Удержание, пока она
+    # уже слушает, разговор не кончает (клик кончил бы), а переводит. Сказанное там — голосом: поручение ждёт «да, передай»
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    chats = lambda: [e["line"]["chat"] for e in emitted if "chat" in e["line"]]
+
+    async def go():
+        await oma.command({"do": "talk", "key": "agent:a1"})
+        await settle(oma)
+        assert oma.ear.open and oma.conv.state == "listening" and oma.brain.warmed
+        assert oma.brain.key == "agent:a1" and chats()[-1] == {"key": "agent:a1", "was": "*", "messages": []}
+        await oma.command({"do": "talk", "key": "agent:a2"})
+        await settle(oma)
+        assert oma.ear.open and oma.conv.state == "listening", "удержание не кончает разговор"
+        assert oma.brain.key == "agent:a2" and chats()[-1]["key"] == "agent:a2"
+        await oma.command({"do": "talk", "key": "agent:a2"})  # тот же агент — разговор идёт в его чате дальше
+        await settle(oma)
+        assert oma.ear.open and oma.brain.key == "agent:a2" and chats()[-1] == {"key": "agent:a2", "was": "*", "messages": []}
+    run(go())
+    _voice(oma, clk, "скажи ему да", 1)
+    assert oma.brain.texts[-1] == "скажи ему да" and oma.orders.voiced is True
+
+
 def test_oma_confirmation_skips_brain():
     sent, emitted = [], []
     clk, oma = _oma(sent, emitted)
