@@ -1,5 +1,6 @@
 //! Доска новостей Омы: что говорить следующим — срочное сторожа, восстановление, вопросы по одному, итоги, промежуточное.
 
+use crate::phrases::{self, Rotor};
 use crate::text::plural;
 
 /// Порядок вариантов — приоритет.
@@ -33,20 +34,23 @@ pub struct Board {
     items: Vec<News>,
     asked: Option<(News, u64)>, // (вопрос, когда озвучен) — на него ждём ответ
     spoken: Vec<(News, u64)>,   // сказанное не наверняка: вернётся на доску, если пользователь не слышал
+    rotor: Rotor,               // хвост «после этого ещё N» — по кругу
 }
 
 impl Board {
     /// Новость той же сессии и класса заменяет прежнюю: старое уже неактуально.
     /// Итог заменяет и промежуточное своей сессии: иначе оно прозвучало бы после итога.
-    /// Одинаковые фразы сторожа разных проектов склеиваются: «A, B: лимит сброшен — разбудила агента».
+    /// Одинаковые фразы сторожа разных проектов склеиваются: «A, B: разбудила агента: лимит сброшен» — и разными
+    /// вариантами одной фразы (phrases::canon): склейка берёт вариант первой.
     pub fn push(&mut self, n: News) {
         let superseded = |c: Class| c == n.class || (n.class == Class::Final && c == Class::Progress);
         self.items.retain(|i| !(i.session == n.session && superseded(i.class)));
         if matches!(n.class, Class::Urgent | Class::Restore) {
             if let Some((proj, rest)) = n.say.split_once(": ") {
-                if let Some(i) = self.items.iter_mut().find(|i| i.class == n.class && i.say.split_once(": ").is_some_and(|(_, r)| r == rest)) {
-                    let (old, _) = i.say.split_once(": ").unwrap();
-                    i.say = format!("{old}, {proj}: {rest}");
+                let key = phrases::canon(rest);
+                if let Some(i) = self.items.iter_mut().find(|i| i.class == n.class && i.say.split_once(": ").is_some_and(|(_, r)| phrases::canon(r) == key)) {
+                    let (old, said) = i.say.split_once(": ").unwrap();
+                    i.say = format!("{old}, {proj}: {said}");
                     return;
                 }
             }
@@ -102,7 +106,7 @@ impl Board {
                 let q = qs.remove(0);
                 self.asked = Some((q.clone(), now));
                 if !qs.is_empty() {
-                    more = Some(more_questions(qs.len()));
+                    more = Some(self.rotor.next(phrases::MORE).replace("{n}", &questions(qs.len())));
                 }
                 self.items.extend(qs);
                 taken.push(q);
@@ -165,8 +169,8 @@ impl Board {
         }
     }
 
-    /// «Пока тебя не было: …» — по счётчикам доски; пусто — None.
-    pub fn overview(&self) -> Option<String> {
+    /// «Пока тебя не было: …» — по счётчикам доски; prefix — начало фразы; пусто — None.
+    pub fn overview(&self, prefix: &str) -> Option<String> {
         let mut done: Vec<&str> = self.items.iter().filter(|i| i.class == Class::Final).map(|i| i.session.as_str()).collect();
         done.sort_unstable();
         done.dedup();
@@ -178,7 +182,7 @@ impl Board {
         if w > 0 {
             parts.push(format!("{w} {} ответа", plural(w, ["ждёт", "ждут", "ждут"])));
         }
-        if parts.is_empty() { None } else { Some(format!("Пока тебя не было: {}.", parts.join(", "))) }
+        if parts.is_empty() { None } else { Some(format!("{prefix}: {}.", parts.join(", "))) }
     }
 
     /// Только срочное — пока пользователь занят; в журнал: не услышал — повторится по возвращении.
@@ -219,10 +223,10 @@ impl Board {
     }
 }
 
-/// «После этого ещё N вопрос(а/ов)» с русским склонением.
-pub fn more_questions(n: usize) -> String {
+/// «один вопрос», «2 вопроса», «5 вопросов» — для хвоста phrases::MORE.
+fn questions(n: usize) -> String {
     let word = plural(n, ["вопрос", "вопроса", "вопросов"]);
-    if n == 1 { format!("После этого ещё один {word}.") } else { format!("После этого ещё {n} {word}.") }
+    if n == 1 { format!("один {word}") } else { format!("{n} {word}") }
 }
 
 #[cfg(test)]
@@ -284,7 +288,7 @@ mod tests {
         b.push(n("b", Class::Question, "B?", 2));
         assert_eq!(sp(&mut b, 1100).unwrap(), "A? После этого ещё один вопрос.");
         b.returned(1000, true);
-        assert_eq!(b.take(5000, None).unwrap(), "A? После этого ещё один вопрос."); // A вернулась, B ещё на доске
+        assert_eq!(b.take(5000, None).unwrap(), "A? Дальше ещё один вопрос."); // A вернулась, B ещё на доске; хвост — следующий по кругу
         b.answered("b");
         b.unask();
         assert_eq!(b.take(5001, None).unwrap(), "A?");
@@ -377,15 +381,15 @@ mod tests {
     #[test]
     fn overview_counts_and_plurals() {
         let mut b = Board::default();
-        assert_eq!(b.overview(), None);
+        assert_eq!(b.overview("Пока тебя не было"), None);
         b.push(n("a", Class::Final, "x", 1));
-        assert_eq!(b.overview().unwrap(), "Пока тебя не было: 1 проект закончил.");
+        assert_eq!(b.overview("Пока тебя не было").unwrap(), "Пока тебя не было: 1 проект закончил.");
         b.push(n("b", Class::Final, "x", 1));
         b.push(n("q", Class::Question, "Q?", 1));
-        assert_eq!(b.overview().unwrap(), "Пока тебя не было: 2 проекта закончили, 1 ждёт ответа.");
+        assert_eq!(b.overview("Пока тебя не было").unwrap(), "Пока тебя не было: 2 проекта закончили, 1 ждёт ответа.");
         for s in ["c", "d", "e"] { b.push(n(s, Class::Final, "x", 1)); }
         b.push(n("r", Class::Question, "R?", 1));
-        assert_eq!(b.overview().unwrap(), "Пока тебя не было: 5 проектов закончили, 2 ждут ответа.");
+        assert_eq!(b.overview("Пока тебя не было").unwrap(), "Пока тебя не было: 5 проектов закончили, 2 ждут ответа.");
         assert_eq!(b.finals(), 5);
     }
 
@@ -412,9 +416,14 @@ mod tests {
         b.push(n("y", Class::Question, "Y?", 2));
         b.push(n("x", Class::Question, "X?", 1));
         b.push(n("z", Class::Question, "Z?", 3));
-        assert_eq!(b.take(10, None).unwrap(), "X? После этого ещё 2 вопроса.");
+        b.push(n("w", Class::Question, "W?", 4));
+        assert_eq!(b.take(10, None).unwrap(), "X? После этого ещё 3 вопроса.");
         b.answered("x");
-        assert_eq!(b.take(11, None).unwrap(), "Y? После этого ещё один вопрос.");
+        assert_eq!(b.take(11, None).unwrap(), "Y? Дальше ещё 2 вопроса.", "хвост — по кругу, по порядку");
+        b.answered("y");
+        assert_eq!(b.take(12, None).unwrap(), "Z? В очереди ещё один вопрос.");
+        b.answered("z");
+        assert_eq!(b.take(13, None).unwrap(), "W?");
     }
 
     #[test]
@@ -478,13 +487,13 @@ mod tests {
     }
 
     #[test]
-    fn more_questions_plural() {
-        assert_eq!(more_questions(1), "После этого ещё один вопрос.");
-        assert_eq!(more_questions(2), "После этого ещё 2 вопроса.");
-        assert_eq!(more_questions(5), "После этого ещё 5 вопросов.");
-        assert_eq!(more_questions(11), "После этого ещё 11 вопросов.");
-        assert_eq!(more_questions(21), "После этого ещё 21 вопрос.");
-        assert_eq!(more_questions(22), "После этого ещё 22 вопроса.");
+    fn questions_plural() {
+        assert_eq!(questions(1), "один вопрос");
+        assert_eq!(questions(2), "2 вопроса");
+        assert_eq!(questions(5), "5 вопросов");
+        assert_eq!(questions(11), "11 вопросов");
+        assert_eq!(questions(21), "21 вопрос");
+        assert_eq!(questions(22), "22 вопроса");
     }
 
     #[test]
@@ -530,5 +539,13 @@ mod tests {
         b.push(n("d", Class::Final, "D: готово.", 4));
         b.push(n("e", Class::Final, "E: готово.", 5));
         assert_eq!(b.take(10, None).unwrap(), "A, B: лимит сброшен — разбудила агента. C: оборвалась связь — попросила агента продолжить. D: готово. E: готово.");
+        // сторож крутит варианты: у каждого проекта свой, а новость одна — первым выпавшим вариантом
+        b.push(n("a", Class::Restore, "A: перезапустила зависшего агента.", 11));
+        b.push(n("b", Class::Restore, "B: агент висел — перезапустила.", 12));
+        b.push(n("c", Class::Urgent, "C: связь с Claude не держится — загляни, пожалуйста.", 13));
+        b.push(n("d", Class::Urgent, "D: связь с Claude не держится — нужна твоя помощь.", 14));
+        b.push(n("e", Class::Urgent, "E: API отказал — нужен вход в Claude.", 15));
+        b.push(n("f", Class::Urgent, "F: ошибка API — запрос отклонён.", 16));
+        assert_eq!(b.take(20, None).unwrap(), "C, D: связь с Claude не держится — загляни, пожалуйста. E: API отказал — нужен вход в Claude. F: ошибка API — запрос отклонён. A, B: перезапустила зависшего агента.");
     }
 }

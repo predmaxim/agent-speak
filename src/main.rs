@@ -12,6 +12,7 @@ mod news;
 mod mux;
 mod notice;
 mod orders;
+mod phrases;
 mod presence;
 mod queue;
 mod source;
