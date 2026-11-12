@@ -383,12 +383,20 @@ function sections(tr) {
 // A new setting goes into its section's rows and into Window.qml at the same place (test.js checks);
 // a section's header is drawn once it has rows.
 var SETTINGS_SECTIONS = [
-  { title: "", rows: ["speaker", "rate"] },
+  { title: "", rows: ["speaker", "rate", "intonation", "earcons"] },
   { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours", "screencast_privacy", "hush_summary"] },
   { title: "Hearing", rows: ["music_pause"] },
   { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites", "orb_moods", "orb_idle_motion"] },
-  { title: "Agents", rows: ["agents_voice", "progress_digest", "memory", "memory_page", "limit_warn"] }
+  { title: "Agents", rows: ["agents_voice", "progress_digest", "news_every", "memory", "memory_page", "limit_warn"] }
 ]
+
+// «Results aloud at most every»: minutes between batches of finished turns (news_every); 0 — each at once, no batch.
+var NEWS_EVERY = [0, 2, 5, 10, 15, 30]
+
+// Its dropdown's options: the stock Dropdown keeps values as strings.
+function newsEvery(tr) {
+  return NEWS_EVERY.map(function(v) { return { value: String(v), label: v ? tr("%1 min", v) : tr("No limit") } })
+}
 
 // The rows in that order: a row's place on the page (the key cursor) is its index here.
 var SETTINGS_ROWS = [].concat.apply([], SETTINGS_SECTIONS.map(function(s) { return s.rows }))
@@ -407,6 +415,11 @@ function settingStep(row, st, dx) {
   if (row === "music_pause") return { key: row, value: !st.music_pause, sample: false }
   if (row === "limit_warn") return { key: row, value: !st.limit_warn, sample: false }
   if (row === "memory") return { key: row, value: !st.memory, sample: false }
+  if (row === "intonation" || row === "earcons") return { key: row, value: !st[row], sample: false }
+  if (row === "news_every") {
+    var k = NEWS_EVERY.length, j = NEWS_EVERY.indexOf(st.news_every)
+    return { key: row, value: NEWS_EVERY[j < 0 ? 0 : ((j + dx) % k + k) % k], sample: false }
+  }
   var sec = sections(function(t) { return t }).filter(function(x) { return x.key === row })[0]
   if (!sec) return null
   var values = sec.options.map(function(o) { return o.value })

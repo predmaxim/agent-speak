@@ -35,7 +35,9 @@ var TABLES = {
     "Watch agents": "Следить за агентами", "Oma is off": "Ома выключена", "Turn Oma on": "Включить Ому", "Turn Oma off": "Выключить Ому",
     "Turn sound off": "Выключить звук", "Turn sound on": "Включить звук", "Oma: sound off": "Ома: звук выключен",
     "Quiet: screen sharing": "Тихо: показ экрана", "Quiet: do not disturb": "Тихо: не беспокоить",
-    "Quiet and brief while sharing the screen": "При показе экрана — тихо и коротко", "Summary after quiet": "Сводка после тишины"
+    "Quiet and brief while sharing the screen": "При показе экрана — тихо и коротко", "Summary after quiet": "Сводка после тишины",
+    "Intonation by meaning": "Интонация по смыслу", "Sound cues": "Звуковые знаки",
+    "Results aloud at most every": "Итоги вслух не чаще", "No limit": "Без ограничения"
   }
 }
 

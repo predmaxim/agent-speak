@@ -1,5 +1,7 @@
-//! Доска новостей Омы: что говорить следующим — срочное сторожа, восстановление, вопросы по одному, итоги, промежуточное.
+//! Доска новостей Омы — полосы речи: СЕЙЧАС (срочное сторожа, «нужно» агента, вопросы по одному) звучит сразу;
+//! ДАЛЬШЕ (итоги ходов, «починила сама») — пачкой не чаще раза в `every`; промежуточного на доске нет: оно только в окне.
 
+use crate::audio::Cue;
 use crate::phrases::{self, Rotor};
 use crate::text::plural;
 
@@ -8,18 +10,79 @@ use crate::text::plural;
 pub enum Class {
     /// сторож: нужен пользователь — звучит и когда он «занят»
     Urgent,
+    /// агенту нужно сейчас (заметка агента, исход отложенного поручения): сразу, но не в «занят»; ответа не ждёт
+    Now,
     Restore,
     Question,
     Final,
-    Progress,
+}
+
+impl Class {
+    /// Звуковой знак перед новостью: вопрос, итог, нужна помощь; «починила сама» — без знака.
+    pub fn cue(self) -> Option<Cue> {
+        match self {
+            Class::Question | Class::Now => Some(Cue::Ask),
+            Class::Final => Some(Cue::Done),
+            Class::Urgent => Some(Cue::Help),
+            Class::Restore => None,
+        }
+    }
+
+    /// Интонация для адаптера синтеза (python/silero_tts.py `ssml`): вопрос выше, беда ниже и медленнее, итог быстрее.
+    pub fn tone(self) -> &'static str {
+        match self {
+            Class::Question | Class::Now => "ask",
+            Class::Urgent => "alarm",
+            Class::Final => "done",
+            Class::Restore => "",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct News {
     pub session: String,
     pub class: Class,
-    pub say: String, // уже с «проект: »
+    pub project: String, // "" — фраза без проекта (сводка, лимит)
+    pub say: String,     // без «проект: »
+    pub important: bool, // пользователю нужно решить или сделать: в пачке итогов звучит своей фразой, а не именем проекта
     pub born: u64,
+}
+
+impl News {
+    /// «проект: фраза», как новость звучит без интонации.
+    pub fn line(&self) -> String {
+        Chunk::of(self).line()
+    }
+}
+
+/// Кусок сказанного: класс новости (None — строки самой Омы), проект и текст — по ним речь ставит знак и интонацию.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chunk {
+    pub class: Option<Class>,
+    pub project: String, // "" — без «проект: » (сводка, склейка пачки, строки Омы)
+    pub text: String,
+}
+
+impl Chunk {
+    /// Строка самой Омы: без класса и проекта.
+    pub fn oma(text: impl Into<String>) -> Chunk {
+        Chunk { class: None, project: String::new(), text: text.into() }
+    }
+
+    fn of(n: &News) -> Chunk {
+        Chunk { class: Some(n.class), project: n.project.clone(), text: n.say.clone() }
+    }
+
+    /// «проект: текст», как кусок звучит без интонации.
+    pub fn line(&self) -> String {
+        if self.project.is_empty() { self.text.clone() } else { format!("{}: {}", self.project, self.text) }
+    }
+}
+
+/// Куски одной строкой — для окна ответа и журнала.
+pub fn line(chunks: &[Chunk]) -> String {
+    chunks.iter().map(Chunk::line).collect::<Vec<_>>().join(" ")
 }
 
 /// После озвученного вопроса итоги ждут ответа не дольше этого (с).
@@ -35,41 +98,40 @@ pub struct Board {
     asked: Option<(News, u64)>, // (вопрос, когда озвучен) — на него ждём ответ
     spoken: Vec<(News, u64)>,   // сказанное не наверняка: вернётся на доску, если пользователь не слышал
     rotor: Rotor,               // хвост «после этого ещё N» — по кругу
+    /// Итоги и «починила сама» звучат не чаще раза в столько секунд (`news_every`); 0 — без бюджета.
+    pub every: u64,
+    batch_at: Option<u64>, // когда прозвучала прошлая пачка; None — бюджет снят (запуск, долгое отсутствие)
 }
 
 impl Board {
     /// Новость той же сессии и класса заменяет прежнюю: старое уже неактуально.
-    /// Итог заменяет и промежуточное своей сессии: иначе оно прозвучало бы после итога.
     /// Одинаковые фразы сторожа разных проектов склеиваются: «A, B: разбудила агента: лимит сброшен» — и разными
     /// вариантами одной фразы (phrases::canon): склейка берёт вариант первой.
     pub fn push(&mut self, n: News) {
-        let superseded = |c: Class| c == n.class || (n.class == Class::Final && c == Class::Progress);
-        self.items.retain(|i| !(i.session == n.session && superseded(i.class)));
-        if matches!(n.class, Class::Urgent | Class::Restore) {
-            if let Some((proj, rest)) = n.say.split_once(": ") {
-                let key = phrases::canon(rest);
-                if let Some(i) = self.items.iter_mut().find(|i| i.class == n.class && i.say.split_once(": ").is_some_and(|(_, r)| phrases::canon(r) == key)) {
-                    let (old, said) = i.say.split_once(": ").unwrap();
-                    i.say = format!("{old}, {proj}: {said}");
-                    return;
-                }
+        self.items.retain(|i| !(i.session == n.session && i.class == n.class));
+        if matches!(n.class, Class::Urgent | Class::Restore) && !n.project.is_empty() {
+            let key = phrases::canon(&n.say);
+            if let Some(i) = self.items.iter_mut().find(|i| i.class == n.class && !i.project.is_empty() && phrases::canon(&i.say) == key) {
+                i.project = format!("{}, {}", i.project, n.project);
+                return;
             }
         }
         self.items.push(n);
     }
 
-    /// Пользователь ответил (хоть в терминале раньше Омы): ждать и спрашивать больше нечего.
+    /// Пользователь ответил (хоть в терминале раньше Омы): ждать и спрашивать больше нечего, и «нужно» агента снято.
     pub fn answered(&mut self, session: &str) {
         if self.asked.as_ref().is_some_and(|(q, _)| q.session == session) {
             self.asked = None;
         }
-        self.items.retain(|i| !(i.session == session && i.class == Class::Question));
-        self.spoken.retain(|(i, _)| !(i.session == session && i.class == Class::Question));
+        let asks = |i: &News| i.session == session && matches!(i.class, Class::Question | Class::Now);
+        self.items.retain(|i| !asks(i));
+        self.spoken.retain(|(i, _)| !asks(i));
     }
 
-    /// Новости закрытых агентов снимаются; сторожевые остаются: о закрывшемся агенте и надо сказать.
+    /// Новости закрытых агентов снимаются; сторожевые и «нужно» остаются: о закрывшемся агенте и надо сказать.
     pub fn retain_sessions(&mut self, alive: impl Fn(&str) -> bool) {
-        let keep = |i: &News| i.session == SUMMARY || matches!(i.class, Class::Urgent | Class::Restore) || alive(&i.session);
+        let keep = |i: &News| i.session == SUMMARY || matches!(i.class, Class::Urgent | Class::Restore | Class::Now) || alive(&i.session);
         self.items.retain(|i| keep(i));
         self.spoken.retain(|(i, _)| keep(i));
         // закрытый агент не ответит: итоги не ждут его ANSWER_WAIT
@@ -88,19 +150,21 @@ impl Board {
         self.items.retain(|i| keep.contains(&i.class));
     }
 
-    /// Фраза следующей пачки; взятое с доски снимается. skip — агент в фокусе: его итог и
-    /// промежуточное снимаются без речи, вопрос остаётся. Сказанное — в журнал: не услышал — повторится после возвращения.
-    pub fn take(&mut self, now: u64, skip: Option<&str>) -> Option<String> {
+    /// Куски следующей пачки; взятое с доски снимается, пусто — сказать нечего. skip — агент в фокусе: его итог
+    /// снимается без речи, вопрос остаётся. Сказанное — в журнал: не услышал — повторится после возвращения.
+    pub fn take(&mut self, now: u64, skip: Option<&str>) -> Vec<Chunk> {
         self.drop_focused(skip);
         let mut waiting = self.waiting(now);
         if !waiting {
             self.asked = None;
         }
-        let mut taken = self.drain(Class::Urgent);
-        taken.extend(self.drain(Class::Restore));
-        let mut more = None; // суффикс «после этого ещё N» — только во фразе, не в журнале
+        let held = self.held(now);
+        let mut taken = self.drain(|i| i.class == Class::Urgent);
+        taken.extend(self.drain(|i| i.class == Class::Now));
+        taken.extend(self.drain(|i| i.class == Class::Restore && !held(i)));
+        let mut more = None; // хвост «после этого ещё N» — только во фразе, не в журнале
         if !waiting {
-            let (mut qs, focused): (Vec<News>, Vec<News>) = self.drain(Class::Question).into_iter().partition(|i| Some(i.session.as_str()) != skip);
+            let (mut qs, focused): (Vec<News>, Vec<News>) = self.drain(|i| i.class == Class::Question).into_iter().partition(|i| Some(i.session.as_str()) != skip);
             self.items.extend(focused);
             if !qs.is_empty() {
                 let q = qs.remove(0);
@@ -113,34 +177,42 @@ impl Board {
                 waiting = true;
             }
         }
-        if !waiting {
-            taken.extend(self.drain(Class::Final));
-            if taken.is_empty() {
-                taken.extend(self.drain(Class::Progress));
-            }
+        let finals = if waiting { vec![] } else { self.drain(|i| i.class == Class::Final && !held(i)) };
+        if taken.iter().chain(&finals).any(|i| matches!(i.class, Class::Restore | Class::Final)) {
+            self.batch_at = Some(now);
         }
-        if taken.is_empty() {
-            return None;
-        }
-        let mut say = taken.iter().map(|i| i.say.as_str()).collect::<Vec<_>>().join(" ");
+        let mut chunks: Vec<Chunk> = taken.iter().map(Chunk::of).collect();
         if let Some(m) = more {
-            say = format!("{say} {m}"); // вопрос в пачке последний: после него ничего не берётся
+            chunks.push(Chunk::oma(m)); // вопрос в пачке последний: после него ничего не берётся
         }
+        chunks.extend(batch(&finals));
         // при повторе счёт «ещё N» будет свежий
-        self.spoken.extend(taken.into_iter().map(|i| (i, now)));
-        Some(say)
+        self.spoken.extend(taken.into_iter().chain(finals).map(|i| (i, now)));
+        chunks
     }
 
     /// Даст ли take(now, skip) фразу; доску не меняет: пока неясно, слушает ли он, итог агента в фокусе не снимается.
     pub fn sayable(&self, now: u64, skip: Option<&str>) -> bool {
-        let waiting = self.waiting(now);
-        self.items.iter().any(|i| matches!(i.class, Class::Urgent | Class::Restore) || (!waiting && Some(i.session.as_str()) != skip))
+        let (waiting, held) = (self.waiting(now), self.held(now));
+        self.items.iter().any(|i| match i.class {
+            Class::Urgent | Class::Now => true,
+            Class::Restore => !held(i),
+            Class::Question => !waiting && Some(i.session.as_str()) != skip,
+            Class::Final => !waiting && Some(i.session.as_str()) != skip && !held(i),
+        })
     }
 
-    /// Итог и промежуточное агента в фокусе снимаются без речи: он и так на них смотрит.
+    /// Ждёт ли новость конца окна пачки: итог и «починила сама» — пока с прошлой пачки не прошло every.
+    /// Сводка возвращения — ответ на само возвращение — не ждёт.
+    fn held(&self, now: u64) -> impl Fn(&News) -> bool + use<> {
+        let early = self.every > 0 && self.batch_at.is_some_and(|at| now < at + self.every);
+        move |i: &News| early && i.session != SUMMARY && matches!(i.class, Class::Restore | Class::Final)
+    }
+
+    /// Итог агента в фокусе снимается без речи: он и так на него смотрит.
     pub fn drop_focused(&mut self, skip: Option<&str>) {
         if let Some(f) = skip {
-            self.items.retain(|i| !(i.session == f && matches!(i.class, Class::Final | Class::Progress)));
+            self.items.retain(|i| !(i.session == f && i.class == Class::Final));
         }
     }
 
@@ -149,8 +221,12 @@ impl Board {
         self.asked.as_ref().is_some_and(|(_, at)| now < at + ANSWER_WAIT)
     }
 
-    /// Пользователь вернулся: при долгом отсутствии неуслышанное из журнала снова на доске.
+    /// Пользователь вернулся: при долгом отсутствии неуслышанное из журнала снова на доске, а бюджет пачки снят —
+    /// приветствие вводит в курс сразу.
     pub fn returned(&mut self, last_input: u64, long: bool) {
+        if long {
+            self.batch_at = None;
+        }
         for (n, at) in std::mem::take(&mut self.spoken) {
             if !long || at < last_input + UNHEARD_AFTER || self.items.iter().any(|i| i.session == n.session && i.class == n.class) {
                 continue;
@@ -186,14 +262,11 @@ impl Board {
     }
 
     /// Только срочное — пока пользователь занят; в журнал: не услышал — повторится по возвращении.
-    pub fn take_urgent(&mut self, now: u64) -> Option<String> {
-        let got = self.drain(Class::Urgent);
-        if got.is_empty() {
-            return None;
-        }
-        let say = got.iter().map(|i| i.say.as_str()).collect::<Vec<_>>().join(" ");
+    pub fn take_urgent(&mut self, now: u64) -> Vec<Chunk> {
+        let got = self.drain(|i| i.class == Class::Urgent);
+        let chunks = got.iter().map(Chunk::of).collect();
         self.spoken.extend(got.into_iter().map(|i| (i, now)));
-        Some(say)
+        chunks
     }
 
     /// На доске есть новость сессии этого класса — ждёт, Ома её ещё не сказала.
@@ -206,7 +279,7 @@ impl Board {
     }
 
     pub fn take_finals(&mut self) -> Vec<News> {
-        self.drain(Class::Final)
+        self.drain(|i| i.class == Class::Final)
     }
 
     #[cfg(test)]
@@ -219,13 +292,35 @@ impl Board {
         self.asked.as_ref().map(|(q, _)| q.session.as_str())
     }
 
-    /// Снять с доски все новости класса, старые первыми.
-    fn drain(&mut self, class: Class) -> Vec<News> {
-        let (mut got, rest): (Vec<News>, Vec<News>) = std::mem::take(&mut self.items).into_iter().partition(|i| i.class == class);
+    /// Снять с доски новости, которые берёт pick, старые первыми.
+    fn drain(&mut self, pick: impl Fn(&News) -> bool) -> Vec<News> {
+        let (mut got, rest): (Vec<News>, Vec<News>) = std::mem::take(&mut self.items).into_iter().partition(|i| pick(i));
         self.items = rest;
         got.sort_by_key(|i| i.born);
         got
     }
+}
+
+/// Пачка итогов фразой кода, без модели: один итог — как есть; несколько — важные (нужно решить или сделать) и сводка
+/// своими фразами, остальные — именами проектов: «Закончили ещё: datebook, omarchy-mail.»
+fn batch(finals: &[News]) -> Vec<Chunk> {
+    if finals.len() < 2 {
+        return finals.iter().map(Chunk::of).collect();
+    }
+    let (own, rest): (Vec<&News>, Vec<&News>) = finals.iter().partition(|i| i.important || i.project.is_empty());
+    let mut chunks: Vec<Chunk> = own.into_iter().map(Chunk::of).collect();
+    let mut names: Vec<&str> = Vec::new();
+    for i in rest {
+        if !names.contains(&i.project.as_str()) {
+            names.push(&i.project);
+        }
+    }
+    if !names.is_empty() {
+        let verb = plural(names.len(), ["Закончил", "Закончили", "Закончили"]);
+        let more = if chunks.is_empty() { "" } else { " ещё" };
+        chunks.push(Chunk { class: Some(Class::Final), project: String::new(), text: format!("{verb}{more}: {}.", names.join(", ")) });
+    }
+    chunks
 }
 
 /// «один вопрос», «2 вопроса», «5 вопросов» — для хвоста phrases::MORE.
@@ -238,9 +333,18 @@ fn questions(n: usize) -> String {
 mod tests {
     use super::*;
 
-    fn n(session: &str, class: Class, say: &str, born: u64) -> News { News { session: session.into(), class, say: say.into(), born } }
+    /// Новость из строки «проект: фраза», как её собирают служба и сторож; без «: » — без проекта.
+    fn n(session: &str, class: Class, line: &str, born: u64) -> News {
+        let (project, say) = line.split_once(": ").unwrap_or(("", line));
+        News { session: session.into(), class, project: project.into(), say: say.into(), important: false, born }
+    }
 
-    fn sp(b: &mut Board, now: u64) -> Option<String> { b.take(now, None) }
+    fn tk(b: &mut Board, now: u64, skip: Option<&str>) -> Option<String> {
+        let c = b.take(now, skip);
+        (!c.is_empty()).then(|| line(&c))
+    }
+
+    fn sp(b: &mut Board, now: u64) -> Option<String> { tk(b, now, None) }
 
     #[test]
     fn has_is_news_of_session_and_class_on_the_board() {
@@ -257,7 +361,7 @@ mod tests {
         b.push(n("s", Class::Final, "s готов.", 1));
         sp(&mut b, 1000);
         b.returned(0, true);
-        assert_eq!(b.take(2000, None).unwrap(), "s готов.");
+        assert_eq!(tk(&mut b, 2000, None).unwrap(), "s готов.");
     }
 
     #[test]
@@ -269,8 +373,8 @@ mod tests {
         b.asked = None;
         sp(&mut b, 1050);
         b.returned(1000, true);
-        assert_eq!(b.take(5000, None).unwrap(), "Q?");
-        assert_eq!(b.take(5001, None), None);
+        assert_eq!(tk(&mut b, 5000, None).unwrap(), "Q?");
+        assert_eq!(tk(&mut b, 5001, None), None);
     }
 
     #[test]
@@ -279,9 +383,9 @@ mod tests {
         b.push(n("f", Class::Final, "F.", 1));
         sp(&mut b, 1100);
         b.returned(1000, false);
-        assert_eq!(b.take(2000, None), None);
+        assert_eq!(tk(&mut b, 2000, None), None);
         b.returned(1000, true);
-        assert_eq!(b.take(2000, None), None);
+        assert_eq!(tk(&mut b, 2000, None), None);
     }
 
     #[test]
@@ -291,8 +395,8 @@ mod tests {
         sp(&mut b, 1100);
         b.push(n("s", Class::Final, "новый", 2));
         b.returned(1000, true);
-        assert_eq!(b.take(2000, None).unwrap(), "новый");
-        assert_eq!(b.take(2001, None), None);
+        assert_eq!(tk(&mut b, 2000, None).unwrap(), "новый");
+        assert_eq!(tk(&mut b, 2001, None), None);
     }
 
     #[test]
@@ -302,10 +406,10 @@ mod tests {
         b.push(n("b", Class::Question, "B?", 2));
         assert_eq!(sp(&mut b, 1100).unwrap(), "A? После этого ещё один вопрос.");
         b.returned(1000, true);
-        assert_eq!(b.take(5000, None).unwrap(), "A? Дальше ещё один вопрос."); // A вернулась, B ещё на доске; хвост — следующий по кругу
+        assert_eq!(tk(&mut b, 5000, None).unwrap(), "A? Дальше ещё один вопрос."); // A вернулась, B ещё на доске; хвост — следующий по кругу
         b.answered("b");
         b.unask();
-        assert_eq!(b.take(5001, None).unwrap(), "A?");
+        assert_eq!(tk(&mut b, 5001, None).unwrap(), "A?");
     }
 
     #[test]
@@ -325,7 +429,7 @@ mod tests {
         sp(&mut b, 1100);
         b.answered("q");
         b.returned(1000, true);
-        assert_eq!(b.take(2000, None), None);
+        assert_eq!(tk(&mut b, 2000, None), None);
     }
 
     #[test]
@@ -335,7 +439,7 @@ mod tests {
         sp(&mut b, 1100);
         b.retain_sessions(|_| false);
         b.returned(1000, true);
-        assert_eq!(b.take(2000, None), None);
+        assert_eq!(tk(&mut b, 2000, None), None);
     }
 
     #[test]
@@ -343,7 +447,7 @@ mod tests {
         let mut b = Board::default();
         b.push(n(SUMMARY, Class::Final, "Сводка.", 1));
         b.retain_sessions(|_| false);
-        assert_eq!(b.take(10, None).unwrap(), "Сводка.");
+        assert_eq!(tk(&mut b, 10, None).unwrap(), "Сводка.");
     }
 
     #[test]
@@ -351,9 +455,9 @@ mod tests {
         let mut b = Board::default();
         b.push(n("f", Class::Final, "F готов.", 1));
         b.push(n("f", Class::Question, "F?", 2));
-        assert_eq!(b.take(10, Some("f")), None);
-        assert_eq!(b.take(10, None).unwrap(), "F?");
-        assert_eq!(b.take(11, None), None);
+        assert_eq!(tk(&mut b, 10, Some("f")), None);
+        assert_eq!(tk(&mut b, 10, None).unwrap(), "F?");
+        assert_eq!(tk(&mut b, 11, None), None);
     }
 
     #[test]
@@ -365,11 +469,11 @@ mod tests {
         b.push(n("q", Class::Question, "Q?", 2));
         b.push(n("d", Class::Final, "D готов.", 3));
         assert!(b.sayable(10, Some("f")));
-        assert_eq!(b.take(10, Some("f")).unwrap(), "Q?");
+        assert_eq!(tk(&mut b, 10, Some("f")).unwrap(), "Q?");
         assert!(!b.sayable(11, Some("f")), "итог ждёт ответа на вопрос");
         b.push(n("r", Class::Restore, "R перезапущен.", 4));
         assert!(b.sayable(11, Some("f")));
-        b.take(11, Some("f"));
+        tk(&mut b, 11, Some("f"));
         assert!(b.sayable(10 + ANSWER_WAIT, Some("f")));
     }
 
@@ -378,7 +482,7 @@ mod tests {
         let mut b = Board::default();
         b.push(n("f", Class::Final, "F готов.", 1));
         assert!(!b.sayable(10, Some("f")));
-        assert_eq!(b.take(10, None).unwrap(), "F готов.", "проверка доску не меняет");
+        assert_eq!(tk(&mut b, 10, None).unwrap(), "F готов.", "проверка доску не меняет");
     }
 
     #[test]
@@ -386,10 +490,10 @@ mod tests {
         let mut b = Board::default();
         b.push(n("q", Class::Question, "Q?", 1));
         b.push(n("d", Class::Final, "D готов.", 2));
-        assert_eq!(b.take(10, None).unwrap(), "Q?");
+        assert_eq!(tk(&mut b, 10, None).unwrap(), "Q?");
         b.unask();
         assert_eq!(b.asked(), None);
-        assert_eq!(b.take(11, None).unwrap(), "Q?");
+        assert_eq!(tk(&mut b, 11, None).unwrap(), "Q?");
     }
 
     #[test]
@@ -410,18 +514,16 @@ mod tests {
     #[test]
     fn five_agents_example() {
         let mut b = Board::default();
-        b.push(n("e", Class::Progress, "E: нашёл утечку.", 1));
         b.push(n("d", Class::Final, "D: фича готова.", 2));
         b.push(n("c", Class::Question, "C: что делаем с мёртвым кодом?", 3));
         b.push(n("a", Class::Restore, "A: агент повис — перезапустила.", 4));
         b.push(n("b", Class::Restore, "B: сабагент повис — перезапустила.", 5));
         b.push(n("f", Class::Urgent, "F: агент завис посреди push — не трогаю, посмотри сам.", 6));
-        assert_eq!(b.take(10, None).unwrap(), "F: агент завис посреди push — не трогаю, посмотри сам. A: агент повис — перезапустила. B: сабагент повис — перезапустила. C: что делаем с мёртвым кодом?");
-        assert_eq!(b.take(20, None), None);                 // ждём ответа на вопрос
+        assert_eq!(tk(&mut b, 10, None).unwrap(), "F: агент завис посреди push — не трогаю, посмотри сам. A: агент повис — перезапустила. B: сабагент повис — перезапустила. C: что делаем с мёртвым кодом?");
+        assert_eq!(tk(&mut b, 20, None), None);                 // ждём ответа на вопрос
         b.answered("c");
-        assert_eq!(b.take(21, None).unwrap(), "D: фича готова.");
-        assert_eq!(b.take(22, None).unwrap(), "E: нашёл утечку."); // промежуточное — когда больше нечего
-        assert_eq!(b.take(23, None), None);
+        assert_eq!(tk(&mut b, 21, None).unwrap(), "D: фича готова.");
+        assert_eq!(tk(&mut b, 22, None), None);
     }
 
     #[test]
@@ -431,13 +533,13 @@ mod tests {
         b.push(n("x", Class::Question, "X?", 1));
         b.push(n("z", Class::Question, "Z?", 3));
         b.push(n("w", Class::Question, "W?", 4));
-        assert_eq!(b.take(10, None).unwrap(), "X? После этого ещё 3 вопроса.");
+        assert_eq!(tk(&mut b, 10, None).unwrap(), "X? После этого ещё 3 вопроса.");
         b.answered("x");
-        assert_eq!(b.take(11, None).unwrap(), "Y? Дальше ещё 2 вопроса.", "хвост — по кругу, по порядку");
+        assert_eq!(tk(&mut b, 11, None).unwrap(), "Y? Дальше ещё 2 вопроса.", "хвост — по кругу, по порядку");
         b.answered("y");
-        assert_eq!(b.take(12, None).unwrap(), "Z? В очереди ещё один вопрос.");
+        assert_eq!(tk(&mut b, 12, None).unwrap(), "Z? В очереди ещё один вопрос.");
         b.answered("z");
-        assert_eq!(b.take(13, None).unwrap(), "W?");
+        assert_eq!(tk(&mut b, 13, None).unwrap(), "W?");
     }
 
     #[test]
@@ -445,9 +547,9 @@ mod tests {
         let mut b = Board::default();
         b.push(n("c", Class::Question, "C?", 1));
         b.push(n("d", Class::Final, "D готов.", 1));
-        assert_eq!(b.take(10, None).unwrap(), "C?");
-        assert_eq!(b.take(10 + ANSWER_WAIT - 1, None), None);
-        assert_eq!(b.take(10 + ANSWER_WAIT, None).unwrap(), "D готов.");
+        assert_eq!(tk(&mut b, 10, None).unwrap(), "C?");
+        assert_eq!(tk(&mut b, 10 + ANSWER_WAIT - 1, None), None);
+        assert_eq!(tk(&mut b, 10 + ANSWER_WAIT, None).unwrap(), "D готов.");
     }
 
     #[test]
@@ -455,15 +557,15 @@ mod tests {
         let mut b = Board::default();
         b.push(n("c", Class::Question, "C?", 1));
         b.answered("c");                               // ответили в терминале раньше Омы
-        assert_eq!(b.take(10, None), None);
+        assert_eq!(tk(&mut b, 10, None), None);
     }
 
     #[test]
     fn push_replaces_same_session_and_class() {
         let mut b = Board::default();
-        b.push(n("a", Class::Progress, "старое", 1));
-        b.push(n("a", Class::Progress, "новое", 2));
-        assert_eq!(b.take(10, None).unwrap(), "новое");
+        b.push(n("a", Class::Final, "старое", 1));
+        b.push(n("a", Class::Final, "новое", 2));
+        assert_eq!(tk(&mut b, 10, None).unwrap(), "новое");
     }
 
     #[test]
@@ -474,20 +576,9 @@ mod tests {
         b.push(n("q", Class::Question, "Q?", 1));
         b.retain_sessions(|s| s != "gone");
         b.retain_classes(&[Class::Restore, Class::Question]); // agents_voice выключен
-        assert_eq!(b.take(10, None).unwrap(), "Q?");
+        assert_eq!(tk(&mut b, 10, None).unwrap(), "Q?");
         b.answered("q");
-        assert_eq!(b.take(11, None), None);
-    }
-
-    #[test]
-    fn final_drops_its_own_progress() {
-        let mut b = Board::default();
-        b.push(n("a", Class::Progress, "A: шаг закрыт.", 1));
-        b.push(n("b", Class::Progress, "B: нашла утечку.", 1));
-        b.push(n("a", Class::Final, "A: готово.", 2));
-        assert_eq!(b.take(10, None).unwrap(), "A: готово.");
-        assert_eq!(b.take(11, None).unwrap(), "B: нашла утечку."); // чужое промежуточное остаётся
-        assert_eq!(b.take(12, None), None);
+        assert_eq!(tk(&mut b, 11, None), None);
     }
 
     #[test]
@@ -495,9 +586,9 @@ mod tests {
         let mut b = Board::default();
         b.push(n("q", Class::Question, "Q?", 1));
         b.push(n("d", Class::Final, "D готов.", 1));
-        assert_eq!(b.take(10, None).unwrap(), "Q?");
+        assert_eq!(tk(&mut b, 10, None).unwrap(), "Q?");
         b.retain_sessions(|s| s != "q");               // спросивший агент закрыт — ответа не будет
-        assert_eq!(b.take(11, None).unwrap(), "D готов.");
+        assert_eq!(tk(&mut b, 11, None).unwrap(), "D готов.");
     }
 
     #[test]
@@ -517,7 +608,7 @@ mod tests {
         b.push(n("r", Class::Restore, "R перезапущен.", 2));
         b.push(n("u", Class::Urgent, "U завис посреди push.", 3));
         b.retain_sessions(|s| s == "q");
-        assert_eq!(b.take(10, None).unwrap(), "U завис посреди push. R перезапущен. Q?");
+        assert_eq!(tk(&mut b, 10, None).unwrap(), "U завис посреди push. R перезапущен. Q?");
     }
 
     #[test]
@@ -525,13 +616,14 @@ mod tests {
         let mut b = Board::default();
         b.push(n("f", Class::Final, "F.", 1));
         b.push(n("u", Class::Urgent, "U.", 2));
-        assert_eq!(b.take_urgent(10).unwrap(), "U.");
-        assert!(b.take_urgent(11).is_none());
-        assert_eq!(b.take(12, None).unwrap(), "F.");
+        b.push(n("w", Class::Now, "W.", 2));
+        assert_eq!(line(&b.take_urgent(10)), "U.");
+        assert!(b.take_urgent(11).is_empty(), "«нужно» агента в «занят» ждёт");
+        assert_eq!(tk(&mut b, 12, None).unwrap(), "W. F.");
         b.push(n("u", Class::Urgent, "U.", 3));
         b.take_urgent(1100);
         b.returned(1000, true);
-        assert_eq!(b.take(2000, None).unwrap(), "U.", "срочное при «занят» — в журнал: не услышал — повторится");
+        assert_eq!(tk(&mut b, 2000, None).unwrap(), "U.", "срочное при «занят» — в журнал: не услышал — повторится");
     }
 
     #[test]
@@ -541,7 +633,7 @@ mod tests {
         b.take(10, None);
         b.push(n("u", Class::Urgent, "U.", 2));
         assert!(b.sayable(11, None));
-        assert_eq!(b.take(11, None).unwrap(), "U.");
+        assert_eq!(tk(&mut b, 11, None).unwrap(), "U.");
     }
 
     #[test]
@@ -551,8 +643,7 @@ mod tests {
         b.push(n("b", Class::Restore, "B: лимит сброшен — разбудила агента.", 2));
         b.push(n("c", Class::Restore, "C: оборвалась связь — попросила агента продолжить.", 3));
         b.push(n("d", Class::Final, "D: готово.", 4));
-        b.push(n("e", Class::Final, "E: готово.", 5));
-        assert_eq!(b.take(10, None).unwrap(), "A, B: лимит сброшен — разбудила агента. C: оборвалась связь — попросила агента продолжить. D: готово. E: готово.");
+        assert_eq!(tk(&mut b, 10, None).unwrap(), "A, B: лимит сброшен — разбудила агента. C: оборвалась связь — попросила агента продолжить. D: готово.");
         // сторож крутит варианты: у каждого проекта свой, а новость одна — первым выпавшим вариантом
         b.push(n("a", Class::Restore, "A: перезапустила зависшего агента.", 11));
         b.push(n("b", Class::Restore, "B: агент висел — перезапустила.", 12));
@@ -560,6 +651,119 @@ mod tests {
         b.push(n("d", Class::Urgent, "D: связь с Claude не держится — нужна твоя помощь.", 14));
         b.push(n("e", Class::Urgent, "E: API отказал — нужен вход в Claude.", 15));
         b.push(n("f", Class::Urgent, "F: ошибка API — запрос отклонён.", 16));
-        assert_eq!(b.take(20, None).unwrap(), "C, D: связь с Claude не держится — загляни, пожалуйста. E: API отказал — нужен вход в Claude. F: ошибка API — запрос отклонён. A, B: перезапустила зависшего агента.");
+        let c = b.take(20, None);
+        assert_eq!(line(&c), "C, D: связь с Claude не держится — загляни, пожалуйста. E: API отказал — нужен вход в Claude. F: ошибка API — запрос отклонён. A, B: перезапустила зависшего агента.");
+        assert_eq!(c[0].project, "C, D", "склейка — одним куском со всеми проектами");
+    }
+
+    // --- полосы и бюджет пачки (дизайн 2026-11-12, lanes) ---
+
+    #[test]
+    fn finals_wait_for_the_batch_window_first_one_at_once() {
+        let mut b = Board { every: 600, ..Board::default() };
+        b.push(n("a", Class::Final, "A: готово.", 1));
+        assert!(b.sayable(1000, None));
+        assert_eq!(tk(&mut b, 1000, None).unwrap(), "A: готово.", "первый итог после тишины — сразу");
+        b.push(n("b", Class::Final, "B: готово.", 2));
+        b.push(n("c", Class::Restore, "C: перезапустила зависшего агента.", 3));
+        assert!(!b.sayable(1100, None), "«Ты тут? Есть новости» не врёт: take ничего не даст");
+        assert_eq!(tk(&mut b, 1100, None), None);
+        assert!(b.sayable(1600, None));
+        assert_eq!(tk(&mut b, 1600, None).unwrap(), "C: перезапустила зависшего агента. B: готово.");
+        b.push(n("d", Class::Final, "D: готово.", 4));
+        assert_eq!(tk(&mut b, 1700, None), None, "окно считается от прошлой пачки");
+    }
+
+    #[test]
+    fn now_lane_ignores_the_budget_and_the_answer_wait() {
+        let mut b = Board { every: 600, ..Board::default() };
+        b.push(n("a", Class::Final, "A: готово.", 1));
+        tk(&mut b, 1000, None);
+        b.push(n("q", Class::Question, "Q: нужен ответ?", 2));
+        assert_eq!(tk(&mut b, 1001, None).unwrap(), "Q: нужен ответ?", "вопрос — сразу, бюджет его не держит");
+        b.push(n("u", Class::Urgent, "U: связь не держится.", 3));
+        b.push(n("w", Class::Now, "W: нужна папка.", 4));
+        assert!(b.sayable(1002, None));
+        assert_eq!(tk(&mut b, 1002, None).unwrap(), "U: связь не держится. W: нужна папка.", "срочное и «нужно» — и пока ждём ответа");
+    }
+
+    #[test]
+    fn now_is_answered_and_survives_rescan() {
+        let mut b = Board::default();
+        b.push(n("w", Class::Now, "W: нужна папка.", 1));
+        b.retain_sessions(|_| false);
+        assert!(b.sayable(10, None), "rescan «нужно» не снимает");
+        b.answered("w");
+        assert_eq!(tk(&mut b, 10, None), None, "ответ снимает");
+    }
+
+    #[test]
+    fn long_return_lifts_the_budget() {
+        for long in [false, true] {
+            let mut b = Board { every: 600, ..Board::default() };
+            b.push(n("a", Class::Final, "A: готово.", 1));
+            tk(&mut b, 1000, None);
+            b.push(n("b", Class::Final, "B: готово.", 2));
+            b.returned(900, long);
+            assert_eq!(b.sayable(1100, None), long, "приветствие вводит в курс сразу (long={long})");
+        }
+    }
+
+    #[test]
+    fn summary_is_not_held_by_the_budget() {
+        let mut b = Board { every: 600, ..Board::default() };
+        b.push(n("a", Class::Restore, "A: перезапустила зависшего агента.", 1));
+        tk(&mut b, 1000, None);
+        b.push(n(SUMMARY, Class::Final, "agent-speak — всё влито.", 2));
+        assert_eq!(tk(&mut b, 1010, None).unwrap(), "agent-speak — всё влито.");
+    }
+
+    #[test]
+    fn every_zero_is_no_budget() {
+        let mut b = Board::default();
+        for (i, s) in ["a", "b", "c"].into_iter().enumerate() {
+            b.push(n(s, Class::Final, &format!("{s}: готово."), i as u64));
+            assert!(tk(&mut b, 1000 + i as u64, None).is_some());
+        }
+    }
+
+    #[test]
+    fn batch_of_finals_is_one_line_by_code() {
+        let imp = |s: &str, line: &str, born| News { important: true, ..n(s, Class::Final, line, born) };
+        let mut b = Board::default();
+        b.push(n("a", Class::Final, "datebook: готово.", 1));
+        b.push(n("b", Class::Final, "omarchy-mail: тесты прошли.", 2));
+        assert_eq!(tk(&mut b, 10, None).unwrap(), "Закончили: datebook, omarchy-mail.");
+        b.push(n("a", Class::Final, "datebook: готово.", 3));
+        b.push(imp("c", "agent-speak: нужно решить, куда пушить.", 4));
+        b.push(n("d", Class::Final, "omarchy-mail: готово.", 5));
+        b.push(n("e", Class::Final, "omarchy-mail: готово.", 6));
+        let c = b.take(20, None);
+        assert_eq!(line(&c), "agent-speak: нужно решить, куда пушить. Закончили ещё: datebook, omarchy-mail.", "важное — своей фразой, имена — без повторов");
+        assert_eq!(c.iter().map(|c| (c.class, c.project.as_str())).collect::<Vec<_>>(), [(Some(Class::Final), "agent-speak"), (Some(Class::Final), "")], "у склейки имён нет «проект: »");
+        b.push(imp("c", "agent-speak: нужно решить, куда пушить.", 7));
+        b.push(n("a", Class::Final, "datebook: готово.", 8));
+        assert_eq!(tk(&mut b, 30, None).unwrap(), "agent-speak: нужно решить, куда пушить. Закончил ещё: datebook.");
+    }
+
+    #[test]
+    fn chunks_carry_class_and_project() {
+        let mut b = Board::default();
+        b.push(n("q", Class::Question, "plug: куда пушить?", 1));
+        b.push(n("x", Class::Question, "x: ещё?", 2));
+        b.push(n("u", Class::Urgent, "plug: связь не держится.", 3));
+        let c = b.take(10, None);
+        assert_eq!(c, [
+            Chunk { class: Some(Class::Urgent), project: "plug".into(), text: "связь не держится.".into() },
+            Chunk { class: Some(Class::Question), project: "plug".into(), text: "куда пушить?".into() },
+            Chunk::oma("После этого ещё один вопрос."),
+        ]);
+    }
+
+    #[test]
+    fn cue_and_tone_by_class() {
+        use Class::*;
+        let got: Vec<_> = [Urgent, Now, Restore, Question, Final].into_iter().map(|c| (c.cue(), c.tone())).collect();
+        assert_eq!(got, [(Some(Cue::Help), "alarm"), (Some(Cue::Ask), "ask"), (None, ""), (Some(Cue::Ask), "ask"), (Some(Cue::Done), "done")]);
     }
 }

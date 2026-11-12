@@ -46,6 +46,12 @@ pub struct Config {
     pub limit_warn_at: u64,
     /// память между днями: служба пишет пересказы дня, таймер сжимает день, мозг получает заметки и свой файл «Помню»
     pub memory: bool,
+    /// итоги ходов и «починила сама» звучат пачкой не чаще раза в столько минут, 0..=60; 0 — сразу, без пачки
+    pub news_every: u64,
+    /// звуковой знак перед новостью: вопрос, итог, нужна помощь
+    pub earcons: bool,
+    /// интонация по смыслу: пауза после проекта, вопрос выше, беда ниже и медленнее, итог быстрее (SSML адаптера Silero)
+    pub intonation: bool,
 }
 
 impl Default for Config {
@@ -54,7 +60,7 @@ impl Default for Config {
             orb_satellites: true, orb_moods: true, orb_idle_motion: true,
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: true, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
             orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95, screencast_privacy: true, hush_summary: true, music_pause: true,
-            limit_warn: true, limit_warn_at: 90, memory: true }
+            limit_warn: true, limit_warn_at: 90, memory: true, news_every: 10, earcons: true, intonation: true }
     }
 }
 
@@ -133,6 +139,9 @@ impl Config {
             "limit_warn" if value.is_boolean() => self.limit_warn = value.as_bool().unwrap(),
             "limit_warn_at" if in_range(value, 50, 100) => self.limit_warn_at = value.as_u64().unwrap(),
             "memory" if value.is_boolean() => self.memory = value.as_bool().unwrap(),
+            "news_every" if in_range(value, 0, 60) => self.news_every = value.as_u64().unwrap(),
+            "earcons" if value.is_boolean() => self.earcons = value.as_bool().unwrap(),
+            "intonation" if value.is_boolean() => self.intonation = value.as_bool().unwrap(),
             _ => return false,
         }
         true
@@ -336,5 +345,17 @@ mod tests {
         assert!(!c.set("limit_warn_at", &json!(49)) && !c.set("limit_warn_at", &json!(101)) && c.limit_warn_at == 90);
         assert!(c.set("limit_warn_at", &json!(100)) && c.limit_warn_at == 100);
         assert_eq!(parse("limit_warn_at = 30").unwrap().limit_warn_at, 90, "из файла — так же, как set");
+    }
+
+    #[test]
+    fn lanes_keys_default_and_validate() {
+        use serde_json::json;
+        let mut c = Config::default();
+        assert_eq!((c.news_every, c.earcons, c.intonation), (10, true, true));
+        assert!(c.set("news_every", &json!(0)) && c.news_every == 0, "0 — без пачки, как раньше");
+        assert!(c.set("news_every", &json!(60)) && !c.set("news_every", &json!(61)) && !c.set("news_every", &json!("5")) && c.news_every == 60);
+        assert!(c.set("earcons", &json!(false)) && !c.earcons && !c.set("earcons", &json!(1)));
+        assert!(c.set("intonation", &json!(false)) && !c.intonation && !c.set("intonation", &json!("on")));
+        assert_eq!(parse("news_every = -1").unwrap().news_every, 10, "из файла — так же, как set");
     }
 }

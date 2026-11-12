@@ -17,6 +17,9 @@ pub struct Item {
     pub text: String,
     pub kind: Kind,
     pub voice: u64, // номер реплики Омы (`voice`), чья это фраза; 0 — не её
+    pub cue: Option<crate::audio::Cue>, // звуковой знак перед звуком фразы (первая фраза новости)
+    pub tone: &'static str, // интонация для адаптера синтеза: "" | ask | alarm | done
+    pub lead: String,       // проект перед фразой — после него пауза; "" — нет
 }
 
 pub struct Queue {
@@ -119,7 +122,7 @@ mod tests {
     use super::*;
 
     fn it(text: &str, kind: Kind) -> Item {
-        Item { session: "s".into(), text: text.into(), kind, voice: 0 }
+        Item { session: "s".into(), text: text.into(), kind, voice: 0, cue: None, tone: "", lead: String::new() }
     }
 
     fn all(q: &mut Queue) -> Vec<String> {

@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, QUIET_WHY, bubblesKept, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById, toPause, toResume, memoryRows, wheelStep, rateStep, TEMPO, level, listenLeft, seenDone, doneUnseen")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, QUIET_WHY, bubblesKept, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById, toPause, toResume, memoryRows, wheelStep, rateStep, TEMPO, level, listenLeft, seenDone, doneUnseen, NEWS_EVERY, newsEvery")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -264,7 +264,7 @@ assert.strictEqual(M.taken("", { key: "chat:1", role: "me", text: "" }), false)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 17)
+assert.strictEqual(M.SETTINGS_ROWS.length, 20)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "kseniya", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
@@ -287,6 +287,17 @@ assert.deepStrictEqual(M.SETTINGS_SECTIONS.find(s => s.title === "Hearing").rows
 assert.deepStrictEqual(M.settingStep("limit_warn", Object.assign({}, cfg, { limit_warn: true }), 1), { key: "limit_warn", value: false, sample: false })
 assert.strictEqual(M.SETTINGS_SECTIONS[4].rows[M.SETTINGS_SECTIONS[4].rows.length - 1], "limit_warn", "«Предупреждать о лимите» — последняя в агентах")
 assert.deepStrictEqual(M.settingStep("memory", Object.assign({}, cfg, { memory: true }), 1), { key: "memory", value: false, sample: false })
+// the voice: intonation and sound cues switch; finals aloud at most every N min — a dropdown, ←/→ go round
+assert.deepStrictEqual(M.SETTINGS_SECTIONS[0].rows, ["speaker", "rate", "intonation", "earcons"])
+assert.deepStrictEqual(M.settingStep("intonation", Object.assign({}, cfg, { intonation: true }), 1), { key: "intonation", value: false, sample: false })
+assert.deepStrictEqual(M.settingStep("earcons", Object.assign({}, cfg, { earcons: false }), -1), { key: "earcons", value: true, sample: false })
+assert.deepStrictEqual(M.settingStep("news_every", Object.assign({}, cfg, { news_every: 10 }), 1), { key: "news_every", value: 15, sample: false })
+assert.strictEqual(M.settingStep("news_every", Object.assign({}, cfg, { news_every: 30 }), 1).value, 0, "round: after 30 — no limit")
+assert.strictEqual(M.settingStep("news_every", Object.assign({}, cfg, { news_every: 0 }), -1).value, 30)
+assert.strictEqual(M.settingStep("news_every", Object.assign({}, cfg, { news_every: 7 }), 1).value, 0, "set by hand off the list — from the start")
+assert.deepStrictEqual(M.newsEvery(t => t).map(o => o.value), ["0", "2", "5", "10", "15", "30"], "the stock Dropdown keeps strings")
+assert.deepStrictEqual(M.newsEvery(ru).map(o => o.label), ["Без ограничения", "2 мин", "5 мин", "10 мин", "15 мин", "30 мин"])
+assert.deepStrictEqual(M.SETTINGS_SECTIONS[4].rows.slice(0, 3), ["agents_voice", "progress_digest", "news_every"])
 // «Память ›» right after its switch: a page, not a value
 assert.strictEqual(M.SETTINGS_ROWS[M.SETTINGS_ROWS.indexOf("memory") + 1], "memory_page")
 // every row steps but the hours (two dropdowns, the window walks them) and the memory page's link

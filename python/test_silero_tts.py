@@ -44,6 +44,10 @@ try:
     fast = ask({"text": "Привет, это проверка.", "speaker": "xenia", "rate": "fast"})
     assert 0 < len(fast) < len(pcm), (len(fast), len(pcm))
     assert ask({"text": "hello 123", "speaker": "xenia", "rate": "medium"}) == b""  # нечего читать — пусто, это не ошибка
+    # интонация и проект с паузой (ssml): модель принимает разметку при любом тоне
+    for tone in ("ask", "alarm", "done"):
+        said = ask({"text": "нужен ответ, куда пушить?", "speaker": "kseniya", "rate": "medium", "tone": tone, "lead": "агент спик"})
+        assert said and len(said) > 48000, (tone, said and len(said))
     assert ask({"text": "Привет.", "speaker": "nobody", "rate": "medium"}) is None
     assert len(ask({"text": "Снова работает.", "speaker": "xenia", "rate": "medium"})) > 48000  # ошибка сервер не роняет
     print("ok")

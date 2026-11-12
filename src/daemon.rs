@@ -8,7 +8,7 @@ use crate::focus::{self, Agent, SessionRef};
 use crate::ipc::{self, Msg};
 use crate::limits::{self, Limits};
 use crate::mux::{self, Pane};
-use crate::news::{Board, Class, News, SUMMARY};
+use crate::news::{self, Board, Chunk, Class, News, SUMMARY};
 use crate::notice::notify as notice;
 use crate::phrases::{self, Rotor};
 use crate::presence::{self, Mode, Presence};
@@ -512,6 +512,7 @@ pub fn run() {
         rate_now: None,
         struggling_sent: 0,
     };
+    st.board.every = st.cfg.news_every * 60; // дальше — apply() при каждой смене настроек
     {
         let tx = tx.clone();
         crate::audio::watch_outs(move |default, speakers| tx.send(Event::Outs(default, speakers)).is_ok());
@@ -884,7 +885,7 @@ impl State {
             // сводке нечего считать (ни итогов, ни вопросов) — её не будет: промежуточное за тишину выбросить, как выбросила бы она,
             // срочное и восстановление — по своим правилам, дальше обычные новости
             self.quiet_over = false;
-            self.board.retain_classes(&[Class::Urgent, Class::Restore]);
+            self.board.retain_classes(&[Class::Urgent, Class::Now, Class::Restore]);
         }
         true
     }
@@ -944,6 +945,7 @@ impl State {
     fn apply(&mut self) {
         let rate = self.rate_now.clone().unwrap_or_else(|| self.cfg.rate.clone());
         *self.shared.voice.lock().unwrap() = (self.cfg.speaker.clone(), rate);
+        self.board.every = self.cfg.news_every * 60;
         if !self.cfg.agents_voice {
             limits::clear_hints(&self.hints, |_| false); // не следим — и подсказок агентам нет
             self.limits_bad = false;
@@ -1009,9 +1011,9 @@ impl State {
             // волна 3 (A): колесо над орбом
             rate_now: self.rate_now.as_deref().unwrap_or_default(),
             // волна 3 (B): полосы, знаки, интонация
-            news_every: 0,
-            earcons: false,
-            intonation: false,
+            news_every: self.cfg.news_every,
+            earcons: self.cfg.earcons,
+            intonation: self.cfg.intonation,
             // волна 4: агенты
             done_facts: false,
             permission_buttons: false,
@@ -1186,7 +1188,8 @@ impl State {
             // сводка возвращения — от Омы, не от агента: в реестре её нет, пузырь без агента открывает чат Омы; звучит итогом и без important
             self.bubble("", &format!("final-{SUMMARY}"), "Ома", &d.say, "final");
             if !self.quiet() {
-                self.board.push(News { session: d.session, class: Class::Final, say: d.say, born: (self.now_secs)() });
+                let born = (self.now_secs)();
+                self.board.push(News { session: d.session, class: Class::Final, project: String::new(), say: d.say, important: true, born });
             }
             self.speak_news();
             return;
@@ -1218,19 +1221,19 @@ impl State {
         if let Some(kind) = kind {
             self.bubble(&d.session, &format!("{kind}-{}", d.session), &who, &d.say, kind);
         }
+        // промежуточное — только строка «что сейчас» и пузырь (важное): вслух его нет
         let class = match d.ask {
             Ask::Question => Some(Class::Question),
             Ask::Final | Ask::Summary => Some(Class::Final),
             Ask::Step => d.important.then_some(Class::Final),
-            Ask::Progress => d.important.then_some(Class::Progress),
-            Ask::Hung => None,
+            Ask::Progress | Ask::Hung => None,
         };
         if let Some(class) = class.filter(|_| !self.quiet()) {
             if class == Class::Question {
                 self.board.answered(&d.session); // новый вопрос — прежний уже решён
             }
-            let say = format!("{}: {}", d.project, d.say);
-            self.board.push(News { session: d.session.clone(), class, say, born: (self.now_secs)() });
+            let born = (self.now_secs)();
+            self.board.push(News { session: d.session.clone(), class, project: d.project, say: d.say, important: d.important, born });
         }
         self.push_agents();
         self.speak_news(); // пересказ готов — звучит сразу, а не со следующим тиком
@@ -1265,22 +1268,25 @@ impl State {
         if matches!(mode, Mode::Busy | Mode::Away) || (mode == Mode::Unsure && self.here_ask.is_some()) {
             // занят — срочное сторожа всё равно звучит, без окна ответа: микрофон ему ни к чему
             if mode == Mode::Busy {
-                if let Some(t) = self.board.take_urgent(now) {
-                    eprintln!("agent-speak: говорю (срочное, {mode:?}): {}", t.chars().take(200).collect::<String>());
-                    self.enqueue(Agent::Claude, URGENT_BUSY, &t, Kind::News);
+                let t = self.board.take_urgent(now);
+                if !t.is_empty() {
+                    eprintln!("agent-speak: говорю (срочное, {mode:?}): {}", news::line(&t).chars().take(200).collect::<String>());
+                    self.enqueue_chunks(Agent::Claude, URGENT_BUSY, &t, Kind::News);
                 }
             }
             return;
         }
+        // сводка тишины ждёт своего часа и тогда, когда итоги держит окно пачки (news_every): она их и заменяет
+        let summary = self.quiet_over && self.cfg.hush_summary && self.board.overview(QUIET_OVER).is_some();
         // hyprctl — только когда и без учёта фокуса есть что сказать: итоги, ждущие ответа на вопрос, его не опрашивают каждый тик
-        if !self.board.sayable(now, None) {
+        if !self.board.sayable(now, None) && !summary {
             self.welcome &= mode == Mode::Unsure; // вводить в курс нечем — приветствие следующих новостей не ждёт
             self.quiet_over &= mode == Mode::Unsure; // и сводка тишины тоже
             return;
         }
         let focused = self.engaged();
-        let (kind, text) = if mode == Mode::Unsure {
-            if !self.board.sayable(now, focused.as_deref()) {
+        let (kind, chunks) = if mode == Mode::Unsure {
+            if !self.board.sayable(now, focused.as_deref()) && !summary {
                 return; // «Есть новости» не врёт: после «да» прозвучит хоть что-то
             }
             match self.headset {
@@ -1296,7 +1302,7 @@ impl State {
             }
             // не уверена, что слушают: сначала спросить, новости — после ответа
             self.here_said = self.rotor.next(phrases::HERE);
-            ("here", self.here_said.to_string())
+            ("here", vec![Chunk::oma(self.here_said)])
         } else {
             let mut parts = Vec::new();
             if std::mem::take(&mut self.welcome) {
@@ -1305,10 +1311,10 @@ impl State {
                     return; // вводить в курс нечем — приветствие без новостей не нужно
                 }
                 self.board.drop_focused(focused.as_deref()); // не в обзор и не в сводку
-                parts.push(self.rotor.next(phrases::WELCOME).to_string());
-                parts.extend(self.board.overview(self.rotor.next(phrases::AWAY)));
+                parts.push(Chunk::oma(self.rotor.next(phrases::WELCOME)));
+                parts.extend(self.board.overview(self.rotor.next(phrases::AWAY)).map(Chunk::oma));
                 if self.board.finals() > SUMMARY_OVER {
-                    let lines: Vec<String> = self.board.take_finals().into_iter().map(|n| n.say).collect();
+                    let lines: Vec<String> = self.board.take_finals().iter().map(News::line).collect();
                     let job = Job { session: SUMMARY.into(), project: String::new(), ask: Ask::Summary, text: lines.join("\n"), context: String::new(), fallback: Some(lines.join(" ")) };
                     let _ = self.digest.send(job);
                 }
@@ -1317,21 +1323,22 @@ impl State {
                 // агент остаётся красным в орбе и окне, срочное сторожа звучит по своим правилам. Без сводки — как после тишины.
                 if self.cfg.hush_summary {
                     self.board.drop_focused(focused.as_deref());
-                    parts.extend(self.board.overview(QUIET_OVER));
-                    self.board.retain_classes(&[Class::Urgent, Class::Restore]);
+                    parts.extend(self.board.overview(QUIET_OVER).map(Chunk::oma));
+                    self.board.retain_classes(&[Class::Urgent, Class::Now, Class::Restore]);
                 } else {
-                    self.board.retain_classes(&[Class::Urgent, Class::Restore, Class::Question]);
+                    self.board.retain_classes(&[Class::Urgent, Class::Now, Class::Restore, Class::Question]);
                 }
             }
             parts.extend(self.board.take(now, focused.as_deref()));
             if parts.is_empty() {
                 return;
             }
-            (if self.board.asked().is_some() { "question" } else { "news" }, parts.join(" "))
+            (if self.board.asked().is_some() { "question" } else { "news" }, parts)
         };
+        let text = news::line(&chunks);
         eprintln!("agent-speak: говорю ({kind}, {mode:?}): {}", text.chars().take(200).collect::<String>());
         // «Ты тут?» — своей сессией: окно ответа открывается, когда пойдёт его звук (on_sound)
-        let n = self.enqueue(Agent::Claude, if kind == "here" { "here" } else { "news" }, &text, Kind::News);
+        let n = self.enqueue_chunks(Agent::Claude, if kind == "here" { "here" } else { "news" }, &chunks, Kind::News);
         if kind == "here" {
             self.here_ask = (n > 0).then_some(HereAsk::Queued(n));
         }
@@ -1452,30 +1459,64 @@ impl State {
 
     /// Подготовить и поставить в очередь; незнакомые слова — в фон. Возвращает число фраз.
     fn enqueue(&mut self, agent: Agent, session: &str, raw: &str, kind: Kind) -> usize {
+        self.enqueue_chunks(agent, session, &[Chunk::oma(raw)], kind)
+    }
+
+    /// То же для кусков новости. У куска агента (с классом) — знак перед первой фразой (как у прошлого куска — не
+    /// повторяется) и интонация по классу; проект — отдельно от фразы (lead), после него адаптер синтеза ставит паузу.
+    /// Выключенные earcons и intonation снимают своё: кусок звучит целиком, «проект: фраза», как раньше.
+    fn enqueue_chunks(&mut self, agent: Agent, session: &str, chunks: &[Chunk], kind: Kind) -> usize {
         if !audible(&kind, self.muted()) {
-            eprintln!("agent-speak: пропущено (тихо): {}", raw.chars().take(40).collect::<String>());
+            eprintln!("agent-speak: пропущено (тихо): {}", news::line(chunks).chars().take(40).collect::<String>());
             return 0;
         }
-        let (sentences, unknown) = prepare(raw, &self.terms.lock().unwrap());
-        for w in unknown {
-            let _ = self.learn.send((agent.clone(), w));
-        }
-        let n = sentences.len();
-        if n == 0 {
-            // весь текст — код, эмодзи или вырезки: звука не будет, текст остался только в пузыре
-            eprintln!("agent-speak: нечего сказать вслух: {}", raw.chars().take(80).collect::<String>());
-        }
-        // образец — один элемент: каждый push Preview вытесняет прежний
-        let sentences = if kind == Kind::Preview && !sentences.is_empty() { vec![sentences.join(" ")] } else { sentences };
         // реплика Омы с номером — её звука Ома ждёт; пришедшая на паузу пользователя ждёт снятия паузы, а не Ома — без номера
         let voice = if kind == Kind::Voice && !self.user_paused() { self.voices } else { 0 };
+        let mut items: Vec<Item> = Vec::new();
+        let mut last_cue = None;
+        for c in chunks {
+            let class = c.class.filter(|_| kind == Kind::News);
+            let split = self.cfg.intonation && class.is_some() && !c.project.is_empty();
+            // проект — своим prepare: строку он кончает точкой, а двоеточие и паузу после проекта ставит адаптер синтеза
+            let lead = |st: &Self| st.to_speech(&agent, &c.project).join(" ").trim_end_matches('.').to_string();
+            let (lead, body) = if split { (lead(self), c.text.clone()) } else { (String::new(), c.line()) };
+            let sentences = self.to_speech(&agent, &body);
+            if sentences.is_empty() {
+                // весь текст — код, эмодзи или вырезки: звука не будет, текст остался только в пузыре
+                eprintln!("agent-speak: нечего сказать вслух: {}", c.line().chars().take(80).collect::<String>());
+                continue;
+            }
+            let cue = class.and_then(Class::cue).filter(|_| self.cfg.earcons);
+            let tone = class.filter(|_| self.cfg.intonation).map_or("", Class::tone);
+            for (i, text) in sentences.into_iter().enumerate() {
+                let (cue, lead) = if i == 0 { (cue.filter(|_| cue != last_cue), lead.clone()) } else { (None, String::new()) };
+                items.push(Item { session: session.into(), text, kind: kind.clone(), voice, cue, tone, lead });
+            }
+            last_cue = cue;
+        }
+        // образец — один элемент: каждый push Preview вытесняет прежний
+        if kind == Kind::Preview && items.len() > 1 {
+            let text = items.iter().map(|i| i.text.as_str()).collect::<Vec<_>>().join(" ");
+            items.truncate(1);
+            items[0].text = text;
+        }
+        let n = items.len();
         let mut q = self.shared.queue.lock().unwrap();
-        for text in sentences {
-            q.push(Item { session: session.into(), text, kind: kind.clone(), voice });
+        for item in items {
+            q.push(item);
         }
         drop(q);
         self.shared.cv.notify_all();
         n
+    }
+
+    /// Текст → предложения для синтеза; незнакомые слова — в фон.
+    fn to_speech(&self, agent: &Agent, raw: &str) -> Vec<String> {
+        let (sentences, unknown) = prepare(raw, &self.terms.lock().unwrap());
+        for w in unknown {
+            let _ = self.learn.send((agent.clone(), w));
+        }
+        sentences
     }
 
     /// Очередь на паузе пользователя (кнопка), а не на её паузе при перебиве.
@@ -2170,7 +2211,9 @@ impl State {
         let kind = if class == Class::Question { "question" } else { "status" };
         self.bubble(if known.is_some() { session } else { "" }, &format!("watch-{session}"), &who, text, kind);
         if !self.quiet() {
-            self.board.push(News { session: session.into(), class, say: text.into(), born: (self.now_secs)() });
+            // «проект: …» ставит сам сторож (watch.rs); лимит и прочее без проекта — без «: »
+            let (project, say) = text.split_once(": ").unwrap_or(("", text));
+            self.board.push(News { session: session.into(), class, project: project.into(), say: say.into(), important: false, born: (self.now_secs)() });
         }
     }
 
@@ -2247,7 +2290,8 @@ mod tests {
     fn test_state() -> State {
         let shared = Arc::new(Shared::new(Queue::new(), "xenia".into(), "medium".into()));
         State {
-            cfg: Config::default(),
+            // без бюджета пачки: тесты речи — по порядку новостей; бюджет проверяют свои тесты (news_every)
+            cfg: Config { news_every: 0, ..Config::default() },
             shared,
             terms: Arc::new(Mutex::new(Terms::from_str(""))),
             learn: mpsc::channel().0,
@@ -2358,20 +2402,20 @@ mod tests {
         st.on_acted(mux::Done { session: "a".into(), what: What::Interrupt, err: None });
         let b = bubbles(&mut r);
         assert_eq!((b.len(), b[0]["agent"].as_str(), b[0]["text"].as_str()), (1, Some("a"), Some("a: прервала зависшего сабагента, агент запустит его заново.")));
-        assert_eq!(st.board.take(2000, None).unwrap(), "a: прервала зависшего сабагента, агент запустит его заново.");
+        assert_eq!(board_line(&mut st, 2000).unwrap(), "a: прервала зависшего сабагента, агент запустит его заново.");
     }
 
     #[test]
     fn urgent_speaks_while_busy_not_while_away() {
         let mut st = test_state();
         snap(&mut st, serde_json::json!({"at": 1000, "camera": true}));
-        st.board.push(News { session: "f".into(), class: Class::Final, say: "Фича готова.".into(), born: 1 });
-        st.board.push(News { session: "u".into(), class: Class::Urgent, say: "Агент завис, посмотри сам.".into(), born: 2 });
+        st.board.push(nw("f", Class::Final, "Фича готова.", 1));
+        st.board.push(nw("u", Class::Urgent, "Агент завис, посмотри сам.", 2));
         st.speak_news();
         assert_eq!(texts(&st), ["Агент завис, посмотри сам."]);
         assert!(st.listen_after.is_none(), "занятому микрофон не открываем");
         snap(&mut st, serde_json::json!({"at": 1000, "locked": true}));
-        st.board.push(News { session: "u".into(), class: Class::Urgent, say: "Агент снова завис.".into(), born: 3 });
+        st.board.push(nw("u", Class::Urgent, "Агент снова завис.", 3));
         st.speak_news();
         assert!(texts(&st).is_empty(), "нет на месте — в пустую комнату не говорим");
     }
@@ -2443,12 +2487,12 @@ mod tests {
         st.watch_tick();
         let text = crate::limits::warn_text(&crate::limits::from_statusline(&serde_json::json!({"rate_limits": {"five_hour": {"used_percentage": 91.0, "resets_at": 9000}}}))[0], 1000);
         assert_eq!(said(&mut r), (vec![text.clone()], vec![text.clone()]), "строка состояния и пузырь Омы");
-        assert_eq!(st.board.take(1000, None).as_deref(), Some(text.as_str()), "и голосом — с доски");
+        assert_eq!(board_line(&mut st, 1000).as_deref(), Some(text.as_str()), "и голосом — с доски");
         assert_eq!(serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["limit_warn"], true);
         statusline(&mut st, 95.0, 9000);
         st.watch_tick();
         assert_eq!(said(&mut r), (vec![], vec![]), "тот же сброс — тот же эпизод: фраза один раз, строка без смены");
-        assert!(st.board.take(1000, None).is_none());
+        assert!(board_line(&mut st, 1000).is_none());
         statusline(&mut st, 40.0, 9000);
         st.watch_tick();
         assert_eq!(said(&mut r).0, [""], "ниже порога — дуга гаснет");
@@ -2548,7 +2592,7 @@ mod tests {
         st.watch_tick();
         let lines = drain(&mut r);
         assert!(lines.iter().any(|v| v["running"] == true && v["trouble"] == 1), "{lines:?}");
-        assert_eq!(st.board.take(2000, None).unwrap(), "a: агент висит на опасном шаге — push; не трогаю, загляни, пожалуйста.");
+        assert_eq!(board_line(&mut st, 2000).unwrap(), "a: агент висит на опасном шаге — push; не трогаю, загляни, пожалуйста.");
     }
 
     #[test]
@@ -2712,6 +2756,82 @@ mod tests {
                 "memory",                                                       // память между днями
             ]
         );
+    }
+
+    #[test]
+    fn status_line_carries_lanes_settings() {
+        let v = |st: &State| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap();
+        let mut st = test_state();
+        st.cfg = Config::default();
+        assert_eq!((v(&st)["news_every"].clone(), v(&st)["earcons"].clone(), v(&st)["intonation"].clone()), (10.into(), true.into(), true.into()));
+        st.cfg.news_every = 0;
+        st.cfg.earcons = false;
+        st.cfg.intonation = false;
+        assert_eq!((v(&st)["news_every"].clone(), v(&st)["earcons"].clone(), v(&st)["intonation"].clone()), (0.into(), false.into(), false.into()));
+    }
+
+    /// Очередь как есть: (знак, тон, проект, текст).
+    fn queued(st: &State) -> Vec<(Option<crate::audio::Cue>, &'static str, String, String)> {
+        let mut q = st.shared.queue.lock().unwrap();
+        std::iter::from_fn(|| q.pop()).map(|i| (i.cue, i.tone, i.lead, i.text)).collect()
+    }
+
+    #[test]
+    fn news_chunks_carry_cue_tone_and_lead() {
+        use crate::audio::Cue;
+        let chunks = || {
+            vec![
+                Chunk::oma("С возвращением."),
+                Chunk { class: Some(Class::Urgent), project: "плуг".into(), text: "связь не держится.".into() },
+                Chunk { class: Some(Class::Urgent), project: "ома".into(), text: "агент висит. Нужна помощь.".into() },
+                Chunk { class: Some(Class::Restore), project: "плуг".into(), text: "перезапустила агента.".into() },
+                Chunk { class: Some(Class::Question), project: "плуг".into(), text: "куда пушить?".into() },
+            ]
+        };
+        let mut st = test_state();
+        assert_eq!(st.enqueue_chunks(Agent::Claude, "news", &chunks(), Kind::News), 6);
+        assert_eq!(queued(&st), [
+            (None, "", "".into(), "С возвращением.".into()), // строки Омы — без знака и интонации
+            (Some(Cue::Help), "alarm", "плуг".into(), "связь не держится.".into()),
+            (None, "alarm", "ома".into(), "агент висит.".into()), // тот же знак подряд не повторяется
+            (None, "alarm", "".into(), "Нужна помощь.".into()),  // проект — только перед первой фразой
+            (None, "", "плуг".into(), "перезапустила агента.".into()),
+            (Some(Cue::Ask), "ask", "плуг".into(), "куда пушить?".into()),
+        ]);
+        st.cfg.earcons = false;
+        st.enqueue_chunks(Agent::Claude, "news", &chunks()[1..2], Kind::News);
+        assert_eq!(queued(&st), [(None, "alarm", "плуг".into(), "связь не держится.".into())], "знаки выключены");
+        st.cfg = Config { earcons: true, intonation: false, ..Config::default() };
+        st.enqueue_chunks(Agent::Claude, "news", &chunks()[1..2], Kind::News);
+        assert_eq!(queued(&st), [(Some(Cue::Help), "", "".into(), "плуг: связь не держится.".into())], "интонация выключена — кусок целиком");
+        st.cfg = Config::default();
+        st.enqueue_chunks(Agent::Claude, "s", &chunks()[1..2], Kind::Read);
+        assert_eq!(queued(&st), [(None, "", "".into(), "плуг: связь не держится.".into())], "знак и интонация — только у новостей");
+    }
+
+    #[test]
+    fn finals_batch_once_per_news_every() {
+        let (mut st, now) = presence_state(1000);
+        st.cfg.news_every = 10;
+        st.apply();
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 0}));
+        final_s(&mut st);
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Фича готова."], "первый итог после тишины — сразу");
+        *now.lock().unwrap() = 1100;
+        st.on_digest(dg("t", Ask::Final, false, "Тесты прошли."));
+        st.on_digest(dg("s", Ask::Final, false, "Ещё фича."));
+        snap(&mut st, serde_json::json!({"at": 1100, "idle_since": 0}));
+        st.tick();
+        assert!(texts(&st).is_empty(), "итоги ждут конца окна пачки");
+        question(&mut st, "t", true, "Удалить старый код?");
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Удалить старый код?"], "вопрос — сразу");
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "t", "prompt": "да"}));
+        *now.lock().unwrap() = 1600;
+        snap(&mut st, serde_json::json!({"at": 1600, "idle_since": 0}));
+        st.tick();
+        assert_eq!(texts(&st), ["Закончил: плуг."], "пачка — одной фразой кодом; два агента одного проекта — одно имя");
     }
 
     #[test]
@@ -3373,7 +3493,24 @@ mod tests {
 
     fn texts(st: &State) -> Vec<String> {
         let mut q = st.shared.queue.lock().unwrap();
-        std::iter::from_fn(|| q.pop()).map(|i| i.text).collect()
+        std::iter::from_fn(|| q.pop()).map(said).collect()
+    }
+
+    /// Фраза, как она звучит: проект (lead интонации) — «проект: фраза».
+    fn said(i: Item) -> String {
+        if i.lead.is_empty() { i.text } else { format!("{}: {}", i.lead, i.text) }
+    }
+
+    /// Новость из строки «проект: фраза», как её собирают on_digest и сторож; без «: » — без проекта.
+    fn nw(session: &str, class: Class, line: &str, born: u64) -> News {
+        let (project, say) = line.split_once(": ").unwrap_or(("", line));
+        News { session: session.into(), class, project: project.into(), say: say.into(), important: false, born }
+    }
+
+    /// Пачка доски одной строкой; пусто — None.
+    fn board_line(st: &mut State, now: u64) -> Option<String> {
+        let c = st.board.take(now, None);
+        (!c.is_empty()).then(|| news::line(&c))
     }
 
     fn md(st: &mut State, session: &str, text: &str) {
@@ -3643,7 +3780,7 @@ mod tests {
     }
 
     fn pop1(st: &State) -> String {
-        st.shared.queue.lock().unwrap().pop().unwrap().text
+        said(st.shared.queue.lock().unwrap().pop().unwrap())
     }
 
     #[test]
@@ -4163,8 +4300,10 @@ mod tests {
         st.on_digest(dg("s", Ask::Progress, true, "Нашла утечку памяти."));
         let b = bubbles(&mut r);
         assert_eq!((b.len(), b[0]["kind"].as_str()), (1, Some("status")));
+        assert_eq!(st.registry.get("s").unwrap().status, "Нашла утечку памяти.");
         st.tick();
-        assert_eq!(texts(&st), ["плуг: Нашла утечку памяти."]);
+        assert!(texts(&st).is_empty(), "промежуточное, и важное, — только в окне и пузыре: вслух его нет");
+        assert!(st.board.is_empty());
     }
 
     #[test]
@@ -4434,10 +4573,10 @@ mod tests {
         // видео — Busy: срочное сторожа звучит, но видео трогает только сам пользователь (правило 7 дизайна)
         let (mut st, _now) = presence_state(1000);
         snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 990, "video": true}));
-        st.board.push(News { session: "s".into(), class: Class::Urgent, say: "плуг: агент завис.".into(), born: 1000 });
+        st.board.push(nw("s", Class::Urgent, "плуг: агент завис.", 1000));
         st.tick();
         let item = st.shared.queue.lock().unwrap().pop().unwrap();
-        assert_eq!(item.text, "плуг: агент завис.");
+        assert_eq!((item.lead.as_str(), item.text.as_str()), ("плуг", "агент завис."));
         st.shared.set_busy(Some(&item.session));
         assert!(!st.media_hold(), "срочное при видео — видео не на паузе");
         st.shared.set_busy(None);
@@ -5330,6 +5469,26 @@ mod tests {
     }
 
     #[test]
+    fn screencast_summary_is_not_held_by_the_batch_window() {
+        // итоги за показ держит и окно пачки (news_every): сводка тишины их заменяет — звучит на выходе из тишины, а не через 10 мин
+        let (mut st, now) = presence_state(1000);
+        st.cfg.news_every = 10;
+        st.apply();
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 0}));
+        st.on_digest(dg("t", Ask::Final, false, "Тесты прошли."));
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Тесты прошли."]);
+        *now.lock().unwrap() = 1010;
+        sharing(&mut st, 1010, true);
+        final_s(&mut st);
+        *now.lock().unwrap() = 1030;
+        sharing(&mut st, 1030, false);
+        st.tick();
+        assert_eq!(texts(&st), ["Пока было тихо: один проект закончил."]);
+        assert!(st.board.is_empty());
+    }
+
+    #[test]
     fn nothing_kept_nothing_said() {
         let (mut st, now) = presence_state(1000);
         sharing(&mut st, 1000, true);
@@ -5361,7 +5520,7 @@ mod tests {
     fn kept_only_while_busy(class: Class) -> Vec<String> {
         let (mut st, now) = presence_state(1000);
         snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 0, "screencast": true, "mic": true}));
-        st.board.push(News { session: "t".into(), class, say: "плуг: агент завис.".into(), born: 1000 });
+        st.board.push(nw("t", class, "плуг: агент завис.", 1000));
         *now.lock().unwrap() = 1030;
         snap(&mut st, serde_json::json!({"at": 1030, "idle_since": 0, "mic": true}));
         st.tick();
@@ -5378,25 +5537,6 @@ mod tests {
     #[test]
     fn urgent_only_kept_no_summary_later() {
         assert_eq!(kept_only_while_busy(Class::Urgent), ["плуг: Фича готова."]);
-    }
-
-    #[test]
-    fn progress_only_kept_is_dropped_not_spoken_later() {
-        // за тишину по причине легло только промежуточное (progress_digest вкл): сводки нет, и шаги не звучат обычной новостью
-        for summary in [true, false] {
-            let (mut st, now) = presence_state(1000);
-            st.cfg.hush_summary = summary;
-            snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 0, "screencast": true}));
-            st.board.push(News { session: "t".into(), class: Class::Progress, say: "плуг: нашёл утечку.".into(), born: 1000 });
-            *now.lock().unwrap() = 1030;
-            snap(&mut st, serde_json::json!({"at": 1030, "idle_since": 0}));
-            st.tick();
-            assert!(!st.quiet_over);
-            assert!(texts(&st).is_empty(), "промежуточное за тишину не звучит (hush_summary={summary})");
-            final_s(&mut st);
-            st.tick();
-            assert_eq!(texts(&st), ["плуг: Фича готова."], "следующий итог — своим текстом");
-        }
     }
 
     #[test]
