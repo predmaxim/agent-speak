@@ -1818,10 +1818,8 @@ impl State {
     }
 
     /// Средний клик по орбу: говорит или есть что сказать — стоп, как `read`; иначе сводка агентов одной фразой кодом
-    /// (`Registry::brief`, без модели) — вслух и пузырём Омы. Жест явный: звучит и в тихом режиме (Kind::Read).
-    /// Не следим за агентами — ничего.
-    // shortcut: причины тишины («Не беспокоить», показ экрана) в main ещё нет (волна 2 (A)) — с ней при причине
-    // сводка только пузырём, без enqueue (дизайн «Джарвис», «Решения строителя»: СКМ по орбу)
+    /// (`Registry::brief`, без модели) — вслух и пузырём Омы. Жест явный: звучит и в тихом режиме (Kind::Read); при
+    /// тишине по причине — только пузырь (дизайн «Джарвис», «Решения строителя»: СКМ по орбу). Не следим за агентами — ничего.
     fn summary(&mut self) {
         if !self.cfg.agents_voice {
             return;
@@ -1831,8 +1829,11 @@ impl State {
             return;
         }
         let text = self.registry.brief();
-        self.bubble("", "summary", "Ома", &text, "oma");
-        self.enqueue(Agent::Claude, "summary", &text, Kind::Read);
+        self.bubble("", "summary", "Ома", &text, "oma"); // при показе экрана bubble() закрывает текст
+        // тихий режим жест не глушит (он явный), а тишина по причине («Не беспокоить», показ экрана) — только пузырь
+        if !self.quiet_why.any() {
+            self.enqueue(Agent::Claude, "summary", &text, Kind::Read);
+        }
     }
 
     fn on_hook(&mut self, kind: &str, p: &serde_json::Value) {
@@ -3433,6 +3434,23 @@ mod tests {
         st.cfg.agents_voice = false;
         st.on_msg(Msg::Summary);
         assert!(texts(&st).is_empty() && bubbles(&mut r).is_empty());
+    }
+
+    #[test]
+    fn summary_under_quiet_reason_is_only_a_bubble() {
+        // тишина по причине: при показе экрана — пузырь с маской, при «Не беспокоить» — пузырь как есть; звука нет
+        let mut st = test_state();
+        with_agents(&mut st, &["почта"]);
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        st.quiet_why.screencast = true;
+        st.on_msg(Msg::Summary);
+        assert!(texts(&st).is_empty(), "показ экрана — сводка не звучит");
+        assert_eq!(bubbles(&mut r).iter().map(|b| b["text"].as_str().unwrap().to_string()).collect::<Vec<_>>(), ["ответ в окне"]);
+        st.quiet_why = QuietWhy { dnd: true, screencast: false };
+        st.on_msg(Msg::Summary);
+        assert!(texts(&st).is_empty(), "«Не беспокоить» — сводка не звучит");
+        assert_eq!(bubbles(&mut r).iter().map(|b| b["text"].as_str().unwrap().to_string()).collect::<Vec<_>>(), ["Работает почта."]);
     }
 
     fn sub(st: &mut State) -> BufReader<UnixStream> {
