@@ -134,7 +134,12 @@ fn later_msg(a: &[String]) -> Option<Msg> {
     let ok = matches!((act, n), ("tell", 3 | 4) | ("checks", 3) | ("cancel", 2) | ("list", 1));
     let pr = if act == "checks" { arg(2).trim_start_matches('#').parse().ok()? } else { 0 };
     let (session, text, gist) = if act == "tell" { (arg(1), arg(2), arg(3)) } else { Default::default() };
-    ok.then(|| Msg::Later { act: act.into(), session, text, gist, path: if act == "checks" { arg(1) } else { String::new() }, pr, id: if act == "cancel" { arg(1) } else { String::new() } })
+    ok.then(|| Msg::Later { act: act.into(), session, text, gist, path: if act == "checks" { absolute(&arg(1)) } else { String::new() }, pr, id: if act == "cancel" { arg(1) } else { String::new() } })
+}
+
+/// Папка от папки вызвавшего, а не службы: `later checks . 12` в проекте — этот проект.
+fn absolute(p: &str) -> String {
+    std::path::absolute(p).map_or_else(|_| p.to_string(), |a| a.to_string_lossy().into_owned())
 }
 
 /// Исход команды Омы: ошибка — одна строка в stderr (её дословно получает мозг), код 1.
@@ -254,6 +259,8 @@ mod tests {
         let tell = a(&["tell", "s1", "Прогони тесты", "тесты"]).unwrap();
         assert_eq!((tell["do"].as_str(), tell["session"].as_str(), tell["text"].as_str(), tell["gist"].as_str()), (Some("tell"), Some("s1"), Some("Прогони тесты"), Some("тесты")));
         assert_eq!(a(&["tell", "s1", "x"]).unwrap()["gist"], "");
+        let here = a(&["checks", ".", "3"]).unwrap();
+        assert_eq!(here["path"].as_str().unwrap(), std::env::current_dir().unwrap().to_string_lossy(), "папка вызвавшего, а не службы");
         let c = a(&["checks", "/p/x", "#12"]).unwrap();
         assert_eq!((c["path"].as_str(), c["pr"].as_u64()), (Some("/p/x"), Some(12)));
         assert_eq!(a(&["cancel", "later-3"]).unwrap()["id"], "later-3");

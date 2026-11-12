@@ -55,7 +55,8 @@ impl Later {
         let mut l = Later { list, n, file, out, spawn, procs: Vec::new() };
         for o in l.list.clone().iter().filter(|o| o.kind == "checks") {
             if let Err(e) = l.start(o) {
-                eprintln!("agent-speak: проверки {} не запустились: {e}", o.id);
+                // не запустились заново (нет gh, нет папки) — исход ошибкой: Ома скажет его, поручение снимется
+                let _ = l.out.send(Done::Checked { id: o.id.clone(), result: Err(e) });
             }
         }
         l
@@ -263,6 +264,18 @@ mod tests {
         // отмена погасила процесс: его pidfd стал читаемым (процесс вышел)
         let mut p = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
         assert_eq!(unsafe { libc::poll(&mut p, 1, 3000) }, 1, "gh отменённых проверок не ходит в GitHub дальше");
+    }
+
+    #[test]
+    fn checks_that_cannot_restart_end_with_their_error() {
+        let file = std::env::temp_dir().join(format!("oma-later-checks-{}.json", std::process::id()));
+        let o = Order { id: "later-4".into(), kind: "checks".into(), agent: String::new(), who: "x".into(), text: String::new(), gist: "проверки PR 12".into(), path: "/gone".into(), pr: 12, since: 1, due: false };
+        std::fs::write(&file, serde_json::to_string(&vec![o]).unwrap()).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let l = Later::load(file.clone(), tx, no_gh);
+        let Ok(Done::Checked { id, result: Err(e) }) = rx.try_recv() else { panic!("исход ошибкой — иначе висело бы вечно") };
+        assert_eq!((id.as_str(), e.as_str(), l.list.len()), ("later-4", "gh не установлен — проверки PR не умею", 1), "снимает его служба по этому исходу");
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]

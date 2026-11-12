@@ -776,7 +776,7 @@ fn listen_cmd(kind: &str, said: &str, key: Option<String>, speakers: bool, secs:
 /// Ответ на запрос (tell, turn) — строкой в то же соединение (не подписанное: там запрос получает отказ). Ответ ложится
 /// в буфер сокета; клиент, который его не читает, не держит поток вечно: буфер полон — запись ждёт не больше секунды,
 /// затем соединение закрывается — клиент переподключится.
-fn answer(conn: &UnixStream, line: &str) -> bool {
+pub(crate) fn answer(conn: &UnixStream, line: &str) -> bool {
     let _ = conn.set_write_timeout(Some(Duration::from_secs(1)));
     let mut w = conn;
     w.write_all(line.as_bytes()).is_ok()
@@ -2160,8 +2160,9 @@ impl State {
                 }
                 self.registry.reload(&session, &last);
                 self.board.answered(&session); // ход кончился — вопрос решён, хоть разрешение и дали в терминале без промпта
-                if self.perms.end(&session) {
-                    self.push_perms(); // ход кончился — его запросы разрешений тоже, хуки не переживают Stop
+                // ход кончился — его запросы разрешений тоже, хуки не переживают Stop; помощники в фоне — их запросы живы
+                if self.perms.end(&session, !waiting) {
+                    self.push_perms();
                 }
                 self.progress.remove(&session); // промежуточное покрывает итог
                 // shortcut: вопрос текстом в конце такого хода не звучит (AskUserQuestion — звучит), научить, если начнёт теряться; помощник без отчёта держит ход «работает», пока его запуск не уйдёт из хвоста 256 КБ
@@ -2260,8 +2261,13 @@ impl State {
             self.bubble("", &format!("perm-{session}"), "Ома", "Запрос уже решён в терминале.", "oma");
         } else {
             let what = format!("{} в окне Омы: {}", if allow { "Разрешено" } else { "Отклонено" }, card.line());
-            self.registry.status(&session, &what, (self.now_secs)());
-            self.board.answered(&session); // решено — «просит разрешение» больше не звучит
+            if self.perms.open(&session) > 0 {
+                // открыт ещё запрос той же сессии (помощники, параллельные вызовы): агент по-прежнему ждёт
+                self.registry.question(&session, &what, (self.now_secs)());
+            } else {
+                self.registry.status(&session, &what, (self.now_secs)());
+                self.board.answered(&session); // решено — «просит разрешение» больше не звучит
+            }
         }
         self.push_perms();
         self.push_agents();
@@ -2274,19 +2280,21 @@ impl State {
         }
     }
 
-    /// `agent-speak later …` и кнопка окна. tell — только работающему агенту (свободному Ома передаёт сразу) и одно на
-    /// агента; голосом его ставит код Омы после «да, передай» (python/agent_voice/orders.py), набранное — сразу.
+    /// `agent-speak later …` и кнопка окна. tell — одно на агента; голосом его ставит код Омы после «да, передай»
+    /// (python/agent_voice/orders.py: свободному агенту она отложить не предлагает), набранное — сразу.
     fn later_cmd(&mut self, m: Msg) -> Result<String, String> {
         let Msg::Later { act, session, text, gist, path, pr, id } = m else { return Err("не later".into()) };
         let now = (self.now_secs)();
         let r = match act.as_str() {
             "tell" => {
                 let e = self.registry.get(&session).ok_or("такого агента нет")?;
-                if e.state != agents::State::Working {
-                    return Err(format!("{} свободен — передай сразу", e.project));
+                // агент уже закончил (пока Ома ждала «да, передай») — поручение уходит сразу: одно подтверждение — одна передача
+                let (who, free) = (e.project.clone(), matches!(e.state, agents::State::Done | agents::State::Idle));
+                let r = self.later.tell(&session, &who, &text, &gist, now);
+                if r.is_ok() && free {
+                    self.later.list.iter_mut().filter(|o| o.kind == "tell" && o.agent == session).for_each(|o| o.due = true);
                 }
-                let who = e.project.clone();
-                self.later.tell(&session, &who, &text, &gist, now)
+                r
             }
             "checks" => self.later.checks(&path, pr, now),
             "cancel" => self.later.take(&id).map(|o| o.id).ok_or_else(|| "такого поручения нет".to_string()),
@@ -2295,6 +2303,7 @@ impl State {
         };
         if r.is_ok() {
             self.push_later();
+            self.deliver_later();
         }
         r
     }
@@ -4192,6 +4201,23 @@ mod tests {
     }
 
     #[test]
+    fn permission_two_open_cards_each_answered_by_its_click() {
+        // помощники или параллельные вызовы одной сессии: первый клик не делает второй карточке «уже решено»
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let (h1, mut r1) = perm_hook();
+        let (h2, mut r2) = perm_hook();
+        st.on_permission("perm-1".into(), perm_req("a", "p1", "cargo test"), h1);
+        st.on_permission("perm-2".into(), perm_req("a", "p1", "cargo build"), h2);
+        st.on_msg(Msg::Permit { id: "perm-1".into(), allow: true });
+        assert_eq!(decision(&mut r1), "allow");
+        assert_eq!(st.registry.get("a").unwrap().state, crate::agents::State::Waiting, "второй запрос ещё ждёт");
+        st.on_msg(Msg::Permit { id: "perm-2".into(), allow: false });
+        assert_eq!(decision(&mut r2), "deny");
+        assert_eq!(st.registry.get("a").unwrap().state, crate::agents::State::Working);
+    }
+
+    #[test]
     fn permission_click_after_terminal_answer_does_not_pretend() {
         // «Yes» в терминале: хуку ничего не приходит, PostToolUse — только после конца команды; файл сессии уже «работает»
         let mut st = test_state();
@@ -4314,16 +4340,19 @@ mod tests {
     }
 
     #[test]
-    fn later_tell_only_for_a_working_agent_and_waits_while_the_user_types_in_it() {
+    fn later_tell_to_a_finished_agent_goes_at_once_and_waits_while_the_user_types_in_it() {
         let mut st = test_state();
         with_agents(&mut st, &["a"]);
         let acts = acts(&mut st);
         assert_eq!(st.later_cmd(later_msg("tell", "нет", "x")), Err("такого агента нет".into()));
+        // агент закончил, пока Ома спрашивала «да, передай» (свободному Ома не предлагает отложить — проверка в orders.py)
         st.registry.finished("a", "Готово.", 1000);
-        assert_eq!(st.later_cmd(later_msg("tell", "a", "x")), Err("a свободен — передай сразу".into()));
+        st.later_cmd(later_msg("tell", "a", "x")).unwrap();
+        assert!(delivered(&acts), "одно подтверждение — одна передача: сейчас");
         st.registry.prompt("a", "дальше", 1000);
         st.later_cmd(later_msg("tell", "a", "Прогони тесты")).unwrap();
         st.focus_src = Box::new(|| Some(sref("a"))); // его вкладка в фокусе, ввод — только что: Ctrl+U стёр бы черновик
+        st.focus_cache = None;
         stop(&mut st, "a", "Готово.");
         assert!(!delivered(&acts));
         st.focus_src = Box::new(|| None);

@@ -99,6 +99,7 @@ Item {
   // A card's button under the keys (←/→): 0 Allow, 1 Deny; -1 none — Enter on a card does not answer by chance.
   property int permCol: -1
   onCursorKeyChanged: permCol = -1
+  onSharingChanged: permCol = -1   // the buttons are gone: a choice made before must not answer the hidden card
   property bool onHead: false
   property int headCol: 0
   property int hoursCol: 0           // the hours row's dropdown: 0 from, 1 to
@@ -345,7 +346,7 @@ Item {
   function activateMain(key) {
     var item = function(list, id) { return Array.prototype.slice.call(list).filter(function(x) { return x.id === id })[0] }
     if (key.indexOf("perm:") === 0) {
-      if (root.permCol >= 0) return root.permit(key.slice(5), root.permCol === 0)
+      if (root.permCol >= 0 && !root.sharing) return root.permit(key.slice(5), root.permCol === 0)
       var p = item(root.perms, key.slice(5))
       return p ? root.openChat("agent:" + p.agent) : null
     }

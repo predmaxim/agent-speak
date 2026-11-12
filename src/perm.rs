@@ -6,9 +6,7 @@
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::Write;
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
 
 /// Инструменты, которым решение без `updatedInput` не годится (hooks.md, PermissionRequest: «need this field»): их
 /// вопросы отвечает `tell`, карточки нет.
@@ -29,9 +27,8 @@ pub struct Card {
 }
 
 /// Строка решения хуку: allow | deny | "" (без решения — терминал спрашивает как обычно). false — хука уже нет.
-fn answer(mut hook: &UnixStream, decision: &str) -> bool {
-    let _ = hook.set_write_timeout(Some(Duration::from_secs(1)));
-    hook.write_all(format!("{}\n", json!({"decision": decision})).as_bytes()).is_ok()
+fn answer(hook: &UnixStream, decision: &str) -> bool {
+    crate::daemon::answer(hook, &format!("{}\n", json!({"decision": decision})))
 }
 
 impl Card {
@@ -46,8 +43,9 @@ impl Card {
     }
 }
 
-/// Что показать о вызове: инструмент («Bash», «github: create_issue»), главная строка — ровно то, что одобряется,
-/// и тусклая строка (описание команды). Ввод показывается целиком: одобряется ровно показанное.
+/// Что показать о вызове (дизайн «Джарвис», «Текст карточки»): инструмент («Bash», «github: create_issue»), главная
+/// строка и тусклая строка (описание команды). У Bash, MCP и прочих — ввод целиком; у правок и записи — только файл
+/// (их содержимое — в диалоге терминала), у WebFetch — адрес, у WebSearch — запрос.
 pub fn view(tool: &str, input: &Value) -> (String, String, String) {
     let s = |k: &str| input[k].as_str().unwrap_or_default().to_string();
     let whole = || input.to_string();
@@ -116,9 +114,18 @@ impl Cards {
         self.withdraw(|c| c.is(p))
     }
 
-    /// Ход сессии кончился (Stop) или сессии больше нет: её карточки сняты, хуки выходят.
-    pub fn end(&mut self, session: &str) -> bool {
-        self.withdraw(|c| c.session == session)
+    /// Ход сессии кончился (Stop): её карточки сняты, хуки выходят; subs false — помощники ещё работают в фоне, их
+    /// запросы (agent_id) живы.
+    pub fn end(&mut self, session: &str, subs: bool) -> bool {
+        if subs {
+            self.last.remove(session); // уведомлений этого хода больше не будет
+        }
+        self.withdraw(|c| c.session == session && (subs || !c.sub))
+    }
+
+    /// Ещё открытые карточки сессии.
+    pub fn open(&self, session: &str) -> usize {
+        self.list.iter().filter(|c| c.session == session).count()
     }
 
     fn withdraw(&mut self, pick: impl Fn(&Card) -> bool) -> bool {
@@ -244,8 +251,9 @@ mod tests {
         assert!(!c.ran(&json!({"session_id": "s", "prompt_id": "p0", "tool_name": "Bash", "tool_input": ran["tool_input"]})), "другой промпт — другой вызов");
         assert!(c.ran(&ran));
         assert_eq!(said(&mut r1), "", "хук выходит без решения");
-        assert!(c.decide("perm-1", "allow").is_none() && c.session_of("perm-2").is_some());
-        assert!(c.end("s") && c.session_of("perm-2").is_none(), "Stop снимает все карточки сессии");
+        assert!(c.decide("perm-1", "allow").is_none() && c.session_of("perm-2").is_some() && c.open("s") == 1);
+        assert!(c.end("s", true) && c.session_of("perm-2").is_none(), "Stop снимает все карточки сессии");
+        assert!(!c.carded("s", "p1"), "после конца хода уведомлений этого запроса нет — запись не копится");
         assert!(!c.gone("perm-2"));
     }
 
@@ -257,6 +265,7 @@ mod tests {
         p["agent_id"] = "a1".into();
         c.add("perm-1", &p, h, true, 1);
         assert_eq!(serde_json::from_str::<Value>(&c.line(|s| s.into())).unwrap()["permissions"][0]["sub"], true, "сабагент — с пометкой");
+        assert!(!c.end("s", false), "помощник в фоне: его запрос жив и после Stop главного хода");
         assert!(c.gone("perm-1") && !c.gone("perm-1"));
     }
 
