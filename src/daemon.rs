@@ -14,7 +14,7 @@ use crate::presence::{self, Mode, Presence};
 use crate::queue::{Item, Kind, Queue};
 use crate::source::{claude, codex, tail::{has_line, tail_of, Tailer}};
 use crate::speaker::{self, Play, Shared};
-use crate::text::{prepare, terms::Terms};
+use crate::text::{clean, prepare, terms::Terms};
 use crate::tts::Tts;
 use crate::watch::{self, Act, Ctx, Facts, Watch};
 use ::notify::{RecursiveMode, Watcher};
@@ -997,7 +997,7 @@ impl State {
         if alone && self.focused().is_some_and(|f| f.id == session) {
             return;
         }
-        let text = crate::text::clean::plain(text); // разметка markdown пузырю не нужна
+        let text = clean::mask_secrets(&clean::plain(text)); // разметка markdown пузырю не нужна, секреты — тоже
         let b = serde_json::json!({"bubble": {"id": id, "agent": session, "who": who, "text": text, "kind": kind, "append": false, "drop": false}});
         self.broadcast_line(&format!("{b}\n"));
     }
@@ -1531,7 +1531,7 @@ impl State {
             Msg::Emit { mut line } => {
                 // пузырь орба — простой текст, как у пузырей агентов; чат окна разметку рисует и получает её как есть
                 if let Some(t) = line["bubble"]["text"].as_str() {
-                    line["bubble"]["text"] = crate::text::clean::plain(t).into();
+                    line["bubble"]["text"] = clean::mask_secrets(&clean::plain(t)).into();
                 }
                 self.broadcast_line(&format!("{line}\n"))
             }
@@ -2531,6 +2531,18 @@ mod tests {
         assert_eq!((b["bubble"]["text"].as_str(), b["bubble"]["append"].as_bool()), (Some("Тесты прошли"), Some(true)));
         st.on_msg(Msg::Emit { line: serde_json::json!({"chat_delta": {"text": "**жирный**"}}) });
         assert_eq!(next(&mut r)["chat_delta"]["text"], "**жирный**");
+    }
+
+    #[test]
+    fn bubbles_mask_secrets_always() {
+        // ключи и пароли в пузырях — всегда, и без показа экрана: и у агента, и у Омы
+        let mut st = test_state();
+        with_agents(&mut st, &["s", "t"]);
+        let mut r = sub(&mut st);
+        question(&mut st, "s", true, "Нужен токен ghp_abcdefghijklmnopqrstuvwxyz0123456789, дать доступ?");
+        st.on_msg(Msg::Emit { line: serde_json::json!({"bubble": {"id": "oma-1", "who": "Ома", "text": "Вписала password=hunter2", "kind": "oma", "append": true}}) });
+        let b = bubbles(&mut r);
+        assert_eq!(b.iter().map(|b| b["text"].as_str().unwrap()).collect::<Vec<_>>(), ["Нужен токен ghp_…, дать доступ?", "Вписала password=•••"]);
     }
 
     #[test]

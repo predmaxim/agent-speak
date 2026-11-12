@@ -53,6 +53,118 @@ pub fn plain(raw: &str) -> String {
     out.join(" ")
 }
 
+/// Префиксы ключей — из правил gitleaks (MIT, https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml);
+/// длинные раньше своих начал (sk-ant- раньше sk-).
+const KEY_PREFIXES: [&str; 23] = [
+    "github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "glpat-", "sk-ant-", "sk-proj-", "sk-", "xoxb-", "xoxp-", "xoxa-",
+    "xoxs-", "AKIA", "ASIA", "AIza", "ya29.", "hf_", "npm_", "pypi-", "dop_v1_", "shpat_",
+];
+/// Имя, после которого `=` или `:` идёт секрет: password=…, DB_PASSWORD: …, "api_key": "…".
+const SECRET_NAMES: [&str; 6] = ["password", "passwd", "secret", "token", "api_key", "apikey"];
+const HIDDEN: &str = "•••";
+
+/// Секреты в показываемом тексте (пузыри): ключ с известным префиксом — «ghp_…», JWT — «eyJ…», значение после
+/// password=, token: и т. п. — «•••», блок закрытого ключа — до конца текста. Хэши, UUID и пути не трогаются:
+/// случайные строки по энтропии не ищем — это ложно ловит хэши и base64.
+pub fn mask_secrets(text: &str) -> String {
+    let text = cut_private_key(text);
+    let mut out: Vec<String> = Vec::new();
+    let mut want = Want::Nothing;
+    for w in text.split(' ') {
+        match want {
+            Want::Value => {
+                out.push(HIDDEN.into());
+                want = Want::Nothing;
+                continue;
+            }
+            Want::Separator if w == "=" || w == ":" => {
+                out.push(w.into());
+                want = Want::Value;
+                continue;
+            }
+            _ => {}
+        }
+        let (w, next) = assignment(w);
+        want = next;
+        out.push(mask_keys(&w));
+    }
+    out.join(" ")
+}
+
+/// Что ждёт следующее слово после имени секрета.
+#[derive(Clone, Copy)]
+enum Want {
+    Nothing,
+    Separator, // «password» — дальше «=» или «:»
+    Value,     // «password:» — дальше значение
+}
+
+/// Имя секрета в слове: «token=abc» → «token=•••»; «token:» — значение в следующем слове, «token» — сначала знак.
+fn assignment(w: &str) -> (String, Want) {
+    let named = |s: &str| {
+        let s = s.trim_end_matches(['"', '\'']);
+        let start = s.char_indices().rev().take_while(|&(_, c)| c.is_ascii_alphanumeric() || c == '_').last().map_or(s.len(), |(i, _)| i);
+        let name = s[start..].to_ascii_lowercase();
+        SECRET_NAMES.iter().any(|n| name.ends_with(n))
+    };
+    for (p, _) in w.char_indices().filter(|&(_, c)| c == '=' || c == ':') {
+        if named(&w[..p]) {
+            let head = &w[..=p];
+            return if w[p + 1..].trim_matches(['"', '\'']).is_empty() { (head.into(), Want::Value) } else { (format!("{head}{HIDDEN}"), Want::Nothing) };
+        }
+    }
+    let bare = w.trim_matches(['"', '\'']);
+    let next = if !bare.is_empty() && bare.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && named(bare) { Want::Separator } else { Want::Nothing };
+    (w.into(), next)
+}
+
+/// Ключи с известным префиксом и JWT — в начале слова или после кавычки, скобки, «=», «:», «,» (не внутри пути).
+fn mask_keys(w: &str) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while let Some(c) = w[i..].chars().next() {
+        if i == 0 || w[..i].ends_with(['"', '\'', '(', '[', '{', '<', '=', ':', ',']) {
+            let rest = &w[i..];
+            let len = rest.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))).unwrap_or(rest.len());
+            let token = rest[..len].trim_end_matches('.');
+            if let Some(shown) = key_prefix(token) {
+                out.push_str(shown);
+                out.push('…');
+                i += token.len();
+                continue;
+            }
+        }
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// Префикс, который остаётся от ключа; не ключ — None. Тело ключа — от 16 знаков и с цифрой: npm_config_cache, sk-learn — не ключи.
+fn key_prefix(token: &str) -> Option<&'static str> {
+    if token.starts_with("eyJ") && token.split('.').count() >= 3 && token.split('.').all(|s| !s.is_empty()) {
+        return Some("eyJ");
+    }
+    KEY_PREFIXES.into_iter().find(|p| token.starts_with(p)).filter(|p| {
+        let body = &token[p.len()..];
+        body.len() >= 16 && body.bytes().any(|b| b.is_ascii_digit())
+    })
+}
+
+/// Блок «-----BEGIN … PRIVATE KEY-----» и всё после него → заголовок и «…».
+fn cut_private_key(text: &str) -> String {
+    const BEGIN: &str = "-----BEGIN ";
+    let mut from = 0;
+    while let Some(i) = text[from..].find(BEGIN) {
+        let head = from + i + BEGIN.len();
+        if let Some(j) = text[head..].find("-----").filter(|&j| text[head..head + j].ends_with("PRIVATE KEY")) {
+            return format!("{}…", &text[..head + j + 5]);
+        }
+        from = head;
+    }
+    text.into()
+}
+
 /// Строка таблицы → «a, b, c»; разделитель |---| → None.
 fn table_row(l: &str) -> Option<String> {
     let cells: Vec<&str> = l.trim_matches('|').split('|').map(str::trim).collect();
@@ -338,5 +450,33 @@ mod tests {
         assert_eq!(s, vec!["Коммит готов, всё ок."]);
         let s = super::super::sentences::drop_gutted(super::super::sentences::split(&clean("Смотри a3f9c2.")));
         assert!(s.is_empty());
+    }
+
+    #[test]
+    fn mask_secrets_table() {
+        for (raw, want) in [
+            ("нужен токен ghp_abcdefghijklmnopqrstuvwxyz0123456789, дать доступ?", "нужен токен ghp_…, дать доступ?"),
+            ("ключ sk-ant-api03-AbCdEf1234567890abcdef и sk-proj-Zx9yW8vU7tS6rQ5pO4nM.", "ключ sk-ant-… и sk-proj-…."),
+            ("(AKIAIOSFODNN7EXAMPLE) AIzaSyA1234567890abcdefghijklmnopqrstu", "(AKIA…) AIza…"),
+            ("hf_AbCdEfGhIj1234567890KlMnOpQr glpat-x1y2z3a4b5c6d7e8f9g0 xoxb-1234567890-abcdefghij", "hf_… glpat-… xoxb-…"),
+            ("jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig_abc-123 тут", "jwt eyJ… тут"),
+            ("password=hunter2 и DB_PASSWORD: s3cret", "password=••• и DB_PASSWORD: •••"),
+            ("api_key = abc123 GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789", "api_key = ••• GITHUB_TOKEN=•••"),
+            (r#"{"token": "xyz", "x": 1} и https://h.io/cb?token=abc&next=1"#, r#"{"token": ••• "x": 1} и https://h.io/cb?token=•••"#),
+            ("вот: -----BEGIN OPENSSH PRIVATE KEY----- b3BlbnNzaC1rZXk -----END OPENSSH PRIVATE KEY----- всё", "вот: -----BEGIN OPENSSH PRIVATE KEY-----…"),
+        ] {
+            assert_eq!(mask_secrets(raw), want, "{raw}");
+        }
+        // не секреты: хэши, UUID, пути, имена переменных и слова с похожим началом
+        for raw in [
+            "коммит 5493482a1b2c3d4e5f60718293a4b5c6d7e8f901 и 9db1e2b",
+            "id 123e4567-e89b-12d3-a456-426614174000",
+            "/home/u/.cache/hf_hub_2024_models_files/x и ./sk-learn-0123456789abcdef",
+            "npm_config_cache_directory sk-learn ASIA AKIA max_tokens: 500 token_count=5",
+            "-----BEGIN CERTIFICATE----- MIIB -----END CERTIFICATE-----",
+            "eyJhbGciOiJIUzI1NiJ9 без подписи",
+        ] {
+            assert_eq!(mask_secrets(raw), raw);
+        }
     }
 }
