@@ -21,7 +21,9 @@ var TABLES = {
     "Orb": "Орб", "Over fullscreen windows": "Над полноэкранными окнами",
     "Agents": "Агенты", "General chat": "Общий чат", "Copy": "Копировать", "Copied": "Скопировано", "Retell progress": "Пересказывать промежуточное",
     "Watch agents": "Следить за агентами", "Oma is off": "Ома выключена", "Turn Oma on": "Включить Ому", "Turn Oma off": "Выключить Ому",
-    "Turn sound off": "Выключить звук", "Turn sound on": "Включить звук", "Oma: sound off": "Ома: звук выключен"
+    "Turn sound off": "Выключить звук", "Turn sound on": "Включить звук", "Oma: sound off": "Ома: звук выключен",
+    "Quiet: screen sharing": "Тихо: показ экрана", "Quiet: do not disturb": "Тихо: не беспокоить",
+    "Quiet and brief while sharing the screen": "При показе экрана — тихо и коротко", "Summary after quiet": "Сводка после тишины"
   }
 }
 

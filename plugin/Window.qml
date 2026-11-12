@@ -964,6 +964,8 @@ Item {
               SettingRow {
                 key: "quiet_now"
                 label: root.tr("Quiet now")
+                // quiet by reason (screen sharing): the switch is only the user's own quiet, the note says why it is quiet anyway
+                note: Model.QUIET_WHY[root.speech.quiet_why] ? root.tr(Model.QUIET_WHY[root.speech.quiet_why]) : ""
                 ToggleSwitch {
                   checked: root.speech.quiet === true
                   foreground: root.fg
@@ -1005,6 +1007,26 @@ Item {
                   fontFamily: root.font
                   onChanged: function(v) { root.choose("quiet_to", v, false); value = Qt.binding(function() { return root.speech.quiet_to }) }
                   onPopupOpenChanged: if (!popupOpen) root.refocus()
+                }
+              }
+
+              SettingRow {
+                key: "screencast_privacy"
+                label: root.tr("Quiet and brief while sharing the screen")
+                ToggleSwitch {
+                  checked: root.speech.screencast_privacy === true
+                  foreground: root.fg
+                  onToggled: root.step("screencast_privacy", 1)
+                }
+              }
+
+              SettingRow {
+                key: "hush_summary"
+                label: root.tr("Summary after quiet")
+                ToggleSwitch {
+                  checked: root.speech.hush_summary === true
+                  foreground: root.fg
+                  onToggled: root.step("hush_summary", 1)
                 }
               }
 
