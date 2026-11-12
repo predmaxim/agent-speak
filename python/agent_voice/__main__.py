@@ -481,9 +481,15 @@ class Oma:
     async def _wake_open(self):
         self.ear.speakers = None  # слух на имя — по сервису присутствия: «Ты тут?» в динамики (listen) — не его случай
         try:
-            self.no_mic = not await self.ear.start(wake=True)
-        except Exception as e:  # модель Vosk не грузится — побудки нет, слух — как раньше
+            await asyncio.to_thread(self.ear.wake_load)
+        except Exception as e:  # модель Vosk не грузится — побудки нет до перезапуска Омы, слух — как раньше
             self.has_model = False
+            self._warn(f"слово-побудка: модель Vosk: {e!r}")
+            await self.ear.stop()
+            return
+        try:
+            self.no_mic = not await self.ear.start(wake=True)
+        except Exception as e:  # pw-record, pactl, VAD — повтор на следующем тике ac (раз в 30 с)
             self._warn(f"слово-побудка: {e!r}")
             await self.ear.stop()
 

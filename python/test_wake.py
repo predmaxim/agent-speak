@@ -265,6 +265,9 @@ class WakeEar:
         self.open, self.waking = (self.mic, self.mic) if wake else (True, False)
         return self.open
 
+    def wake_load(self):
+        pass
+
     async def take(self, at):
         self.calls.append(("take", at))
         self.waking = False
@@ -311,6 +314,31 @@ def test_oma_wake_follows_the_daemon_power_and_the_mic(monkeypatch):
     m, sent, ears, oma = _woke_oma(monkeypatch, mic=False)
     run(oma.command({"do": "wake", "on": True}))
     assert ears[-1]["wake"] == "no_mic"
+
+
+def test_wake_open_failure_is_no_model_only_when_vosk_does_not_load(monkeypatch):
+    m, sent, ears, oma = _woke_oma(monkeypatch)
+    start = oma.ear.start
+
+    async def boom(wake=False):
+        oma.ear.calls.append("wake")
+        raise OSError("pw-record не запустился")
+
+    def bad():
+        raise OSError("модель битая")
+
+    async def go():
+        oma.ear.start = boom
+        await oma.command({"do": "wake", "on": True})
+        assert oma.has_model and ears[-1]["wake"] != "no_model", "сбой слуха — не «нет модели»"
+        oma.ear.start = start
+        await oma.event(("ac", True))
+        assert oma.ear.calls[-1] == "wake" and oma.ear.waking, "повтор на тике ac"
+        await oma.ear.stop()
+        oma.ear.wake_load = bad
+        await oma.event(("ac", True))
+        assert oma.has_model is False and ears[-1]["wake"] == "no_model"
+    run(go())
 
 
 def test_oma_conversation_end_goes_back_to_the_name(monkeypatch):

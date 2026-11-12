@@ -133,6 +133,11 @@ class Ear:
     def pid(self):
         return self._proc.pid if self._proc else None
 
+    def wake_load(self):
+        """Модель первой ступени побудки (в потоке): Ома грузит её до start, чтобы её сбой («нет модели») не путать с
+        прочими сбоями слуха."""
+        self._wake.load()
+
     async def warm(self):
         """VAD — заранее (от сети): первый start не ждёт torch и silero."""
         async with self._lock:
@@ -151,7 +156,7 @@ class Ear:
         async with self._lock:
             await self._load_vad()
             if wake:
-                await asyncio.to_thread(self._wake.load)
+                await asyncio.to_thread(self.wake_load)  # уже загружена — сразу
             kw = {"wake": True} if wake else {}
             if self.speakers is not None:
                 kw["out"] = self.speakers
