@@ -46,6 +46,7 @@ enum Event {
     Show(String, Sender<Result<String, String>>), // `agent-speak show`: агент (пусто — следующий ждущий), ответ — его проект или ошибка
     Note(String, u32, String, Sender<Result<String, String>>), // `agent-speak note`: сессия, pid CLI, текст; ответ — агенту
     Bt(&'static str, bool), // режим наушников переключён (headset | music) и переключала ли его Ома
+    Window(Option<u32>), // окно в фокусе сменилось (события Hyprland): pid его процесса, None — стол пуст
     Outs(String, String), // выходы звука сменились: выход по умолчанию, динамики ноутбука — от потока `pactl subscribe`
     Permission(String, serde_json::Value, UnixStream), // хук PermissionRequest: id карточки, вход хука, его соединение (туда — решение)
     PermGone(String), // соединение хука закрылось (вышел или убит: «No» и Esc в терминале) — карточка id снята
@@ -294,6 +295,8 @@ struct State {
     presence_at: u64,           // время прошлого снимка присутствия — перерыв пишем в журнал
     presence_seen: String,      // прошлые факты снимка словами — смену пишем в журнал
     viewing: String,            // чат какого агента открыт в окне Омы; пусто — никакого
+    window: Option<u32>,        // процесс окна в фокусе — по событиям Hyprland (Event::Window), не опросом
+    under: fn(u32, u32) -> bool, // процесс (агент) — потомок процесса окна; в тестах — подделка
     welcome: bool,              // вернулся после долгого отсутствия: следующие новости — с приветствием и обзором
     night_keep: bool,           // тишина настала, пока пользователя нет: накопленное ждёт утра
     quiet_why: QuietWhy,        // тишина по причине: Ома молчит, новости копятся
@@ -521,6 +524,8 @@ pub fn run() {
         presence_at: 0,
         presence_seen: String::new(),
         viewing: String::new(),
+        window: None,
+        under: focus::under,
         welcome: false,
         night_keep: false,
         quiet_why: QuietWhy::default(),
@@ -561,6 +566,10 @@ pub fn run() {
         let tx = tx.clone();
         crate::audio::watch_outs(move |default, speakers| tx.send(Event::Outs(default, speakers)).is_ok());
     }
+    {
+        let tx = tx.clone();
+        focus::watch_window(move |w| tx.send(Event::Window(w)).is_ok());
+    }
     st.oma_spawn();
     if let Some(t) = (st.facts_src)() {
         st.on_presence(&t);
@@ -587,6 +596,7 @@ pub fn run() {
             Event::Show(agent, reply) => st.show(&agent, reply),
             Event::Note(session, pid, text, reply) => drop(reply.send(st.inbox(&session, pid, &text))),
             Event::Bt(mode, switched) => st.on_bt(mode, switched),
+            Event::Window(w) => st.on_window(w),
             Event::Outs(default, speakers) => st.on_outs(default, speakers),
             Event::Permission(id, payload, hook) => st.on_permission(id, payload, hook),
             Event::PermGone(id) => st.perm_gone(&id),
@@ -609,12 +619,24 @@ fn final_message(p: &serde_json::Value, transcript: &Path) -> Option<String> {
     claude::last_turn(&std::fs::read_to_string(transcript).unwrap_or_default()).pop()
 }
 
+/// Ответ `show`: проект агента (нет — заголовок). Чат Orca вперёд вывести нечем — CLI Orca переключает только вкладки
+/// терминалов (`terminal switch`), — поднимается окно Orca, и Ома называет, какой чат открыть.
+fn shown_name(e: &Entry) -> String {
+    let name = if e.project.is_empty() { e.title.clone() } else { e.project.clone() };
+    if e.chat { format!("{name}: окно Orca, чат «{}» — его вкладку открой сам", e.title) } else { name }
+}
+
+/// Терминал агента для сторожа; у чата Orca его нет по пометке — клавиши в чат не уходят, что бы ни лежало в окружении.
+fn pane_for(e: &Entry, locate: impl Fn(u32) -> Option<Pane>) -> Option<Pane> {
+    if e.chat { None } else { locate(e.pid) }
+}
+
 /// Факты о агенте без чтения диска: то, что знает реестр.
 fn blank_facts(e: &Entry, activity: u64) -> Facts {
     Facts {
         id: e.id.clone(), project: e.project.clone(), state: e.state,
         active_at: activity, helpers: 0, call: None, error: None, pane: None, shell: None, resume: String::new(),
-        pid: e.pid, turn_over: false, sub_call: None,
+        pid: e.pid, turn_over: false, sub_call: None, chat: e.chat,
     }
 }
 
@@ -671,7 +693,7 @@ fn agent_facts(e: &Entry, activity: u64) -> Facts {
     let mut f = blank_facts(e, activity);
     let t = Path::new(&e.transcript);
     f.active_at = f.active_at.max(mtime(t));
-    (f.pane, f.shell) = (mux::locate(e.pid), shell_of(e.pid));
+    (f.pane, f.shell) = (pane_for(e, mux::locate), shell_of(e.pid));
     f.resume = watch::resume_cmd(e.agent, &e.id, &cmdline(e.pid), watch::RESUME_PROMPT);
     let claude = e.agent == "claude";
     let tail = tail_of(&e.transcript, |t| if claude { claude::has_record(t, false) } else { has_line(t) });
@@ -929,7 +951,9 @@ impl State {
     fn focused(&mut self) -> Option<SessionRef> {
         let now = (self.clock)();
         if !self.focus_cache.as_ref().is_some_and(|(t, _)| now.saturating_duration_since(*t) < Duration::from_millis(500)) {
-            let f = (self.focus_src)();
+            // какой чат Orca на экране, неизвестно: единственный агент под окном Orca — чат — не «в фокусе»
+            let registry = &self.registry;
+            let f = (self.focus_src)().filter(|f| !registry.get(&f.id).is_some_and(|e| e.chat));
             if let Some(f) = &f {
                 self.projects.insert(f.id.clone(), f.project.clone());
             }
@@ -1006,7 +1030,7 @@ impl State {
         eprintln!("agent-speak: показ экрана: {why}");
         self.quiet_why.screencast = on;
         self.quiet_over |= on;
-        if !self.quiet_why.any() && self.quiet_over && (!self.cfg.hush_summary || self.board.overview(QUIET_OVER, None).is_none()) {
+        if !self.quiet_why.any() && self.quiet_over && (!self.cfg.hush_summary || self.board.overview(QUIET_OVER, &[]).is_none()) {
             // сводки не будет (выключена или считать нечего): итоги за тишину выбросить сейчас, как выбросила бы она, — иначе
             // окно пачки их придержит и они прозвучат после; вопросы, срочное и восстановление — по своим правилам
             self.quiet_over = false;
@@ -1396,7 +1420,7 @@ impl State {
 
     /// Волна на орбе вместо слов, тон — вид пузыря (final | question | status). Агент, которым он занят, — без волны: он на него смотрит.
     fn ripple(&mut self, session: &str, tone: &str) {
-        if !self.cfg.orb_moods || self.engaged().as_deref() == Some(session) {
+        if !self.cfg.orb_moods || self.engaged().iter().any(|s| s == session) {
             return;
         }
         self.broadcast_line(&format!("{}\n", serde_json::json!({"ripple": {"tone": tone}})));
@@ -1423,18 +1447,26 @@ impl State {
         }
         // сводка тишины ждёт своего часа и тогда, когда итоги держит окно пачки (news_every): она их и заменяет
         let hush = self.quiet_over && self.cfg.hush_summary;
-        let summary = |b: &news::Board, skip: Option<&str>| hush && b.overview(QUIET_OVER, skip).is_some();
-        let summary_any = summary(&self.board, None);
+        let summary = |b: &news::Board, skip: &[String]| hush && b.overview(QUIET_OVER, skip).is_some();
+        let summary_any = summary(&self.board, &[]);
         // hyprctl — только когда и без учёта фокуса есть что сказать: итоги, ждущие ответа на вопрос, его не опрашивают каждый тик
-        if !self.board.sayable(now, None) && !summary_any {
+        if !self.board.sayable(now, &[]) && !summary_any {
             self.welcome &= mode == Mode::Unsure; // вводить в курс нечем — приветствие следующих новостей не ждёт
             self.quiet_over &= mode == Mode::Unsure; // и сводка тишины тоже
+            return;
+        }
+        // и не тогда, когда сказать есть только о чатах Orca под окном в фокусе: их знают события Hyprland
+        let chats = self.chats_engaged();
+        if !self.board.sayable(now, &chats) && !summary(&self.board, &chats) {
+            if mode != Mode::Unsure {
+                self.board.drop_focused(&chats); // итог чата под окном в фокусе снимается молча (пузырь остался), как ниже в take
+            }
             return;
         }
         let focused = self.engaged();
         let (kind, chunks) = if mode == Mode::Unsure {
             // итог агента в фокусе сводка не считает, как и drop_focused
-            if !self.board.sayable(now, focused.as_deref()) && !summary(&self.board, focused.as_deref()) {
+            if !self.board.sayable(now, &focused) && !summary(&self.board, &focused) {
                 return; // «Есть новости» не врёт: после «да» прозвучит хоть что-то
             }
             match self.headset {
@@ -1455,12 +1487,12 @@ impl State {
             let mut parts = Vec::new();
             if std::mem::take(&mut self.welcome) {
                 self.quiet_over = false; // приветствие с обзором покрывает и сводку тишины
-                if !self.board.sayable(now, focused.as_deref()) {
+                if !self.board.sayable(now, &focused) {
                     return; // вводить в курс нечем — приветствие без новостей не нужно
                 }
-                self.board.drop_focused(focused.as_deref()); // не в обзор и не в сводку
+                self.board.drop_focused(&focused); // не в обзор и не в сводку
                 parts.push(Chunk::oma(self.rotor.next(phrases::WELCOME)));
-                parts.extend(self.board.overview(self.rotor.next(phrases::AWAY), None).map(Chunk::oma));
+                parts.extend(self.board.overview(self.rotor.next(phrases::AWAY), &[]).map(Chunk::oma));
                 // итог агента Claude со свежим recap Claude Code — его первым предложением; Haiku — только остальным
                 let registry = &self.registry;
                 let recapped = self.board.recap(|s| registry.get(s).filter(|e| e.agent == "claude").and_then(|e| agents::recap(Path::new(&e.transcript))));
@@ -1473,14 +1505,14 @@ impl State {
                 // тишина по причине кончилась: накопленное — одной фразой кодом, посчитанное (и вопросы) — с доски;
                 // агент остаётся красным в орбе и окне, срочное сторожа звучит по своим правилам. Без сводки — как после тишины.
                 if self.cfg.hush_summary {
-                    self.board.drop_focused(focused.as_deref());
-                    parts.extend(self.board.overview(QUIET_OVER, None).map(Chunk::oma));
+                    self.board.drop_focused(&focused);
+                    parts.extend(self.board.overview(QUIET_OVER, &[]).map(Chunk::oma));
                     self.board.retain_classes(&[Class::Urgent, Class::Now, Class::Restore]);
                 } else {
                     self.board.retain_classes(&[Class::Urgent, Class::Now, Class::Restore, Class::Question]);
                 }
             }
-            parts.extend(self.board.take(now, focused.as_deref()));
+            parts.extend(self.board.take(now, &focused));
             if parts.is_empty() {
                 return;
             }
@@ -1566,19 +1598,36 @@ impl State {
         }
     }
 
-    /// Агент, которым пользователь занят, — его новости не вслух: его чат открыт в окне Омы или его вкладка в фокусе,
-    /// и пользователь печатает (ввод за FOCUS_INPUT) или ждёт его ответа (свой промпт за FOCUS_PROMPT).
-    /// Просто вкладка в фокусе — нет: может, отошёл или смотрит в телефон.
-    fn engaged(&mut self) -> Option<String> {
+    /// Агенты, которыми пользователь занят, — их новости не вслух (пузыри остаются): чат агента открыт в окне Омы; его
+    /// вкладка в фокусе, и пользователь печатает (ввод за FOCUS_INPUT) или ждёт его ответа (свой промпт за FOCUS_PROMPT) —
+    /// просто вкладка в фокусе — нет: может, отошёл или смотрит в телефон; все чаты Orca, пока её окно в фокусе: какой чат
+    /// на экране, Orca не сообщает (нет CLI «активный чат», docs/upstream/orca-active-chat.md).
+    fn engaged(&mut self) -> Vec<String> {
         if !self.viewing.is_empty() {
-            return Some(self.viewing.clone());
+            return vec![self.viewing.clone()];
         }
-        let id = self.focused()?.id;
+        let mut out = self.chats_engaged();
+        let Some(id) = self.focused().map(|f| f.id) else { return out };
         let now = (self.now_secs)();
         let typing = now.saturating_sub(self.presence.last_input(now)) < FOCUS_INPUT;
         let prompt = self.registry.get(&id).and_then(|e| e.feed.iter().rev().find(|l| l.kind == "prompt").map(|l| l.at));
         let waiting = prompt.is_some_and(|at| now.saturating_sub(at) < FOCUS_PROMPT);
-        (typing || waiting).then_some(id)
+        if typing || waiting {
+            out.push(id);
+        }
+        out
+    }
+
+    /// Чаты Orca под окном в фокусе: их процесс — потомок окна, как его находит show. Окно — из событий Hyprland, без hyprctl.
+    fn chats_engaged(&self) -> Vec<String> {
+        let Some(w) = self.window else { return vec![] };
+        self.registry.entries().iter().filter(|e| e.chat && (self.under)(e.pid, w)).map(|e| e.id.clone()).collect()
+    }
+
+    /// Окно в фокусе сменилось (событие Hyprland): чаты ушедшего окна снова звучат — сразу, а не с тика.
+    fn on_window(&mut self, w: Option<u32>) {
+        self.window = w;
+        self.speak_news();
     }
 
     /// Ничего не звучит и не ждёт очереди.
@@ -2210,7 +2259,7 @@ impl State {
             let _ = reply.send(Err(if agent.is_empty() { "Никто не ждёт ответа" } else { "Такого агента нет" }.into()));
             return;
         };
-        let (pid, name) = (e.pid, if e.project.is_empty() { e.title.clone() } else { e.project.clone() });
+        let (pid, name) = (e.pid, shown_name(e));
         // поток действий упал — дело с ответом выброшено, serve ответит ошибкой
         let _ = self.act.send(mux::Work::Other(Box::new(move || {
             let _ = reply.send(crate::focus::bring(pid).map(|()| name));
@@ -2456,6 +2505,9 @@ impl State {
         let r = match act.as_str() {
             "tell" => {
                 let e = self.registry.get(&session).ok_or("такого агента нет")?;
+                if e.chat {
+                    return Err(crate::orders::CHAT.into()); // передать потом будет нечем
+                }
                 // агент уже закончил (пока Ома ждала «да, передай») — поручение уходит сразу: одно подтверждение — одна
                 // передача; закончил вопросом — ждёт следующего конца хода, как в later_due. Итог — последняя строка
                 // ленты: после Stop лента Claude — заново по транскрипту, и итог в ней — status, а не final
@@ -2778,6 +2830,8 @@ mod tests {
             presence_at: 0,
             presence_seen: String::new(),
             viewing: String::new(),
+            window: None,
+            under: focus::under,
             welcome: false,
             night_keep: false,
             quiet_why: QuietWhy::default(),
@@ -4046,7 +4100,7 @@ mod tests {
 
     /// Пачка доски одной строкой; пусто — None.
     fn board_line(st: &mut State, now: u64) -> Option<String> {
-        let c = st.board.take(now, None);
+        let c = st.board.take(now, &[]);
         (!c.is_empty()).then(|| news::line(&c))
     }
 
@@ -4346,7 +4400,7 @@ mod tests {
 
     fn live(id: &str) -> Live {
         Live { id: id.to_string(), agent: "claude", pid: 1, title: format!("T-{id}"),
-            cwd: format!("/p/{id}"), transcript: PathBuf::new(), state: crate::agents::State::Working, status_at: 0 }
+            cwd: format!("/p/{id}"), transcript: PathBuf::new(), state: crate::agents::State::Working, status_at: 0, chat: false }
     }
 
     #[test]
@@ -4633,6 +4687,19 @@ mod tests {
         st.on_later_done(crate::later::Done::Told { order, result: Ok(()) });
         assert_eq!(bubbles(&mut r)[0]["text"], "a: передала — прогони тесты");
         assert_eq!(board_line(&mut st, 2000).unwrap(), "a: передала — прогони тесты", "исход — сразу, класс СЕЙЧАС");
+    }
+
+    #[test]
+    fn later_tell_to_an_orca_chat_is_refused_and_show_names_the_chat() {
+        // у чата Orca терминала нет: поручение «потом» не ставится — передать его будет нечем; показать — окно Orca и чей чат
+        let mut st = test_state();
+        let chat = vec![Live { chat: true, ..live("c") }];
+        st.scan = Box::new(move || chat.clone());
+        st.rescan();
+        assert_eq!(st.later_cmd(later_msg("tell", "c", "Прогони тесты")), Err(crate::orders::CHAT.into()));
+        let e = st.registry.get("c").unwrap();
+        assert_eq!(shown_name(e), "c: окно Orca, чат «T-c» — его вкладку открой сам");
+        assert_eq!(shown_name(&Entry { chat: false, ..e.clone() }), "c");
     }
 
     #[test]
@@ -6477,6 +6544,83 @@ mod tests {
         final_s(&mut st);
         st.tick();
         assert_eq!(texts(&st), ["плуг: Фича готова."]);
+    }
+
+    #[test]
+    fn orca_chats_keep_quiet_while_the_orca_window_is_focused() {
+        // какой чат Orca на экране, Orca не сообщает: её окно в фокусе (событие Hyprland) — все её чаты «заняты»: пузыри
+        // без голоса; терминал под тем же окном — как прежде; другое окно — чаты звучат сразу, по событию
+        let mut st = test_state();
+        let live = vec![Live { chat: true, pid: 11, ..live("s") }, Live { pid: 12, ..live("t") }];
+        st.scan = Box::new(move || live.clone());
+        st.rescan();
+        st.under = |pid, win| win == 99 && pid > 10; // 11 и 12 — потомки окна 99 (Orca)
+        let calls = Arc::new(Mutex::new(0));
+        let c = calls.clone();
+        st.focus_src = Box::new(move || {
+            *c.lock().unwrap() += 1;
+            None
+        });
+        st.on_window(Some(99));
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        final_s(&mut st);
+        st.on_digest(dg("t", Ask::Final, false, "Тесты прошли."));
+        st.tick();
+        assert_eq!(texts(&st), ["плуг: Тесты прошли."], "итог чата s — только пузырём");
+        assert_eq!(bubbles(&mut r).len(), 2, "пузыри — у обоих");
+        question(&mut st, "s", true, "Удалить старый код?");
+        *calls.lock().unwrap() = 0;
+        for _ in 0..3 {
+            st.focus_cache = None;
+            st.tick();
+        }
+        assert!(texts(&st).is_empty(), "вопрос чата ждёт, пока окно Orca в фокусе");
+        assert_eq!(*calls.lock().unwrap(), 0, "ждущий вопрос чата hyprctl на каждом тике не спрашивает");
+        st.on_window(Some(5)); // в фокусе другое окно
+        assert_eq!(texts(&st), ["плуг: Удалить старый код?"], "по событию, тика не ждёт");
+    }
+
+    #[test]
+    fn orca_chat_final_alone_is_dropped_not_spoken_on_leaving_orca() {
+        // на доске только итог чата, окно Orca в фокусе: итог снимается молча (пузырь был) и не звучит, когда уходишь из Orca
+        let mut st = test_state();
+        let live = vec![Live { chat: true, pid: 11, ..live("s") }];
+        st.scan = Box::new(move || live.clone());
+        st.rescan();
+        st.under = |pid, win| win == 99 && pid > 10;
+        st.on_window(Some(99));
+        final_s(&mut st);
+        st.tick();
+        assert!(texts(&st).is_empty(), "итог чата под окном Orca — без голоса");
+        st.on_window(Some(5));
+        assert!(texts(&st).is_empty(), "ушёл из Orca — снятый итог не звучит");
+    }
+
+    #[test]
+    fn lone_orca_chat_under_the_window_is_not_focused() {
+        // единственный агент под окном Orca — чат: какой чат на экране, неизвестно — он не «в фокусе», пузырь не глушится
+        let mut st = test_state();
+        let live = vec![Live { chat: true, ..live("s") }];
+        st.scan = Box::new(move || live.clone());
+        st.rescan();
+        st.focus_src = Box::new(|| Some(sref("s")));
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        assert!(st.focused().is_none());
+        assert!(!st.registry.get("s").unwrap().focused, "строка агентов: чат не «в фокусе»");
+        final_s(&mut st);
+        assert_eq!(bubbles(&mut r).len(), 1, "единственный агент в фокусе пузыря не даёт — чат в фокусе не бывает");
+    }
+
+    #[test]
+    fn chat_gets_no_pane_whatever_its_environment() {
+        // сторож жмёт клавиши только в терминал: у чата его нет по пометке, а не по случайности окружения
+        let any = |_| Some(Pane { mux: "orca", id: "term_1".into(), via: "/x/orca".into() });
+        let mut reg = Registry::new();
+        reg.sync(vec![Live { chat: true, ..live("c") }, live("t")], 0);
+        assert_eq!(pane_for(reg.get("c").unwrap(), any), None);
+        assert!(pane_for(reg.get("t").unwrap(), any).is_some());
     }
 
     #[test]

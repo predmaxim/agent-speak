@@ -63,11 +63,22 @@ fn menu(screen: &str) -> Vec<String> {
     items
 }
 
+/// Отказ агенту в чате Orca: CLI Orca пишет только в терминалы (`terminal send`), у чата команды ввода нет (Orca 1.4.256).
+pub const CHAT: &str = "в чат Orca передать не могу — ответь в Orca";
+
+/// Терминал агента; нет — отказ: чат Orca — CHAT, вне мультиплексоров — «агент не в Orca и не в herdr — why».
+fn pane_of(live: &crate::agents::Live, why: &str) -> Result<mux::Pane, String> {
+    if live.chat {
+        return Err(CHAT.into());
+    }
+    mux::locate(live.pid).ok_or_else(|| format!("агент не в Orca и не в herdr — {why}"))
+}
+
 /// Пункты меню агента session с экрана его терминала — только чтение, ничего не нажимается (`agent-speak menu`):
 /// Ома называет в вопросе подтверждения тот пункт, что увидит пользователь (у плана — «Yes, and use auto mode»).
 pub fn menu_of(session: &str) -> Result<Vec<String>, String> {
     let live = crate::agents::scan_all().into_iter().find(|l| l.id == session).ok_or("агента нет среди живых")?;
-    let pane = mux::locate(live.pid).ok_or("агент не в Orca и не в herdr — экран не прочитать")?;
+    let pane = pane_of(&live, "экран не прочитать")?;
     let items = menu(&mux::screen(&pane)?);
     if items.is_empty() {
         return Err("на экране агента нет меню".into());
@@ -163,7 +174,7 @@ const CHAT_ABOUT: &str = "Chat about this";
 /// Зовётся из потока действий службы (`mux::Work::Other`): чтение экрана, сверка и нажатие — без чужих записей между ними.
 pub fn tell(session: &str, option: usize, text: &str, expect: &str) -> Result<String, String> {
     let live = crate::agents::scan_all().into_iter().find(|l| l.id == session).ok_or("агента нет среди живых")?;
-    let pane = mux::locate(live.pid).ok_or("агент не в Orca и не в herdr — передать не могу")?;
+    let pane = pane_of(&live, "передать не могу")?;
     // у Codex меню не разбираем — всегда текст
     let call = if live.agent == "claude" { claude::in_flight(&tail_of(&live.transcript.to_string_lossy(), |t| claude::has_record(t, false))) } else { None };
     let (steps, chosen) = steps(call.as_ref(), &one_line(text), option, expect, || mux::screen(&pane))?;
@@ -201,6 +212,17 @@ mod tests {
 
     fn no_screen() -> Result<String, String> {
         Err("экран не нужен".into())
+    }
+
+    #[test]
+    fn chat_of_orca_is_refused_before_any_terminal() {
+        // у чата Orca нет терминала: ни текстом, ни клавишами меню, ни чтением экрана — отказ с подсказкой, где ответить
+        let chat = crate::agents::Live { id: "s".into(), agent: "claude", pid: std::process::id(), title: "t".into(), cwd: "/p".into(),
+            transcript: Default::default(), state: crate::agents::State::Waiting, status_at: 0, chat: true };
+        assert_eq!(pane_of(&chat, "передать не могу"), Err(CHAT.to_string()));
+        assert_eq!(CHAT, "в чат Orca передать не могу — ответь в Orca");
+        let term = crate::agents::Live { chat: false, ..chat };
+        assert_eq!(pane_of(&term, "передать не могу"), Err("агент не в Orca и не в herdr — передать не могу".to_string()));
     }
 
     /// AskUserQuestion: один вопрос из n вариантов.

@@ -2054,6 +2054,19 @@ def test_later_tell_refused_before_asking_free_agent_or_second_order():
     assert "уже есть отложенное «прогони тесты»" in r and o.pending is None and calls == [("later", "list")]
 
 
+def test_orca_chat_refused_before_asking():
+    # агент в чате Orca (chat в строке агентов): передать туда нечем — отказ до вопроса «да, передай», CLI не зовётся
+    for voiced in (True, False):
+        o, calls = _orders()
+        o.turn(voiced, "передай почте: проверь логи")
+        r = run(o.tell(dict(E[0], chat=True), "Проверь логи", "проверь логи"))
+        assert "в чат Orca передать не могу" in r and "ответь в Orca" in r and not calls and o.pending is None
+        o, calls = _later_orders()
+        o.turn(voiced, "когда спик закончит, передай: прогони тесты")
+        r = run(o.later_tell(dict(E[1], chat=True), "Прогони тесты", "прогони тесты"))
+        assert "в чат Orca передать не могу" in r and not calls and o.pending is None
+
+
 def test_later_tool_checks_list_and_cancel_go_without_confirmation():
     o, calls = _later_orders('[{"id": "later-1", "kind": "tell", "agent": "s2", "who": "agent-speak", "text": "Прогони тесты", "gist": "тесты"},'
                              ' {"id": "later-2", "kind": "checks", "agent": "", "who": "mail", "pr": 12}]')
