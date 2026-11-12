@@ -1,5 +1,6 @@
 //! Пересказ хода агента: лёгкая модель → короткая фраза для голоса.
 
+use crate::gitfacts::{self, Facts};
 use crate::learn;
 use crate::text::sentences;
 use std::sync::mpsc::{self, Sender};
@@ -28,6 +29,10 @@ pub struct Job {
     pub context: String,
     /// фраза без модели; None — без модели молчим
     pub fallback: Option<String>,
+    /// папка агента: итогу — факты git (done_facts, только Claude); None — без фактов
+    pub cwd: Option<String>,
+    /// начало хода — последний промпт пользователя, эпоха, с
+    pub since: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -37,6 +42,8 @@ pub struct Digest {
     pub ask: Ask,
     pub important: bool,
     pub say: String,
+    /// git после хода — говорит код, не модель
+    pub facts: Facts,
 }
 
 /// Символов текста агента в промпте — хвост: итог хода в конце.
@@ -59,6 +66,7 @@ const COMMON: &str = "Ты — Ома и рассказываешь пользо
 
 pub fn prompt(job: &Job) -> String {
     let kind = match job.ask {
+        Ask::Final if job.cwd.is_some() => "Агент закончил ход. Одной фразой, не длиннее 20 слов: что сделано и что требует внимания пользователя — оставшиеся проблемы, советы агента, что не проверено. О коммитах и пуше не говори — это скажет код. important — true, если пользователю нужно что-то решить или сделать.",
         Ask::Final => "Агент закончил ход. Одной фразой, не длиннее 20 слов: что сделано и что требует внимания пользователя — оставшиеся проблемы, советы агента, что не запушено или не проверено. important — true, если пользователю нужно что-то решить или сделать.",
         Ask::Step => "Агент закончил ход, который начал не пользователь, а отчёт его помощника: это переписка агента со своими помощниками. Одной фразой, не длиннее 20 слов: что сделано. important — true, только если вся работа, о которой просил пользователь, закончена или агент прямо обращается к пользователю (решить, ответить, проверить, ошибка, которую он не обойдёт); ход переписки с помощниками («ревьювер принял ответ», «исполнитель закрывает находку», «отправил на ревью») — false.",
         Ask::Question => "Агент ждёт ответа пользователя. Одной фразой, не длиннее 25 слов. Начни с того, что нужно решить: «нужен ответ: …» — суть вопроса общими словами; совет агента, если он есть, — после. Варианты ответа не перечисляй. Вопросов несколько — их число и суть каждого в двух-трёх словах. Вопрос важный (архитектура, данные, деньги, необратимые действия) — в тех же 25 словах, как агент предлагает это сделать. important — true.",
@@ -103,9 +111,11 @@ pub fn digest(job: Job, ask: impl Fn(&str) -> Option<String>) -> Option<Digest> 
     if said.is_none() && !job.text.trim().is_empty() {
         eprintln!("agent-speak: пересказ не удался ({}): {}", job.session, if job.fallback.is_some() { "запасная фраза" } else { "молчу" });
     }
+    // факты git — кодом, без модели; ход кончился, вне цикла событий: git в большом репозитории — сотни мс
+    let facts = job.cwd.as_deref().and_then(|c| gitfacts::collect(std::path::Path::new(c), job.since)).unwrap_or_default();
     // вопрос важен и без модели: пользователя ждут
     let (important, say) = said.or_else(|| job.fallback.map(|f| (job.ask == Ask::Question, f)))?;
-    Some(Digest { session: job.session, project: job.project, ask: job.ask, important, say })
+    Some(Digest { session: job.session, project: job.project, ask: job.ask, important, say, facts })
 }
 
 pub fn spawn(out: Sender<Digest>) -> Sender<Job> {
@@ -134,7 +144,7 @@ pub fn spawn_with(out: Sender<Digest>, ask: fn(&str) -> Option<String>) -> Sende
 mod tests {
     #[test]
     fn helper_step_prompt_silences_chatter() {
-        let job = Job { session: "s".into(), project: "p".into(), ask: Ask::Step, text: "Ревьювер принял ответ.".into(), context: String::new(), fallback: None };
+        let job = Job { session: "s".into(), project: "p".into(), ask: Ask::Step, text: "Ревьювер принял ответ.".into(), context: String::new(), fallback: None, cwd: None, since: 0 };
         let p = prompt(&job);
         assert!(p.contains("помощник") && p.contains("false"), "переписку с помощниками модель не считает важной");
     }
@@ -144,7 +154,7 @@ mod tests {
     use std::time::Duration;
 
     fn job(ask: Ask, text: &str, fallback: Option<&str>) -> Job {
-        Job { session: "s".into(), project: "plug".into(), ask, text: text.into(), context: "почини орб".into(), fallback: fallback.map(String::from) }
+        Job { session: "s".into(), project: "plug".into(), ask, text: text.into(), context: "почини орб".into(), fallback: fallback.map(String::from), cwd: None, since: 0 }
     }
 
     #[test]
@@ -250,7 +260,20 @@ mod tests {
     #[test]
     fn digest_uses_model_answer() {
         let d = digest(job(Ask::Final, "Сделал.", Some("готово")), |_| Some("{\"say\":\"Фича готова.\",\"important\":true}".into())).unwrap();
-        assert_eq!(d, Digest { session: "s".into(), project: "plug".into(), ask: Ask::Final, important: true, say: "Фича готова.".into() });
+        assert_eq!(d, Digest { session: "s".into(), project: "plug".into(), ask: Ask::Final, important: true, say: "Фича готова.".into(), facts: Facts::default() });
+    }
+
+    #[test]
+    fn final_with_cwd_gets_git_facts_and_model_keeps_off_git() {
+        let dir = gitfacts::tests::repo("digest");
+        std::fs::write(dir.join("a"), "2").unwrap();
+        let j = |cwd: Option<&std::path::Path>| Job { cwd: cwd.map(|c| c.to_string_lossy().into()), since: gitfacts::tests::now() - 100, ..job(Ask::Final, "Сделал.", Some("готово")) };
+        assert!(prompt(&j(Some(&dir))).contains("О коммитах и пуше не говори — это скажет код") && !prompt(&j(Some(&dir))).contains("что не запушено"));
+        assert!(prompt(&j(None)).contains("что не запушено"), "без фактов — как раньше");
+        let ok = |_: &str| Some("{\"say\":\"Фича готова.\"}".to_string());
+        assert_eq!(digest(j(Some(&dir)), ok).unwrap().facts.voice(), "Не закоммичен 1 файл.");
+        assert_eq!(digest(j(None), ok).unwrap().facts, Facts::default());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

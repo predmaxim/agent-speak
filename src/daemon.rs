@@ -1038,7 +1038,7 @@ impl State {
             earcons: self.cfg.earcons,
             intonation: self.cfg.intonation,
             // волна 4: агенты
-            done_facts: false,
+            done_facts: self.cfg.done_facts,
             permission_buttons: false,
             agent_inbox: self.cfg.agent_inbox,
             // волна 5: слово-побудка
@@ -1182,8 +1182,9 @@ impl State {
     }
 
     /// Задание на пересказ; сессии не из реестра (не пользователя) не пересказываем. fallback — фраза без модели;
-    /// у Ask::Final её всегда ставит круг DONE, вызывающий передаёт None.
-    fn ask(&mut self, session: &str, ask: Ask, text: &str, fallback: Option<String>) {
+    /// у Ask::Final её всегда ставит круг DONE, вызывающий передаёт None. cwd — папка агента из хука Stop: итогу Claude
+    /// воркер добавит факты git с его последнего промпта (done_facts).
+    fn ask(&mut self, session: &str, ask: Ask, text: &str, fallback: Option<String>, cwd: Option<&str>) {
         debug_assert!(ask != Ask::Final || fallback.is_none(), "запасную фразу итога ставит круг DONE");
         if !self.cfg.agents_voice {
             return; // «Следить за агентами» выключено: модель не зовём
@@ -1194,7 +1195,10 @@ impl State {
         let context = prompt.chars().skip(skip).collect();
         // итог без модели — «готово» по кругу; круг идёт, только когда пересказ правда заказан
         let fallback = if ask == Ask::Final { Some(self.rotor.next(phrases::DONE).into()) } else { fallback };
-        let job = Job { session: session.to_string(), project: e.project.clone(), ask, text: text.to_string(), context, fallback };
+        // ход — с промпта пользователя (у Codex хука промпта нет: без него и фактов нет)
+        let since = e.feed.iter().rev().find(|l| l.kind == "prompt").map_or(0, |l| l.at);
+        let cwd = cwd.filter(|_| ask == Ask::Final && self.cfg.done_facts && since > 0).map(String::from);
+        let job = Job { session: session.to_string(), project: e.project.clone(), ask, text: text.to_string(), context, fallback, cwd, since };
         let _ = self.digest.send(job);
     }
 
@@ -1212,7 +1216,7 @@ impl State {
             self.bubble("", &format!("final-{SUMMARY}"), "Ома", &d.say, "final");
             if !self.quiet() {
                 let born = (self.now_secs)();
-                self.board.push(News { session: d.session, class: Class::Final, project: String::new(), say: d.say, important: true, born });
+                self.board.push(News { session: d.session, class: Class::Final, project: String::new(), say: d.say, important: true, born, facts: Default::default() });
             }
             self.speak_news();
             return;
@@ -1229,11 +1233,13 @@ impl State {
             return;
         }
         let who = e.title.clone();
-        eprintln!("agent-speak: пересказ {:?} {} ({}): {}", d.ask, e.project, &d.session[..8.min(d.session.len())], d.say);
+        // факты git итога — кодом, за пересказом: голосу и пузырю «Не закоммичены 3 файла.», строке агента — ещё «не запушено»
+        let (heard, window) = (d.facts.after(&d.say), d.facts.window());
+        eprintln!("agent-speak: пересказ {:?} {} ({}): {heard}", d.ask, e.project, &d.session[..8.min(d.session.len())]);
         if self.cfg.memory && (matches!(d.ask, Ask::Final | Ask::Question) || d.ask == Ask::Step && d.important) {
-            crate::memory::log_news(&self.memory_dir, (self.now_secs)(), &e.project, &format!("{:?}", d.ask), &d.say);
+            crate::memory::log_news(&self.memory_dir, (self.now_secs)(), &e.project, &format!("{:?}", d.ask), &heard);
         }
-        self.registry.summary(&d.session, &d.say);
+        self.registry.summary(&d.session, &if window.is_empty() { d.say.clone() } else { format!("{} · {window}", d.say) });
         let kind = match d.ask {
             Ask::Final | Ask::Summary => Some("final"),
             Ask::Step => d.important.then_some("final"),
@@ -1242,7 +1248,7 @@ impl State {
             Ask::Hung => None,
         };
         if let Some(kind) = kind {
-            self.bubble(&d.session, &format!("{kind}-{}", d.session), &who, &d.say, kind);
+            self.bubble(&d.session, &format!("{kind}-{}", d.session), &who, &heard, kind);
         }
         // промежуточное — только строка «что сейчас» и пузырь (важное): вслух его нет
         let class = match d.ask {
@@ -1256,7 +1262,7 @@ impl State {
                 self.board.answered(&d.session); // новый вопрос — прежний уже решён; «нужно» ждёт ответа пользователя
             }
             let born = (self.now_secs)();
-            self.board.push(News { session: d.session.clone(), class, project: d.project, say: d.say, important: d.important, born });
+            self.board.push(News { session: d.session.clone(), class, project: d.project, say: d.say, important: d.important, born, facts: d.facts });
         }
         self.push_agents();
         self.speak_news(); // пересказ готов — звучит сразу, а не со следующим тиком
@@ -1340,7 +1346,7 @@ impl State {
                 parts.extend(self.board.overview(self.rotor.next(phrases::AWAY), None).map(Chunk::oma));
                 if self.board.finals() > SUMMARY_OVER {
                     let lines: Vec<String> = self.board.take_finals().iter().map(News::line).collect();
-                    let job = Job { session: SUMMARY.into(), project: String::new(), ask: Ask::Summary, text: lines.join("\n"), context: String::new(), fallback: Some(lines.join(" ")) };
+                    let job = Job { session: SUMMARY.into(), project: String::new(), ask: Ask::Summary, text: lines.join("\n"), context: String::new(), fallback: Some(lines.join(" ")), cwd: None, since: 0 };
                     let _ = self.digest.send(job);
                 }
             } else if std::mem::take(&mut self.quiet_over) {
@@ -1721,7 +1727,7 @@ impl State {
         let due: Vec<String> = self.progress.iter().filter(|(_, (_, at))| now.saturating_duration_since(*at) >= PROGRESS_EVERY).map(|(s, _)| s.clone()).collect();
         for s in due {
             if let Some((text, _)) = self.progress.remove(&s) {
-                self.ask(&s, Ask::Progress, &text, None);
+                self.ask(&s, Ask::Progress, &text, None, None);
             }
         }
         // «Ты тут?» отзвучал, окно ответа закрылось, а ни слова, ни ввода — пользователя нет на месте
@@ -2116,7 +2122,7 @@ impl State {
                     // модели — суть и совет агента: его текст и ввод вызова; перевод уведомления — запасная фраза
                     // мозг Омы отвечает по тем же вариантам и видит план целиком
                     self.registry.asking(&session, &claude::question_context(&tail, claude::ASK_MAX));
-                    self.ask(&session, Ask::Question, &claude::question_context(&tail, claude::TOOL_MAX), Some(msg));
+                    self.ask(&session, Ask::Question, &claude::question_context(&tail, claude::TOOL_MAX), Some(msg), None);
                 }
             }
             "message-display" => {
@@ -2149,9 +2155,9 @@ impl State {
                 // shortcut: вопрос текстом в конце такого хода не звучит (AskUserQuestion — звучит), научить, если начнёт теряться; помощник без отчёта держит ход «работает», пока его запуск не уйдёт из хвоста 256 КБ
                 if !waiting {
                     if self.helper_turn.remove(&session).unwrap_or(false) {
-                        self.ask(&session, Ask::Step, &last, None); // переписка с помощниками звучит, только если важна
+                        self.ask(&session, Ask::Step, &last, None, None); // переписка с помощниками звучит, только если важна
                     } else {
-                        self.ask(&session, Ask::Final, &last, None);
+                        self.ask(&session, Ask::Final, &last, None, p["cwd"].as_str());
                     }
                 } else {
                     self.helper_turn.remove(&session);
@@ -2171,7 +2177,7 @@ impl State {
                 self.registry.finished(&thread, last, now);
                 self.board.answered(&thread);
                 self.progress.remove(&thread);
-                self.ask(&thread, Ask::Final, last, None);
+                self.ask(&thread, Ask::Final, last, None, None);
             }
             "session-end" => self.watch.ended(&session), // вышел сам — исчезновение не падение
             "post-tool-use-failure" => {
@@ -2241,7 +2247,7 @@ impl State {
                         }
                         None => text,
                     };
-                    let _ = digest.send(Job { session, project, ask: Ask::Hung, text, context: String::new(), fallback: Some("нет ответа модели".into()) });
+                    let _ = digest.send(Job { session, project, ask: Ask::Hung, text, context: String::new(), fallback: Some("нет ответа модели".into()), cwd: None, since: 0 });
                 });
             }
             Act::Run(job) => {
@@ -2260,7 +2266,7 @@ impl State {
         let kind = if class == Class::Question { "question" } else { "status" };
         self.bubble(if known.is_some() { session } else { "" }, &format!("watch-{session}"), &who, &line, kind);
         if !self.quiet() {
-            self.board.push(News { session: session.into(), class, project: project.into(), say: text.into(), important: false, born: (self.now_secs)() });
+            self.board.push(News { session: session.into(), class, project: project.into(), say: text.into(), important: false, born: (self.now_secs)(), facts: Default::default() });
         }
     }
 
@@ -2825,6 +2831,14 @@ mod tests {
         st.cfg.earcons = false;
         st.cfg.intonation = false;
         assert_eq!((v(&st)["news_every"].clone(), v(&st)["earcons"].clone(), v(&st)["intonation"].clone()), (0.into(), false.into(), false.into()));
+    }
+
+    #[test]
+    fn status_line_carries_done_facts() {
+        let mut st = test_state();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["done_facts"], true);
+        st.cfg.done_facts = false;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["done_facts"], false);
     }
 
     /// Очередь как есть: (знак, тон, проект, текст).
@@ -3561,7 +3575,7 @@ mod tests {
     /// Новость из строки «проект: фраза», как её собирают on_digest и сторож; без «: » — без проекта.
     fn nw(session: &str, class: Class, line: &str, born: u64) -> News {
         let (project, say) = line.split_once(": ").unwrap_or(("", line));
-        News { session: session.into(), class, project: project.into(), say: say.into(), important: false, born }
+        News { session: session.into(), class, project: project.into(), say: say.into(), important: false, born, facts: Default::default() }
     }
 
     /// Пачка доски одной строкой; пусто — None.
@@ -4123,7 +4137,7 @@ mod tests {
     }
 
     fn dg(session: &str, ask: Ask, important: bool, say: &str) -> Digest {
-        Digest { session: session.into(), project: "plug".into(), ask, important, say: say.into() }
+        Digest { session: session.into(), project: "plug".into(), ask, important, say: say.into(), facts: Default::default() }
     }
 
     /// Агент спросил (ждёт ответа, как после уведомления) — и пришёл пересказ вопроса.
@@ -4167,6 +4181,36 @@ mod tests {
         assert!(rx.try_recv().is_err());
         stop(&mut st, "s", "Ещё сделал.");
         assert_eq!(rx.try_recv().unwrap().fallback.as_deref(), Some("ход закончен"), "запасной итог — следующий по кругу");
+    }
+
+    #[test]
+    fn final_job_of_claude_carries_cwd_and_turn_start_for_git_facts() {
+        let mut st = test_state();
+        with_agents(&mut st, &["s"]);
+        let rx = jobs(&mut st);
+        let stop = |st: &mut State| st.on_hook("stop", &serde_json::json!({"session_id": "s", "transcript_path": "/nonexistent", "last_assistant_message": "Сделал.", "cwd": "/p/s/sub"}));
+        stop(&mut st);
+        assert_eq!(rx.try_recv().unwrap().cwd, None, "промпта не было — начало хода неизвестно, фактов нет");
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s", "prompt": "сделай фичу"}));
+        stop(&mut st);
+        let job = rx.try_recv().unwrap();
+        assert_eq!((job.cwd.as_deref(), job.since), (Some("/p/s/sub"), 1000), "папка — из хука Stop, ход — с промпта");
+        st.cfg.done_facts = false;
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "s", "prompt": "ещё"}));
+        stop(&mut st);
+        assert_eq!(rx.try_recv().unwrap().cwd, None, "«Факты git в итогах» выключено");
+    }
+
+    #[test]
+    fn final_git_facts_reach_voice_bubble_and_agent_row() {
+        let mut st = test_state();
+        with_agents(&mut st, &["s"]);
+        let mut r = sub(&mut st);
+        let facts = crate::gitfacts::Facts { commits: 1, dirty: 3, unpushed: Some(2) };
+        st.on_digest(Digest { facts, ..dg("s", Ask::Final, false, "Эхо починено.") });
+        assert_eq!(bubbles(&mut r)[0]["text"], "Эхо починено. Не закоммичены 3 файла.");
+        assert_eq!(st.registry.get("s").unwrap().status, "Эхо починено. · не закоммичены 3 файла · не запушено: 2");
+        assert_eq!(texts(&st), ["плуг: Эхо починено.", "Не закоммичены три файла."], "звучит за пересказом, число — словом");
     }
 
     #[test]
@@ -5982,7 +6026,7 @@ mod tests {
         st.tick();
         assert!(rx.try_recv().is_err() && texts(&st).is_empty(), "сводка — одна, итоги не звучат по отдельности");
         let mut r = sub(&mut st);
-        st.on_digest(Digest { session: job.session, project: job.project, ask: Ask::Summary, important: true, say: "Четыре проекта готовы.".into() });
+        st.on_digest(Digest { session: job.session, project: job.project, ask: Ask::Summary, important: true, say: "Четыре проекта готовы.".into(), facts: Default::default() });
         let b = bubbles(&mut r);
         assert_eq!((b.len(), b[0]["who"].as_str(), b[0]["kind"].as_str(), b[0]["agent"].as_str()), (1, Some("Ома"), Some("final"), Some("")));
         st.tick();

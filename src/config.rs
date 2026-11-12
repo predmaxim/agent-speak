@@ -52,6 +52,8 @@ pub struct Config {
     pub earcons: bool,
     /// интонация по смыслу: пауза после проекта, вопрос выше, беда ниже и медленнее, итог быстрее (SSML адаптера Silero)
     pub intonation: bool,
+    /// факты git в итогах Claude: «Закоммичено.», «Не закоммичены 3 файла.» — кодом, из git папки агента
+    pub done_facts: bool,
     /// агенты пишут Оме (`agent-speak note`): «нужно» агента звучит сразу, видно в окне и на орбе; строка хука SessionStart
     pub agent_inbox: bool,
 }
@@ -62,7 +64,7 @@ impl Default for Config {
             orb_satellites: true, orb_moods: true, orb_idle_motion: true,
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: true, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
             orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95, screencast_privacy: true, hush_summary: true, music_pause: true,
-            limit_warn: true, limit_warn_at: 90, memory: true, news_every: 10, earcons: true, intonation: true, agent_inbox: true }
+            limit_warn: true, limit_warn_at: 90, memory: true, news_every: 10, earcons: true, intonation: true, done_facts: true, agent_inbox: true }
     }
 }
 
@@ -144,6 +146,7 @@ impl Config {
             "news_every" if in_range(value, 0, 60) => self.news_every = value.as_u64().unwrap(),
             "earcons" if value.is_boolean() => self.earcons = value.as_bool().unwrap(),
             "intonation" if value.is_boolean() => self.intonation = value.as_bool().unwrap(),
+            "done_facts" if value.is_boolean() => self.done_facts = value.as_bool().unwrap(),
             "agent_inbox" if value.is_boolean() => self.agent_inbox = value.as_bool().unwrap(),
             _ => return false,
         }
@@ -360,6 +363,7 @@ mod tests {
         assert!(c.set("earcons", &json!(false)) && !c.earcons && !c.set("earcons", &json!(1)));
         assert!(c.set("intonation", &json!(false)) && !c.intonation && !c.set("intonation", &json!("on")));
         assert_eq!(parse("news_every = -1").unwrap().news_every, 10, "из файла — так же, как set");
+        assert!(c.done_facts && c.set("done_facts", &json!(false)) && !c.done_facts && !c.set("done_facts", &json!("off")));
     }
 
     #[test]

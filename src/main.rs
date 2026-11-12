@@ -5,6 +5,7 @@ mod config;
 mod daemon;
 mod digest;
 mod focus;
+mod gitfacts;
 mod ipc;
 mod learn;
 mod limits;
