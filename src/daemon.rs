@@ -1315,7 +1315,7 @@ impl State {
         // ход — с промпта пользователя (у Codex хука промпта нет: без него и фактов нет); промпт до перезапуска службы — из ленты
         let since = self.turn_at.get(session).copied().or_else(|| e.feed.iter().rev().find(|l| l.kind == "prompt").map(|l| l.at)).unwrap_or(0);
         let cwd = cwd.filter(|_| ask == Ask::Final && self.cfg.done_facts && since > 0).map(String::from);
-        let job = Job { session: session.to_string(), project: e.project.clone(), ask, text: text.to_string(), context, fallback, cwd, since };
+        let job = Job { session: session.to_string(), project: e.project.clone(), ask, text: text.to_string(), context, fallback, cwd, since, gender: self.gender() };
         let _ = self.digest.send(job);
     }
 
@@ -1466,7 +1466,7 @@ impl State {
                 let recapped = self.board.recap(|s| registry.get(s).filter(|e| e.agent == "claude").and_then(|e| agents::recap(Path::new(&e.transcript))));
                 if self.board.finals() - recapped.len() > SUMMARY_OVER {
                     let lines: Vec<String> = self.board.take_finals(&recapped).iter().map(News::line).collect();
-                    let job = Job { session: SUMMARY.into(), project: String::new(), ask: Ask::Summary, text: lines.join("\n"), context: String::new(), fallback: Some(lines.join(" ")), cwd: None, since: 0 };
+                    let job = Job { session: SUMMARY.into(), project: String::new(), ask: Ask::Summary, text: lines.join("\n"), context: String::new(), fallback: Some(lines.join(" ")), cwd: None, since: 0, gender: self.gender() };
                     let _ = self.digest.send(job);
                 }
             } else if std::mem::take(&mut self.quiet_over) {
@@ -2627,7 +2627,7 @@ impl State {
             Act::Say { session, class, project, text } => self.watch_say(&session, class, &project, &text),
             Act::Judge { session, text } => {
                 // экран — CLI мультиплексора, до 10 с: в своём потоке, затем задание модели
-                let (digest, pane, screen) = (self.digest.clone(), panes.get(&session).cloned(), self.screen);
+                let (digest, pane, screen, gender) = (self.digest.clone(), panes.get(&session).cloned(), self.screen, self.gender());
                 let project = self.registry.get(&session).map(|e| e.project.clone()).unwrap_or_default();
                 std::thread::spawn(move || {
                     let text = match pane.as_ref().and_then(screen) {
@@ -2637,7 +2637,7 @@ impl State {
                         }
                         None => text,
                     };
-                    let _ = digest.send(Job { session, project, ask: Ask::Hung, text, context: String::new(), fallback: Some("нет ответа модели".into()), cwd: None, since: 0 });
+                    let _ = digest.send(Job { session, project, ask: Ask::Hung, text, context: String::new(), fallback: Some("нет ответа модели".into()), cwd: None, since: 0, gender });
                 });
             }
             Act::Run(job) => {
