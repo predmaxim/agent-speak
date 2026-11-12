@@ -286,7 +286,7 @@ struct State {
     limits_bad: bool,          // лимит кончится раньше сброса: промежуточное не пересказываем
     limits_good: Option<u64>,  // с этого момента прогноз хороший, а эпизод ещё держится
     limit: String,             // фраза «лимит почти кончился» в строке состояния; "" — окна у порога нет
-    limit_said: HashMap<String, u64>, // агент → срок сброса, о котором уже сказано: эпизод предупреждения
+    limit_said: HashMap<String, u64>, // окно (claude:seven_day) → срок сброса, о котором уже сказано: эпизод предупреждения
     act: Sender<mux::Work>,    // действия в терминалах агентов; в тестах — канал без потока
     next_watch: Instant,
     activity: HashMap<String, u64>, // сессия → последний хук, с
@@ -2093,16 +2093,18 @@ impl State {
         limits::clear_hints(&self.hints, |s| hinted.contains(s));
     }
 
-    /// Окно лимита у limit_warn_at: фраза — в строку состояния (орб, мозг); новый эпизод (агент, срок сброса) — она же
-    /// пузырём Омы и на доску, один раз. true — фраза в строке состояния сменилась.
+    /// Окно лимита у limit_warn_at: фраза — в строку состояния (орб, мозг); новый эпизод (окно, срок сброса) — она же
+    /// пузырём Омы и на доску, один раз: самое полное окно агента сменилось и вернулось — тот же эпизод, без повтора.
+    /// true — фраза в строке состояния сменилась.
     fn warn_limits(&mut self, now: u64) -> bool {
         let on = self.cfg.agents_voice && self.cfg.limit_warn;
         let warn = if on { self.limits.warn(now, self.cfg.limit_warn_at as f64) } else { vec![] };
         let mut line = vec![];
+        self.limit_said.retain(|_, resets_at| *resets_at > now); // окно сбросилось — его эпизод кончен
         for w in &warn {
             let agent = w.key.split(':').next().unwrap_or_default().to_string();
             let text = limits::warn_text(w, now);
-            if self.limit_said.insert(agent.clone(), w.resets_at) != Some(w.resets_at) {
+            if self.limit_said.insert(w.key.clone(), w.resets_at) != Some(w.resets_at) {
                 self.watch_say(&format!("limit-{agent}"), &text, Class::Restore);
             }
             line.push(text);
@@ -2187,8 +2189,8 @@ mod tests {
             limits: Limits::default(),
             limits_bad: false,
             limits_good: None,
-        limit: String::new(),
-        limit_said: HashMap::new(),
+            limit: String::new(),
+            limit_said: HashMap::new(),
             act: mpsc::channel().0, // терминалы в тестах не трогаются
             next_watch: Instant::now() + Duration::from_secs(86_400), // tick сторожа не зовёт: тесты зовут watch_tick сами
             activity: HashMap::new(),
@@ -2351,6 +2353,32 @@ mod tests {
         statusline(&mut st, 93.0, 30_000);
         st.watch_tick();
         assert_eq!(said(&mut r).1.len(), 1, "новый срок сброса — новый эпизод");
+    }
+
+    #[test]
+    fn limit_warning_remembered_per_window() {
+        // пятичасовое окно обогнало недельное и сбросилось: недельная фраза — тот же эпизод, второй раз не звучит
+        let mut st = test_state();
+        let now = Arc::new(Mutex::new(1000u64));
+        let n = now.clone();
+        st.now_secs = Box::new(move || *n.lock().unwrap());
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        let both = |st: &mut State, five: f64, five_at: u64| {
+            st.on_hook("statusline", &serde_json::json!({"session_id": "a", "rate_limits": {
+                "five_hour": {"used_percentage": five, "resets_at": five_at}, "seven_day": {"used_percentage": 92.0, "resets_at": 500_000}}}));
+        };
+        let bubbles = |r: &mut BufReader<UnixStream>| drain(r).iter().filter(|v| v.get("bubble").is_some()).count();
+        both(&mut st, 85.0, 9000);
+        st.watch_tick();
+        assert_eq!(bubbles(&mut r), 1, "неделя у порога");
+        both(&mut st, 95.0, 9000);
+        st.watch_tick();
+        assert_eq!(bubbles(&mut r), 1, "пятичасовое обогнало — его эпизод");
+        *now.lock().unwrap() = 9500;
+        both(&mut st, 5.0, 27_000);
+        st.watch_tick();
+        assert_eq!(bubbles(&mut r), 0, "пятичасовое сбросилось — неделя уже сказана");
     }
 
     #[test]

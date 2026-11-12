@@ -109,13 +109,15 @@ impl Limits {
         self.series.values().any(|(w, _)| w.pct >= threshold && w.resets_at > now)
     }
 
-    /// Окна у порога: по агенту самое полное с процентом не ниже at и сбросом впереди; по ключу.
+    /// Окна у порога: по агенту самое полное с процентом не ниже at и сбросом впереди; по ключу. Самое полное
+    /// кончилось (100 %) — агента нет: это не «почти»; агент упрётся в лимит — скажет сторож («Кончился лимит …»).
     pub fn warn(&self, now: u64, at: f64) -> Vec<Window> {
         let agent = |w: &Window| w.key.split(':').next().unwrap_or_default().to_string();
         let mut v: Vec<Window> = self.series.values().map(|(w, _)| w.clone()).filter(|w| w.pct >= at && w.resets_at > now).collect();
         // равные проценты — держит окно с поздним сбросом
         v.sort_by(|a, b| agent(a).cmp(&agent(b)).then(b.pct.total_cmp(&a.pct)).then(b.resets_at.cmp(&a.resets_at)));
         v.dedup_by(|a, b| agent(a) == agent(b));
+        v.retain(|w| w.pct < 100.0);
         v
     }
 
@@ -263,6 +265,8 @@ mod tests {
         assert_eq!(l.warn(1000, 90.0).iter().map(|w| w.key.as_str()).collect::<Vec<_>>(), ["claude:seven_day", "codex:secondary"]);
         assert_eq!(l.warn(8000, 90.0).iter().map(|w| w.key.as_str()).collect::<Vec<_>>(), ["claude:seven_day"], "сброс прошёл — окна у порога нет");
         assert!(l.warn(1000, 98.0).is_empty());
+        l.sample(w("codex:primary", 100.0, 7000), 1000);
+        assert_eq!(l.warn(1000, 90.0).iter().map(|w| w.key.as_str()).collect::<Vec<_>>(), ["claude:seven_day"], "кончился — не «почти»: говорит сторож");
     }
 
     #[test]
