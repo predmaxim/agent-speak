@@ -5,9 +5,15 @@
 
 var SAMPLE = "Так звучит этот голос."
 
-// No connection to the daemon: the status-line fields, empty.
+// No connection to the daemon: the status-line fields, empty, in the line's order (struct Status, test.js checks).
 var OFFLINE = { running: false, speaking: false, paused: false, speaker: "", rate: "", project: "",
-  oma: "off", talking: false, agents_voice: false, quiet: false, quiet_schedule: false, quiet_from: "", quiet_to: "", orb_pos: "", orb_over_fullscreen: true, progress_digest: false, waiting: 0, trouble: 0 }
+  oma: "off", talking: false, agents_voice: false, progress_digest: false, quiet: false, quiet_schedule: false, quiet_from: "", quiet_to: "",
+  orb_pos: "", orb_over_fullscreen: true, waiting: 0, trouble: 0, played_at: 0, out: "", voiced: 0, user_paused: false,
+  // the Jarvis wave's fields, declared ahead (README, «Устройство»)
+  quiet_why: "", dnd_quiet: false, hush_summary: false, screencast_privacy: false, orb_satellites: false,
+  media_hold: false, music_pause: false, limit: "", limit_warn: false, ear_in: "", listen_until: null, listen_secs: 0,
+  struggling: 0, orb_moods: false, orb_idle_motion: false, rate_now: "", news_every: 0, earcons: false, intonation: false,
+  done_facts: false, permission_buttons: false, agent_inbox: false, wake: "off", wake_word: false, memory: false }
 
 // One socket line -> {type, value}, or null for anything else (a broken line must not blank the state).
 function parseLine(line) {

@@ -110,6 +110,11 @@ assert.strictEqual(M.escWanted(null, st, true), true)
 assert.strictEqual(M.escWanted(null, st, false), false)
 assert.strictEqual(M.OFFLINE.talking, false)
 assert.ok(!("dialog" in M.OFFLINE) && !("orb_corner" in M.OFFLINE))
+// OFFLINE is the status line with nothing in it: the same fields in the same order as struct Status in the daemon
+const status = /struct Status<'a> \{([\s\S]*?)\n\}/.exec(fs.readFileSync(__dirname + "/../src/daemon.rs", "utf8"))[1]
+assert.deepStrictEqual(Object.keys(M.OFFLINE), [...status.matchAll(/^\s*(\w+):/gm)].map(m => m[1]))
+assert.strictEqual(M.OFFLINE.listen_until, null)
+assert.strictEqual(M.OFFLINE.wake, "off")
 
 // Every key from orbTip, ago and stateLabel has a Russian line
 const keys = new Set()

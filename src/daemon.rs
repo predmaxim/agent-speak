@@ -141,6 +141,33 @@ struct Status<'a> {
     out: &'a str,   // куда идёт голос: speakers | headphones
     voiced: u64,    // реплик (`voice`) нынешней Омы отработано: звук записан, оборван, его не будет или пришла на паузу пользователя
     user_paused: bool, // очередь на паузе пользователя (кнопка), а не на её паузе при перебиве (oma_pause)
+    // Поля волн «Джарвис» (docs/superpowers/specs/2026-11-12-oma-jarvis-wave-design.md): объявлены заранее, с нейтральным
+    // значением — «функции ещё нет»; строитель функции меняет только значение своих полей, порядок не трогает, новые — в конец.
+    quiet_why: &'a str,       // причина тишины: "" | "dnd" | "screencast" (при обеих — screencast)
+    dnd_quiet: bool,          // настройка: тихо при «Не беспокоить»
+    hush_summary: bool,       // настройка: сводка «Пока было тихо» на выходе из тишины по причине
+    screencast_privacy: bool, // настройка: при показе экрана — тихо и коротко
+    orb_satellites: bool,     // настройка: спутники агентов у орба
+    media_hold: bool,         // звук занят Омой (говорит, слушает, окно ответа впереди) — музыка на паузе
+    music_pause: bool,        // настройка: пауза музыки, пока Ома говорит и слушает
+    limit: &'a str,           // фраза «лимит почти кончился»; "" — нет
+    limit_warn: bool,         // настройка: предупреждать о лимите
+    ear_in: &'a str,          // вход Омы (узел PipeWire); "" — вход по умолчанию
+    listen_until: Option<f64>, // до когда она слушает, эпоха, с; null — дуги нет
+    listen_secs: f64,         // длина нынешнего окна слушания, с: доля дуги — (listen_until − сейчас) / listen_secs
+    struggling: usize,        // агентов с 3+ упавшими вызовами за ход
+    orb_moods: bool,          // настройка: кольцо «готово», «поник», волна
+    orb_idle_motion: bool,    // настройка: вдох орба в покое
+    rate_now: &'a str,        // темп этого ответа с колеса; "" — не задан
+    news_every: u64,          // настройка: итоги вслух не чаще, мин; 0 — как сейчас, без бюджета
+    earcons: bool,            // настройка: звуковые знаки перед новостью
+    intonation: bool,         // настройка: интонация по смыслу
+    done_facts: bool,         // настройка: факты git в итогах
+    permission_buttons: bool, // настройка: кнопки разрешений
+    agent_inbox: bool,        // настройка: агенты пишут Оме
+    wake: &'a str,            // слово-побудка: on | off | battery | muted | busy | no_model | no_mic
+    wake_word: bool,          // настройка: отзываться на «Ома»
+    memory: bool,             // настройка: помнить прошлые дни
 }
 
 /// Процесс Омы (python -m agent_voice): команды — строками в stdin, события — через сокет.
@@ -834,6 +861,42 @@ impl State {
             out: self.out(),
             voiced: self.voices - self.voice_base - self.shared.voices_left(self.voice_base) as u64,
             user_paused: paused && !self.oma_paused,
+            // волна 2 (A): тишина по причине
+            quiet_why: "",
+            dnd_quiet: false,
+            hush_summary: false,
+            screencast_privacy: false,
+            // волна 2 (C): спутники
+            orb_satellites: false,
+            // волна 2 (D): пауза музыки
+            media_hold: false,
+            music_pause: false,
+            // волна 2 (E): лимиты
+            limit: "",
+            limit_warn: false,
+            // волна 3 (A): орб слышит
+            ear_in: "",
+            listen_until: None,
+            listen_secs: 0.0,
+            // волна 3 (A): настроение орба
+            struggling: 0,
+            orb_moods: false,
+            orb_idle_motion: false,
+            // волна 3 (A): колесо над орбом
+            rate_now: "",
+            // волна 3 (B): полосы, знаки, интонация
+            news_every: 0,
+            earcons: false,
+            intonation: false,
+            // волна 4: агенты
+            done_facts: false,
+            permission_buttons: false,
+            agent_inbox: false,
+            // волна 5: слово-побудка
+            wake: "off",
+            wake_word: false,
+            // память между днями
+            memory: false,
         };
         format!("{}\n", serde_json::to_string(&st).unwrap())
     }
@@ -2163,10 +2226,30 @@ mod tests {
 
     #[test]
     fn status_line_shape() {
+        // порядок полей — протокол (README, «Устройство»): прежние поля и их значения — как были
         let st = test_state();
+        let line = st.status_line();
+        assert!(
+            line.starts_with("{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":true,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0,\"trouble\":0,\"played_at\":0.0,\"out\":\"speakers\",\"voiced\":0,\"user_paused\":false,"),
+            "{line}"
+        );
+        // поля волн «Джарвис» (дизайн 2026-11-12) — заранее и только в конец, в этом порядке; значения проверяют тесты их функций
+        let keys: Vec<&str> = line[2..].split(",\"").map(|kv| kv.split('"').next().unwrap()).skip(22).collect();
         assert_eq!(
-            st.status_line(),
-            "{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":true,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0,\"trouble\":0,\"played_at\":0.0,\"out\":\"speakers\",\"voiced\":0,\"user_paused\":false}\n"
+            keys,
+            [
+                "quiet_why", "dnd_quiet", "hush_summary", "screencast_privacy", // тишина по причине: волна 2 (A)
+                "orb_satellites",                                              // спутники: волна 2 (C)
+                "media_hold", "music_pause",                                    // пауза музыки: волна 2 (D)
+                "limit", "limit_warn",                                          // лимиты: волна 2 (E)
+                "ear_in", "listen_until", "listen_secs",                        // орб слышит: волна 3 (A)
+                "struggling", "orb_moods", "orb_idle_motion",                   // настроение орба: волна 3 (A)
+                "rate_now",                                                     // колесо над орбом: волна 3 (A)
+                "news_every", "earcons", "intonation",                          // полосы, знаки, интонация: волна 3 (B)
+                "done_facts", "permission_buttons", "agent_inbox",              // агенты: волна 4
+                "wake", "wake_word",                                            // слово-побудка: волна 5
+                "memory",                                                       // память между днями
+            ]
         );
     }
 
