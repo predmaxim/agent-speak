@@ -53,6 +53,10 @@ pub trait Mux: Sync {
     fn shown(&self, envs: &[&HashMap<String, String>]) -> Vec<Option<bool>> {
         vec![None; envs.len()]
     }
+    /// Агент в чате этого мультиплексора (вкладка без терминала, чат Orca): писать в него нечем, но shown() знает его вкладку.
+    fn chat(&self, _env: &HashMap<String, String>) -> bool {
+        false
+    }
     /// Новый агент Claude в папке cwd с первым сообщением prompt.
     fn launch(&self, _cwd: &str, _prompt: &str) -> Result<(), String> {
         Err(format!("{} не запускает агентов", self.name()))
@@ -102,6 +106,11 @@ pub fn pick(env: &HashMap<String, String>, host: &str) -> Option<Pane> {
     adapters().iter().find_map(|m| m.locate(env).filter(|_| m.hosts(host)))
 }
 
+/// Мультиплексор, чей терминал или чат держит агента (окружение env, хозяин host — как у pick).
+fn mux_of(env: &HashMap<String, String>, host: &str) -> Option<&'static str> {
+    pick(env, host).map(|p| p.mux).or_else(|| adapters().into_iter().find(|m| m.chat(env) && m.hosts(host)).map(|m| m.name()))
+}
+
 /// Окно приложения-мультиплексора (window — его командная строка) держит терминал агента: pty-хост Orca —
 /// потомок systemd, а не окна, и по дереву процессов агенты окна Orca не находятся.
 pub fn app_hosts(window: &str, env: &HashMap<String, String>, host: &str) -> bool {
@@ -123,12 +132,12 @@ fn adapter(pane: &Pane) -> Result<&'static dyn Mux, String> {
     adapters().into_iter().find(|m| m.name() == pane.mux).ok_or_else(|| format!("нет адаптера {}", pane.mux))
 }
 
-/// Агент (pid) в видимом терминале, среди агентов под одним окном (Orca держит всех в одном окне).
+/// Агент (pid) в видимом терминале или чате, среди агентов под одним окном (Orca держит всех в одном окне).
 /// Вопрос — один на мультиплексор, а не на агента; мультиплексоры (herdr внутри Orca) спрашиваются параллельно.
 pub fn active_among(pids: &[u32]) -> Option<u32> {
     let agents: Vec<(u32, HashMap<String, String>, Option<&'static str>)> = pids.iter().map(|&pid| {
         let env = environ(pid);
-        let mux = pick(&env, &host_cmdline(pid)).map(|p| p.mux);
+        let mux = mux_of(&env, &host_cmdline(pid));
         (pid, env, mux)
     }).collect();
     let seen: Vec<(u32, Option<bool>)> = std::thread::scope(|s| {
@@ -376,6 +385,16 @@ mod tests {
         assert_eq!(pick(&env, "/home/u/.cache/orca/appimage/a/b/resources/node-runtime/bin/node /home/u/.cache/orca/x.js").unwrap().mux, "orca");
         assert_eq!(pick(&env, "foot --app-id=org.omarchy.agent -e claude"), None, "окно, запущенное из терминала Orca, наследует ORCA_* — но это не его терминал");
         assert_eq!(pick(&HashMap::new(), "herdr server"), None);
+    }
+
+    #[test]
+    fn chat_belongs_to_the_mux_that_runs_it() {
+        // процесс чата Orca — потомок её супервизора (orca-ide -e …), терминала у него нет: видимость знает Orca
+        let chat = HashMap::from([("ORCA_AGENT_SESSION_ID".to_string(), "claude_a".to_string())]);
+        assert_eq!(mux_of(&chat, "/tmp/.mount_Orca.Ab/orca-ide -e const { spawn } …"), Some("orca"));
+        assert_eq!(mux_of(&chat, "foot -e claude"), None, "claude, запущенный из чата в чужом окне, наследует ORCA_* — но не чат");
+        let term = HashMap::from([("HERDR_PANE_ID".to_string(), "w1:p1".to_string()), ("HERDR_SOCKET_PATH".into(), "/s.sock".into())]);
+        assert_eq!(mux_of(&term, "herdr server"), Some("herdr"));
     }
 
     #[test]
