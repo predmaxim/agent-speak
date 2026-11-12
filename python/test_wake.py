@@ -420,6 +420,21 @@ def test_conversation_wake_and_name_stripped_from_phrases():
     assert ("presence", "here") in acts and not c.active and not any(a[0] == "send" for a in acts)
 
 
+def test_phrase_after_a_wake_keeps_its_sound_for_the_whole_utterance(monkeypatch):
+    # черновик — без имени («что у Jira?»), а слух прислал «Ома, что у Jira?»: звук фразы — в реплику, а не None,
+    # как у срезанной эхом, — иначе реплику целиком не распознать и Smart Turn её не слышит
+    m, sent, ears, oma = _woke_oma(monkeypatch)
+    oma.ear.audio = {1: b"pcm"}
+
+    async def go():
+        await oma.command({"do": "wake", "on": True})
+        await oma.event(("wake", "Ома, что у Jira?", 70))
+        await oma.event(("start", 1))
+        await oma.event(("phrase", "Ома, что у Jira?", 1))
+        assert oma.conv.draft == "что у Jira?" and oma.utter == [b"pcm"]
+    run(go())
+
+
 def test_whole_utterance_from_a_wake_drops_the_name(monkeypatch):
     m, sent, ears, oma = _woke_oma(monkeypatch)
     oma.whisper = SimpleNamespace(ready=True, get=lambda: _value("m"))

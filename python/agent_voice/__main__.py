@@ -302,7 +302,8 @@ class Oma:
             acts = c.phrase(ev[1], ev[2])
             if pcm and c.draft != before:  # фраза вошла в черновик; начало срезано как эхо — её звук целиком не распознавать
                 c.turn_end(await self._turn_done(pcm))  # Smart Turn — только по принятой: эхо и непринятое не судит
-                self.utter.append(pcm if c.draft.endswith(ev[1].strip()) else None)
+                # сверка — с тем, что вошло в черновик: обращение «Ома» Conversation.phrase срезает
+                self.utter.append(pcm if c.draft.endswith(strip_wake(ev[1]).strip()) else None)
                 self._prehear()
             if ev[1].strip():  # без текста: в нём бывает чужой разговор в комнате
                 verdict = "принята" if c.draft != before else ("эхо" if ev[2] == c.echo_n else "не принята")
