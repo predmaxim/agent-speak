@@ -144,11 +144,12 @@ class Ear:
             print(f"agent_voice: слух: вход {target or 'по умолчанию'}{', пока говорит — ' + aec if aec else ''}",
                   file=sys.stderr, flush=True)
             self.target = target
-            # микрофон выключен — кадры выбрасываются до VAD с первого, как при чужом микрофоне: ничего не распознаётся
-            if await asyncio.to_thread(self._muted, target):
-                self.paused = True
             proc = self._proc = await asyncio.create_subprocess_exec(*rec_cmd(self.cmd, target), stdout=asyncio.subprocess.PIPE)
             self._aec = await asyncio.create_subprocess_exec(*rec_cmd(self.cmd, aec), stdout=asyncio.subprocess.PIPE) if aec else None
+            # микрофон выключен — кадры выбрасываются до VAD с первого, как при чужом микрофоне: ничего не распознаётся.
+            # Спрашиваем, пока pw-record уже пишет в трубу (чтения ещё нет): начало фразы не ждёт pactl
+            if await asyncio.to_thread(self._muted, target):
+                self.paused = True
             phrases = asyncio.Queue()
             self._tasks = [asyncio.create_task(self._recognize(phrases)),
                            asyncio.create_task(self._read(proc, phrases, self._aec))]
