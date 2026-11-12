@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-/// Проверки PR ждём не дольше этого: потом «перестала ждать».
+/// Проверки PR ждём не дольше этого: потом «больше не жду».
 const CHECKS_MAX: Duration = Duration::from_secs(2 * 3600);
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -213,7 +213,7 @@ pub fn spawn_gh(o: &Order, out: Sender<Done>) -> Result<OwnedFd, String> {
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                Err("проверки не кончились за 2 часа — перестала ждать".into())
+                Err("проверки не кончились за 2 часа — больше не жду".into())
             }
             Err(e) => Err(e),
         };

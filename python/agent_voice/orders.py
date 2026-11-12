@@ -8,7 +8,7 @@ import os
 import re
 import time
 
-from .conversation import words
+from .conversation import gendered, words
 
 CONFIRM_WAIT = 60  # с: «подтверждаю …» позже — не подтверждение
 DANGER = (  # (что, слово фразы «подтверждаю …», основы слов в тексте, основы в подтверждении)
@@ -125,6 +125,7 @@ class Orders:
         self.tripped = False  # в этом ходе Ома спросила подтверждение: до следующей реплики не уходит ничего, ход мозга кончается
         self.n = 0           # номер хода реплики (Conversation.turn_no): вопрос прерванного хода не звучит и не ждёт
         self.note = ""       # мозгу — в начало следующей реплики: подтверждённое Ома передала сама
+        self.gender = "f"    # её род по голосу (gender службы): её слова о себе — шаблоном gendered
 
     def turn(self, voiced, heard, n=0):
         self.voiced, self.heard, self.tripped, self.n = voiced, heard, False, n
@@ -145,7 +146,7 @@ class Orders:
         if n != self.n:  # пока tell читал экран, начался другой ход: прерванный не передаёт и не трогает новый
             return "Не передано: ход прерван новой репликой пользователя."
         if self.tripped:  # мозг перефразировал поручение в том же ходе — передавать нельзя ничего
-            return "Не передано: поручение уже ждёт подтверждения, Ома о нём спросила."
+            return "Не передано: поручение уже ждёт подтверждения, вопрос уже задан вслух."
         if d:
             self.tripped = True
             question = f"{ask} Скажи: да, {verb}." if d is ORDINARY else f"{ask} Это {d[0]}. Скажи: подтверждаю {d[1]}."
@@ -153,7 +154,7 @@ class Orders:
                 self.ask(question, {"args": args, "what": d, "verb": verb, "said": said, "until": self.clock() + CONFIRM_WAIT, "n": n,
                                     "shown": shown})
             why = "голосом поручение уходит" if d is ORDINARY else f"это {d[0]}, такое уходит"
-            return f"Не передано: {why} только после подтверждения. Ома спросила вслух: «{question}»"
+            return f"Не передано: {why} только после подтверждения. Вопрос уже задан вслух: «{question}»"
         ok, out = await self.run(*args)
         if not ok:
             return f"Не передано: {out}. Скажи пользователю коротко, что не вышло."
@@ -175,16 +176,17 @@ class Orders:
                 question, also = f"Выбрать пункт плана проекта {p} «{item}»: {gist}?", f": «{text}»" if text.strip() else ""
         shown = f"Передам проекту {p}: " + (f"вариант {option} — {item}{also}" if option else f"«{text}»")
         args = ("tell", entry["id"], str(option), text) + ((expect,) if option and expect else ())
-        return await self._order(args, d, n, f"Передала проекту {p}: {gist}.",
+        told = gendered("Передал{|а}", self.gender)
+        return await self._order(args, d, n, f"{told} проекту {p}: {gist}.",
                                  f"Передано проекту {p}. Скажи пользователю одной фразой, кому и что: "
-                                 f"«Передала проекту {p}: …» — смысл, не текст задания.",
+                                 f"«{told} проекту {p}: …» — смысл, не текст задания.",
                                  question, "передай", shown)
 
     async def launch(self, path, task, gist, where="orca"):
-        name = _name(path)
-        return await self._order(("launch", path, task, where), self.gate(task), self.n, f"Запустила агента в проекте {name}: {gist}.",
+        name, started = _name(path), gendered("Запустил{|а}", self.gender)
+        return await self._order(("launch", path, task, where), self.gate(task), self.n, f"{started} агента в проекте {name}: {gist}.",
                                  f"Агент запущен в проекте {name}. Скажи пользователю одной фразой: "
-                                 f"«Запустила агента в проекте {name}: …» — смысл задания.",
+                                 f"«{started} агента в проекте {name}: …» — смысл задания.",
                                  f"Запустить агента в проекте {name}: {gist}?", "запускай", f"Запущу агента в проекте {name}: «{task}»")
 
     async def later_list(self):
@@ -245,18 +247,20 @@ class Orders:
         ws, d = words(text), p["what"]
         if NO & set(ws) or (ws and ws[0].startswith(NEGATIVE)):
             self.pending = None
-            self.note = "(Пользователь не подтвердил — Ома ничего не передала.) "
+            self.note = "(Пользователь не подтвердил — ничего не передано.) "  # пометки мозгу о ней — без рода
             return "Хорошо, не передаю."
         short = len(ws) <= 4
         ok = short and "да" in ws and _has(ws, GO) if d is ORDINARY else confirms(text, d)
         if not ok:
             if short and ("да" in ws or _has(ws, GO + ("подтвержд",))):
-                return f"Не расслышала. Скажи: да, {p['verb']}." if d is ORDINARY else f"Не расслышала. Скажи: подтверждаю {d[1]}."
+                misheard = gendered("Не расслышал{|а}", self.gender)
+                return f"{misheard}. Скажи: да, {p['verb']}." if d is ORDINARY else f"{misheard}. Скажи: подтверждаю {d[1]}."
             self.pending = None
-            self.note = "(Пользователь не подтвердил — Ома ничего не передала.) "
+            self.note = "(Пользователь не подтвердил — ничего не передано.) "
             return None
         self.pending = None
         ok, out = await self.run(*p["args"])
-        said = (p["said"] + (f" Нажала «{out}»." if out and p["args"][0] == "tell" else "")) if ok else f"Не вышло: {out}."  # tell: метка с экрана
-        self.note = f"(Пользователь подтвердил голосом, Ома сама: {said}) "
+        pressed = gendered("Нажал{|а}", self.gender)
+        said = (p["said"] + (f" {pressed} «{out}»." if out and p["args"][0] == "tell" else "")) if ok else f"Не вышло: {out}."  # tell: метка с экрана
+        self.note = f"(Пользователь подтвердил голосом; поручение исполнял код, вслух сказано: {said}) "
         return said

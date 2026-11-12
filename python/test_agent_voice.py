@@ -229,7 +229,7 @@ def test_listen_window_speech_becomes_conversation():
     cv.listen(5, "question", "плуг: готово"); clk.t += 3
     cv.speech_start(1); cv.phrase("да, удаляй", 1)
     clk.t += SEND_PAUSE
-    assert ("send", "да, удаляй", "Ома только что сказала: «плуг: готово». ") in cv.tick()
+    assert ("send", "да, удаляй", "Твои слова вслух: «плуг: готово». ") in cv.tick()
 
 
 def _say(clk, cv, text, n=1):
@@ -249,7 +249,7 @@ def test_ack_after_news_closes_without_send():
 def test_ack_after_question_sent_then_closes():
     clk, cv = _conv()
     cv.listen(5, "question", "плуг: удалить?")
-    ctx = "Ома только что сказала: «плуг: удалить?». "
+    ctx = "Твои слова вслух: «плуг: удалить?». "
     assert ("send", "Ок", ctx) in _say(clk, cv, "Ок")
     cv.delta("Принято. "); cv.audio(True)
     cv.done()
@@ -315,7 +315,7 @@ def test_answered_leaves_other_windows_and_a_started_reply():
 def test_are_you_there_other_goes_to_brain():
     clk, cv = _conv()
     cv.listen(5, "here", "Ты тут?")
-    assert ("send", "через минуту", "Ома спросила: «Ты тут?» ") in _say(clk, cv, "через минуту"), "вопрос — как его дала служба"
+    assert ("send", "через минуту", "Твой вопрос вслух: «Ты тут?» ") in _say(clk, cv, "через минуту"), "вопрос — как его дала служба"
 
 
 def test_are_you_there_ignores_talk_not_to_oma():
@@ -669,6 +669,7 @@ def test_ear_reports_when_recorder_exits():
 
 # --- мозг Омы ---
 from agent_voice.brain import general_chats, find_agent_chat, messages_of, format_agents, pick_agent, agent_prompt, OMA_PROMPT
+from agent_voice.conversation import gendered
 
 E = [{"id": "s1", "title": "Почтовый клиент", "project": "omarchy-mail", "state": "waiting", "status": "Клод задал вопрос: какой вариант?",
       "since": 940, "focused": False, "feed": [{"at": 900, "kind": "status", "text": "Читаю план"}], "transcript": "/t/s1.jsonl", "cwd": "/p/mail"},
@@ -719,7 +720,7 @@ def test_tools_read_only_and_agent_by_id():
 
 def test_agent_prompt_names_agent():
     p = agent_prompt(E[0])
-    assert p.startswith(OMA_PROMPT) and "«Почтовый клиент»" in p and 'agent_feed("s1")' in p
+    assert p.startswith(gendered(OMA_PROMPT, "f")) and "«Почтовый клиент»" in p and 'agent_feed("s1")' in p
 
 
 def _fake_sdk(monkeypatch, tmp_path, fail=0):
@@ -767,7 +768,8 @@ def test_brain_chat_keys_tag_and_stale(monkeypatch, tmp_path):
         o = made[0].opts
         assert o.cwd == str(tmp_path) and o.resume is None and o.system_prompt.endswith(brain.memory.prompt(True))
         # память вкл — промпт не спорит с её хвостом: «только читаешь» и «допиши память» вместе
-        assert o.system_prompt == OMA_PROMPT.replace(brain.FILES, brain.FILES_MEMORY) + brain.memory.prompt(True) != OMA_PROMPT + brain.memory.prompt(True)
+        her = gendered(OMA_PROMPT, "f")  # род по голосу: kseniya — женский
+        assert o.system_prompt == her.replace(brain.FILES, brain.FILES_MEMORY) + brain.memory.prompt(True) != her + brain.memory.prompt(True)
         assert f"Файлы ты только читаешь, и только в {brain.PROJECTS}; пишешь — только свою память (ниже)." in o.system_prompt
         # память вкл: Write/Edit — только для неё (вне каталога памяти — отказ dontAsk, внутри — хук memory.gate)
         assert o.tools == brain.TOOLS + ["Write", "Edit"] and o.env == {"AGENT_SPEAK": "1"}
@@ -1569,11 +1571,11 @@ def test_prompt_gives_short_examples_and_voice_text_split():
 
 
 def test_prompt_character_rules():
-    # характер (дизайн «Джарвис», «Характер и память»): о себе — в женском роде, мнение с причиной, спорит один раз,
+    # характер (дизайн «Джарвис», «Характер и память»): о себе — в роде голоса, мнение с причиной, спорит один раз,
     # настаивает — делает, юмор редко и не в срочном, голосом до 20 слов
     from agent_voice import brain
     p = brain.OMA_PROMPT
-    assert "женском роде" in p and "до 20 слов" in p and "один раз" in p and "не чаще раза за разговор" in p
+    assert "в роде из строки «Ты говоришь о себе в … роде»" in p and "«посмотрел{|а}»" in p and "до 20 слов" in p and "один раз" in p and "не чаще раза за разговор" in p
     assert "Настаивает — делай без второго спора" in p and "в срочном" in p and "никогда" in p
     assert "оснований нет — риск не выдумывай" in p
     assert "одна фраза до 15 слов" not in p
@@ -1596,7 +1598,7 @@ def test_prompt_keeps_safety_tail_verbatim():
     assert tail.endswith("ставь знак ударения U+0301 сразу после ударной гласной.")
     for rule in ("Задание или ответ агенту — только по явной просьбе пользователя", "из обрывков",
                  "«Продолжай», «давай», «ага», «ну» — не согласие", "ответь ровно «[молчу]»", "«[конец]»",
-                 "presence с busy", "Ома только что сказала", f"Файлы ты только читаешь, и только в {brain.PROJECTS}"):
+                 "presence с busy", "Твои слова вслух", f"Файлы ты только читаешь, и только в {brain.PROJECTS}"):
         assert rule in tail, rule
 
 
@@ -1947,7 +1949,7 @@ def test_oma_confirmation_skips_brain():
     run(oma.event(("audio", True)))
     run(oma.event(("audio", False)))
     _voice(oma, clk, "что дальше", 2)
-    assert oma.brain.texts == ["(Пользователь подтвердил голосом, Ома сама: Передала проекту omarchy-mail: запушить.) что дальше"]
+    assert oma.brain.texts == ["(Пользователь подтвердил голосом; поручение исполнял код, вслух сказано: Передала проекту omarchy-mail: запушить.) что дальше"]
 
 
 def test_format_agents_marks_note_as_the_agents_words():
@@ -1958,7 +1960,7 @@ def test_format_agents_marks_note_as_the_agents_words():
     assert "агенту нужно" not in format_agents([dict(E[1], note="")], now=1000)
     # та же заметка в речи Омы, которую окно ответа отдаёт мозгу, — тоже слова агента, не поручение
     from agent_voice.brain import OMA_PROMPT
-    assert "«агенту нужно» в любой форме" in OMA_PROMPT and "«Ома только что сказала: «…: агенту нужно — …»»" in OMA_PROMPT
+    assert "«агенту нужно» в любой форме" in OMA_PROMPT and "«Твои слова вслух: «…: агенту нужно — …»»" in OMA_PROMPT
 
 
 def test_format_agents_shows_question_options():
@@ -2696,7 +2698,7 @@ def test_brain_knows_its_own_sound():
     assert "в наушниках" in run(ask("а теперь"))
     assert "Лимит" not in oma.brain.sound, "окна у порога нет — строки нет"
     run(oma.event(("limit", "Лимит Claude почти кончился, сброс в 17:40.")))  # limit службы: окно лимита у порога
-    assert run(ask("сколько осталось")).endswith("в наушниках.\nЛимит Claude почти кончился, сброс в 17:40.")
+    assert run(ask("сколько осталось")).endswith("в наушниках. Ты говоришь о себе в женском роде.\nЛимит Claude почти кончился, сброс в 17:40.")
     run(oma.event(("limit", "")))
     assert "Лимит" not in run(ask("а сейчас"))
     assert "«Лимит" in OMA_PROMPT
@@ -2871,7 +2873,7 @@ def test_continue_is_not_consent():
     for heard in ("продолжай", "У меня.", "давай", "ага", "да, и ещё скажи ему про тесты потом"):
         o, calls, _, _ = _ordinary()
         assert run(o.confirm(heard)) is None and o.pending is None and calls == [], heard
-        assert "ничего не передала" in o.note, "мозг знает, что не ушло"
+        assert "ничего не передано" in o.note, "мозг знает, что не ушло"
 
 
 def test_half_yes_asks_again_and_no_cancels():
@@ -4240,3 +4242,129 @@ def test_memory_page_commands(monkeypatch, tmp_path):
     assert shown()[-1]["prefs"] == ["2026-11-10 · «короче»"]
     run(oma.command({"do": "memory_del", "kind": "day", "id": "2026-11-11"}))
     assert shown()[-1] == {"prefs": ["2026-11-10 · «короче»"], "days": []} and len(shown()) == 4
+
+
+# --- род Омы — по голосу (2026-11-12): kseniya, xenia, baya — о себе в женском роде, aidar, eugene — в мужском;
+# имя «Ома» то же, к пользователю — без рода, как было
+
+def test_gendered_picks_the_form_of_the_voice():
+    from agent_voice.conversation import gendered
+    assert gendered("Понял{|а}, пош{ёл|ла}.", "m") == "Понял, пошёл."
+    assert gendered("Понял{|а}, пош{ёл|ла}.", "f") == "Поняла, пошла."
+    assert gendered("сам{|а} — {что}, {path}", "m") == "сам — {что}, {path}", "подстановки без «|» не трогаются"
+    assert gendered("{x{a|b}}", "m") == "{xa}", "как phrases::gendered в службе"
+
+
+def test_her_phrase_tables_speak_of_her_only_through_templates():
+    # о себе — только шаблоном: в мужском роде в таблицах фраз кода не остаётся женских форм
+    import re
+    from agent_voice.conversation import FILES, OTHER, gendered
+    fem = re.compile(r"\b\w+(?:ла|лась)\b|\b(?:сама|готова|должна|рада|уверена|занята|свободна)\b", re.I)
+    for v in [*FILES, *OTHER, *(v for vs in FILLERS.values() for v in vs)]:
+        assert not fem.findall(gendered(v, "m")), v
+
+
+def test_status_line_gender_event_only_on_change():
+    from agent_voice.__main__ import status_events
+    last = {}
+    assert not [e for e in status_events({"gender": "f"}, last) if e[0] == "gender"], "женский — как у Омы до первой строки"
+    assert ("gender", "m") in status_events({"gender": "m"}, last)
+    assert not [e for e in status_events({"gender": "m"}, last) if e[0] == "gender"], "только смена"
+    assert ("gender", "f") in status_events({}, last), "служба без поля — женский, как раньше"
+
+
+def test_brain_hears_her_gender_every_reply():
+    # строка рядом с «Твой голос: …» — в каждой реплике: смена голоса посреди чата действует со следующего ответа
+    sent, emitted = [], []
+    _, oma = _oma(sent, emitted)
+
+    async def ask(text):
+        await oma.command({"do": "ask", "text": text})
+        await settle(oma)
+        return oma.brain.sound
+    assert "Ты говоришь о себе в женском роде." in run(ask("как дела"))
+    run(oma.event(("gender", "m")))
+    assert "Ты говоришь о себе в мужском роде." in run(ask("а теперь")) and oma.orders.gender == oma.brain.gender == "m"
+
+
+def test_order_phrases_in_the_gender_of_the_voice():
+    # слова кода — в роде голоса; проверка «да, передай» та же
+    o, calls = _orders()
+    o.gender = "m"
+    o.turn(True, "запушь")
+    run(o.tell(E[0], "Запушь", "запушить"))
+    assert run(o.confirm("подтверждаю удаление")) == "Не расслышал. Скажи: подтверждаю пуш." and o.pending and not calls
+    assert run(o.confirm("подтверждаю пуш")) == "Передал проекту omarchy-mail: запушить." and calls
+    o.turn(False, "запусти агента в почте")
+    assert "«Запустил агента в проекте mail: …»" in run(o.launch("/p/mail", "Займись тестами", "тесты"))
+    o, _ = _orders(out="omarchy-mail")
+    o.gender = "m"
+    assert run(_tool("show", E, o).handler({"agent": "почтов"}))["content"][0]["text"] == "Показал: omarchy-mail."
+
+
+def test_brain_prompt_in_the_gender_of_the_voice(monkeypatch, tmp_path):
+    from agent_voice.brain import agent_prompt
+    from agent_voice.conversation import gendered
+    brain, made, _ = _fake_sdk(monkeypatch, tmp_path)
+
+    async def go():
+        b = brain.Brain(asyncio.Queue(), lambda: E)
+        b.gender = "m"
+        await b.warm()
+        p = made[0].opts.system_prompt
+        assert "в конце реплики, она главнее примеров («посмотрел», «передал», «не уверен»)" in p and "я бы не стал:" in p and "«всё, свободен»" in p and "«Запомнил.»" in p and "{|" not in p, p
+        assert p.startswith(gendered(brain.OMA_PROMPT, "m").replace(brain.FILES, brain.FILES_MEMORY)), "шаблоны — до подстановок"
+        b.memory = False
+        why = await b._remember({"tool_input": {}}, "t", {})
+        assert why["hookSpecificOutput"]["permissionDecisionReason"] == "Память выключена в настройках: не запомнил."
+    run(go())
+    assert agent_prompt(E[0], "m").endswith("вопрос к тебе самому передавать не надо.")
+    assert agent_prompt(E[0]).endswith("вопрос к тебе самой передавать не надо."), "по умолчанию — женский, как kseniya"
+
+
+# Её род — и в пометках мозгу о ней (2026-11-12, ревью): мужской голос не спорит с «Ома спросила»; без рода — безлично
+FEM = r"\b\w+(?:ла|лась)\b|\b(?:сама|самой|готова|должна|рада|уверена|занята|свободна|помощница)\b"
+NOT_HER = {"закончила", "упала", "дела", "сначала", "смысла", "одна", "файла"}  # «Почта закончила?», «упала сборка» — не о ней
+
+
+def _fem(text):
+    import re
+    return sorted({w for w in re.findall(FEM, text, re.I) if w.lower() not in NOT_HER})
+
+
+def test_brain_prompts_in_masculine_have_no_feminine_self_forms():
+    from agent_voice import brain, memory
+    from agent_voice.brain import ASKED, agent_prompt
+    from agent_voice.conversation import gendered
+    assert _fem(gendered(brain.OMA_PROMPT, "m")) == [] and _fem(agent_prompt(E[0], "m")) == []
+    assert _fem(gendered(memory.REMEMBER, "m")) == [] and _fem(ASKED) == []
+    assert _fem(memory.PROMPT) == [], "заметки дня переживают смену голоса — без рода"
+
+
+def test_order_notes_and_replies_have_no_feminine_self_forms():
+    clk = Clock()
+    o, calls = _orders(clk)
+    o.gender = "m"
+    o.turn(True, "запушь")
+    said = [run(o.tell(E[0], "Запушь", "запушить")), run(o.tell(E[0], "Запушь всё", "запушить всё"))]
+    said += [run(o.confirm("подтверждаю удаление")), run(o.confirm("подтверждаю пуш")), o.note]
+    o.turn(True, "запушь")
+    run(o.tell(E[0], "Запушь", "запушить"))
+    said += [run(o.confirm("нет")), o.note]
+    assert calls and all(s for s in said) and [_fem(s) for s in said] == [[]] * len(said), said
+
+
+def test_gender_change_reconnects_brain_with_fresh_prompt(monkeypatch, tmp_path):
+    # голос сменили — следующая реплика идёт новым подключением: системный промпт в новом роде
+    brain, made, _ = _fake_sdk(monkeypatch, tmp_path)
+
+    async def go():
+        b = brain.Brain(asyncio.Queue(), lambda: E)
+        await b.send("как дела")
+        b.gender = "m"
+        await b.send("а теперь")
+        await b.send("и ещё")
+    run(go())
+    assert len(made) == 2, "переподключение — один раз, на смене рода"
+    assert "я бы не стала:" in made[0].opts.system_prompt and "я бы не стал:" in made[1].opts.system_prompt
+    assert len(made[1].sent) == 2, "вторая и третья реплики — новым подключением"

@@ -231,6 +231,9 @@ assert.deepStrictEqual(secs.map(s => s.key), ["speaker", "rate"])
 assert.deepStrictEqual(secs.map(s => s.sample), [true, true])
 assert.deepStrictEqual(secs.map(s => s.caption), ["ГОЛОС", "СКОРОСТЬ"])
 assert.deepStrictEqual(secs[0].options.map(o => o.value), ["kseniya", "xenia", "baya", "aidar", "eugene"]) // голос по умолчанию — первым
+// the voices are the names of SPEAKERS in the daemon, in its order (the gender of each lives there)
+const speakers = /pub const SPEAKERS[^=]*= \[([^;]*)\];/.exec(fs.readFileSync(__dirname + "/../src/config.rs", "utf8"))[1]
+assert.deepStrictEqual(secs[0].options.map(o => o.value), [...speakers.matchAll(/\("(\w+)", "[mf]"\)/g)].map(m => m[1]))
 assert.deepStrictEqual(secs[0].options.map(o => o.label), ["Kseniya", "Xenia", "Baya", "Aidar", "Eugene"])
 assert.deepStrictEqual(secs[1].options.map(o => o.value), ["x-slow", "slow", "medium", "fast", "x-fast"])
 assert.deepStrictEqual(secs[1].options.map(o => o.label), ["Очень медленно", "Медленно", "Обычно", "Быстро", "Очень быстро"])

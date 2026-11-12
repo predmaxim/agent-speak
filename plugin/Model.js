@@ -14,7 +14,7 @@ var OFFLINE = { running: false, speaking: false, paused: false, speaker: "", rat
   media_hold: false, music_pause: false, limit: "", limit_warn: false, ear_in: "", listen_until: null, listen_secs: 0,
   struggling: 0, orb_moods: false, orb_idle_motion: false, rate_now: "", news_every: 0, earcons: false, intonation: false,
   done_facts: false, permission_buttons: false, agent_inbox: false, wake: "off", wake_word: false, memory: false,
-  headset_button: false }
+  headset_button: false, gender: "" }
 
 // One socket line -> {type, value}, or null for anything else (a broken line must not blank the state).
 function parseLine(line) {
@@ -431,7 +431,7 @@ function say(text) {
 // The window's selectors. Values are exactly what the daemon's `set` accepts;
 // sample: play SAMPLE after the choice, to compare by ear.
 function sections(tr) {
-  var voices = ["kseniya", "xenia", "baya", "aidar", "eugene"] // как SPEAKERS в src/config.rs: умолчание первым
+  var voices = ["kseniya", "xenia", "baya", "aidar", "eugene"] // имена SPEAKERS в src/config.rs (род Омы там же): умолчание первым
   return [
     { key: "speaker", caption: tr("VOICE"), sample: true,
       options: voices.map(function(v) { return { value: v, label: v.charAt(0).toUpperCase() + v.slice(1) } }) },

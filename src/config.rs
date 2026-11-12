@@ -79,7 +79,14 @@ pub fn path() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/agent-speak/config.toml")
 }
 
-pub const SPEAKERS: [&str; 5] = ["kseniya", "xenia", "baya", "aidar", "eugene"];
+/// Голоса Silero и род Омы при каждом: "f" — о себе в женском роде, "m" — в мужском. Род — наши данные: модель отдаёт
+/// только имена (`model.speakers`). Имена по порядку повторяет `sections` в plugin/Model.js.
+pub const SPEAKERS: [(&str, &str); 5] = [("kseniya", "f"), ("xenia", "f"), ("baya", "f"), ("aidar", "m"), ("eugene", "m")];
+/// Род Омы при голосе speaker (SPEAKERS); чужое имя — "f": `set` такого не пропускает.
+pub fn gender(speaker: &str) -> &'static str {
+    SPEAKERS.iter().find(|(n, _)| *n == speaker).map_or("f", |(_, g)| *g)
+}
+
 pub const RATES: [&str; 5] = ["x-slow", "slow", "medium", "fast", "x-fast"];
 pub const CORNERS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-right"];
 
@@ -128,7 +135,7 @@ impl Config {
     pub fn set(&mut self, key: &str, value: &serde_json::Value) -> bool {
         let s = value.as_str().unwrap_or_default();
         match key {
-            "speaker" if SPEAKERS.contains(&s) => self.speaker = s.into(),
+            "speaker" if SPEAKERS.iter().any(|(n, _)| *n == s) => self.speaker = s.into(),
             "rate" if RATES.contains(&s) => self.rate = s.into(),
             "quiet_schedule" if value.is_boolean() => self.quiet_schedule = value.as_bool().unwrap(),
             "quiet_from" if hhmm(s).is_some() => self.quiet_from = s.into(),
@@ -322,6 +329,13 @@ mod tests {
         assert!(c.wake_word && parse("speaker = \"baya\"").unwrap().wake_word, "старый файл без ключа — побудка включена (от сети)");
         assert!(c.set("wake_word", &json!(false)) && !c.wake_word);
         assert!(!c.set("wake_word", &json!("on")));
+    }
+
+    #[test]
+    fn gender_follows_the_voice() {
+        let got: Vec<&str> = ["kseniya", "xenia", "baya", "aidar", "eugene"].iter().map(|s| gender(s)).collect();
+        assert_eq!(got, ["f", "f", "f", "m", "m"]);
+        assert_eq!(gender(&Config::default().speaker), "f", "умолчание — kseniya: женский род, как раньше");
     }
 
     #[test]

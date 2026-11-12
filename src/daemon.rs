@@ -185,6 +185,7 @@ struct Status<'a> {
     wake_word: bool,          // настройка: отзываться на «Ома»
     memory: bool,             // настройка: помнить прошлые дни
     headset_button: bool,     // настройка: кнопка наушников (MPRIS-плеер Омы, пока она говорит или спросила «Ты тут?»)
+    gender: &'a str,          // род Омы по голосу (config::gender): "f" | "m" — её фразы и мозг говорят о ней в этом роде
 }
 
 /// Процесс Омы (python -m agent_voice): команды — строками в stdin, события — через сокет.
@@ -961,6 +962,11 @@ impl State {
         self.cfg.wake_word && !self.muted() && !self.presence.locked((self.now_secs)())
     }
 
+    /// Род Омы по голосу: её фразы — шаблоны phrases::gendered в этом роде.
+    fn gender(&self) -> &'static str {
+        crate::config::gender(&self.cfg.speaker)
+    }
+
     /// Побудка для строки состояния: выключена, тихо — от службы; иначе — что сказала Ома (on или почему нет).
     fn wake(&self) -> &str {
         if !self.cfg.wake_word {
@@ -1154,6 +1160,8 @@ impl State {
             memory: self.cfg.memory,
             // волна 5: кнопка наушников
             headset_button: self.cfg.headset_button,
+            // род Омы по голосу
+            gender: self.gender(),
         };
         format!("{}\n", serde_json::to_string(&st).unwrap())
     }
@@ -1307,7 +1315,7 @@ impl State {
         // ход — с промпта пользователя (у Codex хука промпта нет: без него и фактов нет); промпт до перезапуска службы — из ленты
         let since = self.turn_at.get(session).copied().or_else(|| e.feed.iter().rev().find(|l| l.kind == "prompt").map(|l| l.at)).unwrap_or(0);
         let cwd = cwd.filter(|_| ask == Ask::Final && self.cfg.done_facts && since > 0).map(String::from);
-        let job = Job { session: session.to_string(), project: e.project.clone(), ask, text: text.to_string(), context, fallback, cwd, since };
+        let job = Job { session: session.to_string(), project: e.project.clone(), ask, text: text.to_string(), context, fallback, cwd, since, gender: self.gender() };
         let _ = self.digest.send(job);
     }
 
@@ -1458,7 +1466,7 @@ impl State {
                 let recapped = self.board.recap(|s| registry.get(s).filter(|e| e.agent == "claude").and_then(|e| agents::recap(Path::new(&e.transcript))));
                 if self.board.finals() - recapped.len() > SUMMARY_OVER {
                     let lines: Vec<String> = self.board.take_finals(&recapped).iter().map(News::line).collect();
-                    let job = Job { session: SUMMARY.into(), project: String::new(), ask: Ask::Summary, text: lines.join("\n"), context: String::new(), fallback: Some(lines.join(" ")), cwd: None, since: 0 };
+                    let job = Job { session: SUMMARY.into(), project: String::new(), ask: Ask::Summary, text: lines.join("\n"), context: String::new(), fallback: Some(lines.join(" ")), cwd: None, since: 0, gender: self.gender() };
                     let _ = self.digest.send(job);
                 }
             } else if std::mem::take(&mut self.quiet_over) {
@@ -2515,7 +2523,8 @@ impl State {
         let gone: Vec<String> = self.later.list.iter().filter(|o| o.kind == "tell" && self.registry.get(&o.agent).is_none()).map(|o| o.id.clone()).collect();
         for id in gone {
             if let Some(o) = self.later.take(&id) {
-                self.later_say("", &o.id, "", &format!("{} закрылся — поручение не передала", o.who));
+                let text = phrases::gendered(phrases::LATER_GONE, self.gender()).replace("{кто}", &o.who);
+                self.later_say("", &o.id, "", &text);
                 self.push_later();
             }
         }
@@ -2526,8 +2535,8 @@ impl State {
         match d {
             crate::later::Done::Told { order: o, result } => {
                 let text = match result {
-                    Ok(()) => format!("передала — {}", o.gist),
-                    Err(e) => format!("не передала: {e}"),
+                    Ok(()) => phrases::gendered(phrases::LATER_TOLD, self.gender()).replace("{что}", &o.gist),
+                    Err(e) => phrases::gendered(phrases::LATER_NOT_TOLD, self.gender()).replace("{что}", &e),
                 };
                 self.later_say(&o.agent, &o.id, &o.who, &text);
             }
@@ -2536,7 +2545,7 @@ impl State {
                 let text = match result {
                     Ok(true) => format!("проверки PR {} прошли", o.pr),
                     Ok(false) => format!("проверки PR {} упали", o.pr),
-                    Err(e) => format!("не смогла проверить PR {}: {e}", o.pr),
+                    Err(e) => phrases::gendered(phrases::CHECKS_UNKNOWN, self.gender()).replace("{n}", &o.pr.to_string()).replace("{что}", &e),
                 };
                 self.later_say("", &o.id, &o.who, &text);
                 self.push_later();
@@ -2618,7 +2627,7 @@ impl State {
             Act::Say { session, class, project, text } => self.watch_say(&session, class, &project, &text),
             Act::Judge { session, text } => {
                 // экран — CLI мультиплексора, до 10 с: в своём потоке, затем задание модели
-                let (digest, pane, screen) = (self.digest.clone(), panes.get(&session).cloned(), self.screen);
+                let (digest, pane, screen, gender) = (self.digest.clone(), panes.get(&session).cloned(), self.screen, self.gender());
                 let project = self.registry.get(&session).map(|e| e.project.clone()).unwrap_or_default();
                 std::thread::spawn(move || {
                     let text = match pane.as_ref().and_then(screen) {
@@ -2628,7 +2637,7 @@ impl State {
                         }
                         None => text,
                     };
-                    let _ = digest.send(Job { session, project, ask: Ask::Hung, text, context: String::new(), fallback: Some("нет ответа модели".into()), cwd: None, since: 0 });
+                    let _ = digest.send(Job { session, project, ask: Ask::Hung, text, context: String::new(), fallback: Some("нет ответа модели".into()), cwd: None, since: 0, gender });
                 });
             }
             Act::Run(job) => {
@@ -2653,7 +2662,7 @@ impl State {
 
     /// Исход действия в терминале: фраза пользователю и здоровье в окне.
     fn on_acted(&mut self, d: mux::Done) {
-        if let Some(a) = self.watch.done(&d.session, d.what, d.err, (self.now_secs)()) {
+        if let Some(a) = self.watch.done(&d.session, d.what, d.err, (self.now_secs)(), self.gender()) {
             self.on_act(a, &HashMap::new());
         }
         self.refresh_health();
@@ -3205,8 +3214,18 @@ mod tests {
                 "wake", "wake_word",                                            // слово-побудка: волна 5
                 "memory",                                                       // память между днями
                 "headset_button",                                               // кнопка наушников: волна 5
+                "gender",                                                       // род Омы по голосу
             ]
         );
+    }
+
+    #[test]
+    fn status_line_carries_gender_of_the_voice() {
+        let v = |st: &State| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap();
+        let mut st = test_state();
+        assert_eq!(v(&st)["gender"], "f", "kseniya — женский род, как раньше");
+        st.cfg.speaker = "aidar".into();
+        assert_eq!(v(&st)["gender"], "m");
     }
 
     #[test]
@@ -4714,6 +4733,10 @@ mod tests {
         let id = st.later_cmd(checks("/tmp")).unwrap();
         st.on_later_done(crate::later::Done::Checked { id, result: Err("no checks reported on the 'x' branch".into()) });
         assert_eq!(board_line(&mut st, 2000).unwrap(), "tmp: не смогла проверить PR 12: no checks reported on the 'x' branch");
+        st.cfg.speaker = "aidar".into(); // мужской голос — о себе в мужском роде; чужой текст ошибки — как есть
+        let id = st.later_cmd(checks("/tmp")).unwrap();
+        st.on_later_done(crate::later::Done::Checked { id, result: Err("{a|b}".into()) });
+        assert_eq!(board_line(&mut st, 2000).unwrap(), "tmp: не смог проверить PR 12: {a|b}");
     }
 
     #[test]
