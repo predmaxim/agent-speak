@@ -274,6 +274,30 @@ def test_auto_window_closes_after_reply():
     assert ("ear", False) in cv.audio(False) or ("ear", False) in cv.tick()
 
 
+def test_order_question_in_auto_window_keeps_listening_for_the_answer():
+    # 2026-11-12, вживую: после новости «передай агенту …» — Ома спросила «Скажи: да, передай» и закрыла микрофон
+    # (окно, открытое ею, — одна реплика и ответ): подтвердить было нечем. Вопрос подтверждения ждёт ответа, одного
+    clk, cv = _conv()
+    cv.listen(5, "news", "agent-speak: готово")
+    _say(clk, cv, "передай ему: что значит работает на новом коде")
+    cv.question("Передать проекту agent-speak: уточнить? Скажи: да, передай."); cv.audio(True); cv.done()
+    assert ("ear", False) not in cv.audio(False) and cv.state == "listening", "вопрос задан — ответ слушается"
+    clk.t += 1
+    acts = _say(clk, cv, "да, передай", n=2)
+    assert ("send", "да, передай", "") in acts, "ответ на вопрос уходит — его сверит код подтверждения"
+    cv.delta("Передала. "); cv.audio(True); cv.done()
+    assert cv.audio(False)[-2:] == [("ear", False), ("state", "idle")], "после ответа на вопрос окно снова закрывается"
+
+
+def test_order_question_in_auto_window_waits_its_silence_then_closes():
+    clk, cv = _conv()
+    cv.listen(5, "news", "agent-speak: готово")
+    _say(clk, cv, "передай ему: проверь тесты")
+    cv.question("Передать? Скажи: да, передай."); cv.audio(True); cv.done(); cv.audio(False)
+    clk.t += 4.9; assert cv.tick() == [] and cv.active
+    clk.t += 0.2; assert cv.tick() == [("ear", False), ("state", "idle")], "не ответили — окно закрылось по своей тишине"
+
+
 def test_are_you_there_room_talk_with_yes_inside_is_ignored():
     clk, cv = _conv()
     cv.listen(5, "here", "Эй, ты тут?")
