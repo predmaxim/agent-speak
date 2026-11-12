@@ -40,6 +40,10 @@ pub trait Mux: Sync {
     fn type_text(&self, pane: &Pane, text: &str) -> Result<(), String>;
     /// Что видно на экране терминала, построчно.
     fn screen(&self, pane: &Pane) -> Result<String, String>;
+    /// Агент в терминале ждёт ввода пользователя (меню, разрешение) — по мнению самого мультиплексора; не знает — false.
+    fn waits(&self, _pane: &Pane) -> Result<bool, String> {
+        Ok(false)
+    }
     /// Папки, где мультиплексор умеет запустить агента.
     fn projects(&self) -> Result<Vec<String>, String> {
         Ok(Vec::new())
@@ -152,6 +156,10 @@ fn among(pids: &[u32], shown: impl Fn(u32) -> Option<bool>) -> Option<u32> {
 
 pub fn screen(pane: &Pane) -> Result<String, String> {
     adapter(pane)?.screen(pane)
+}
+
+pub fn waits(pane: &Pane) -> Result<bool, String> {
+    adapter(pane)?.waits(pane)
 }
 
 pub fn focus(pane: &Pane) -> Result<(), String> {

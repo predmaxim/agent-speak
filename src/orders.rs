@@ -193,12 +193,14 @@ const DRAFT_MENU: &str = "агент ждёт выбора в меню — че�
 
 /// Черновик: текст в поле ввода без Enter и без Ctrl+U — отправит пользователь сам, недонабранное им не стирается.
 /// Агент ждёт в меню (вопрос, план, разрешение) — отказ: поля ввода там нет, а буквы и цифры выбирали бы пункты.
-fn draft_steps(call: Option<&Value>, text: &str, screen: impl FnOnce() -> Result<String, String>) -> Result<Vec<Step>, String> {
+/// Вердикт терминала (waits) и экран — всегда: у Codex вызова в полёте нет, у Claude он ложится в транскрипт не сразу,
+/// а подтверждения, которое у tell защищает от ослышки, у черновика нет. Не прочитались — отказ, не пишем вслепую.
+fn draft_steps(call: Option<&Value>, text: &str, waits: impl FnOnce() -> Result<bool, String>, screen: impl FnOnce() -> Result<String, String>) -> Result<Vec<Step>, String> {
     let text = text.trim();
     match call.and_then(|c| c["name"].as_str()) {
         _ if text.is_empty() => Err("пустой текст".into()),
         Some("AskUserQuestion" | "ExitPlanMode") => Err(DRAFT_MENU.into()),
-        Some(_) if menu_on(&screen()?) => Err(DRAFT_MENU.into()),
+        _ if waits()? || menu_on(&screen()?) => Err(DRAFT_MENU.into()),
         _ => Ok(vec![Step::Type(text.into())]),
     }
 }
@@ -206,7 +208,7 @@ fn draft_steps(call: Option<&Value>, text: &str, screen: impl FnOnce() -> Result
 /// Вставить текст в поле ввода агента session, не отправляя (`agent-speak draft`): в том же потоке действий, что tell.
 pub fn draft(session: &str, text: &str) -> Result<(), String> {
     let (pane, call) = target(session, "черновик не вставить")?;
-    mux::perform(&pane, &draft_steps(call.as_ref(), &one_line(text), || mux::screen(&pane))?)
+    mux::perform(&pane, &draft_steps(call.as_ref(), &one_line(text), || mux::waits(&pane), || mux::screen(&pane))?)
 }
 
 /// Мультиплексор по имени: orca или herdr.
@@ -391,18 +393,22 @@ mod tests {
 
     #[test]
     fn draft_is_typed_without_enter_and_not_into_a_menu() {
-        // ни Ctrl+U (недонабранное пользователем остаётся), ни Enter (отправит он сам)
-        assert_eq!(draft_steps(None, " займись тестами ", no_screen).unwrap(), [Step::Type("займись тестами".into())]);
-        let bash = json!({"name": "Bash", "input": {"command": "cargo test"}});
+        let free = || Ok(false);
         let prompt = || Ok("✻ Running…\n❯ \n  ⏵⏵ auto mode on".to_string());
-        assert_eq!(draft_steps(Some(&bash), "займись тестами", prompt).unwrap(), [Step::Type("займись тестами".into())], "агент работает — черновик ждёт в поле");
+        // ни Ctrl+U (недонабранное пользователем остаётся), ни Enter (отправит он сам)
+        assert_eq!(draft_steps(None, " займись тестами ", free, prompt).unwrap(), [Step::Type("займись тестами".into())]);
+        let bash = json!({"name": "Bash", "input": {"command": "cargo test"}});
+        assert_eq!(draft_steps(Some(&bash), "займись тестами", free, prompt).unwrap(), [Step::Type("займись тестами".into())], "агент работает — черновик ждёт в поле");
         let permission = || Ok(" Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again\n   3. No".to_string());
-        assert_eq!(draft_steps(Some(&bash), "нет", permission), Err(DRAFT_MENU.into()), "в меню буквы и цифры выбирали бы пункты");
-        assert!(draft_steps(Some(&bash), "дальше", no_screen).is_err(), "экран не прочитан — не пишем вслепую");
-        assert_eq!(draft_steps(Some(&ask(2, false)), "зелёный", no_screen), Err(DRAFT_MENU.into()));
+        assert_eq!(draft_steps(Some(&bash), "нет", free, permission), Err(DRAFT_MENU.into()), "в меню буквы и цифры выбирали бы пункты");
+        assert_eq!(draft_steps(None, "нет", free, permission), Err(DRAFT_MENU.into()), "вызова в транскрипте ещё нет, а меню уже на экране");
+        assert_eq!(draft_steps(None, "add tests", || Ok(true), prompt), Err(DRAFT_MENU.into()), "терминал знает, что агент ждёт (Codex): экран не важен");
+        assert!(draft_steps(None, "дальше", free, no_screen).is_err(), "экран не прочитан — не пишем вслепую");
+        assert!(draft_steps(None, "дальше", || Err("таймаут".into()), prompt).is_err(), "вердикт терминала не получен — тоже");
+        assert_eq!(draft_steps(Some(&ask(2, false)), "зелёный", free, no_screen), Err(DRAFT_MENU.into()));
         let plan = json!({"name": "ExitPlanMode", "input": {"plan": "создать файл"}});
-        assert_eq!(draft_steps(Some(&plan), "правки", no_screen), Err(DRAFT_MENU.into()));
-        assert!(draft_steps(None, " ", no_screen).is_err());
+        assert_eq!(draft_steps(Some(&plan), "правки", free, no_screen), Err(DRAFT_MENU.into()));
+        assert!(draft_steps(None, " ", free, prompt).is_err());
     }
 
     #[test]
