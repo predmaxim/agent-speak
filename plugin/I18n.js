@@ -37,7 +37,8 @@ var TABLES = {
     "Quiet: screen sharing": "Тихо: показ экрана", "Quiet: do not disturb": "Тихо: не беспокоить",
     "Quiet and brief while sharing the screen": "При показе экрана — тихо и коротко", "Summary after quiet": "Сводка после тишины",
     "Intonation by meaning": "Интонация по смыслу", "Sound cues": "Звуковые знаки",
-    "Results aloud at most every": "Итоги вслух не чаще", "No limit": "Без ограничения"
+    "Results aloud at most every": "Итоги вслух не чаще", "No limit": "Без ограничения",
+    "Git facts in results": "Факты git в итогах"
   }
 }
 

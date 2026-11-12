@@ -1455,6 +1455,16 @@ Item {
               }
 
               SettingRow {
+                key: "done_facts"
+                label: root.tr("Git facts in results")
+                ToggleSwitch {
+                  checked: root.speech.done_facts === true
+                  foreground: root.fg
+                  onToggled: root.step("done_facts", 1)
+                }
+              }
+
+              SettingRow {
                 key: "memory"
                 label: root.tr("Remember past days")
                 ToggleSwitch {

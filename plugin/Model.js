@@ -387,7 +387,7 @@ var SETTINGS_SECTIONS = [
   { title: "Quiet mode", rows: ["quiet_now", "quiet_schedule", "quiet_hours", "screencast_privacy", "hush_summary"] },
   { title: "Hearing", rows: ["music_pause"] },
   { title: "Orb", rows: ["orb_over_fullscreen", "orb_satellites", "orb_moods", "orb_idle_motion"] },
-  { title: "Agents", rows: ["agents_voice", "progress_digest", "news_every", "memory", "memory_page", "limit_warn"] }
+  { title: "Agents", rows: ["agents_voice", "progress_digest", "news_every", "done_facts", "memory", "memory_page", "limit_warn"] }
 ]
 
 // «Results aloud at most every»: minutes between batches of finished turns (news_every); 0 — each at once, no batch.
@@ -416,6 +416,7 @@ function settingStep(row, st, dx) {
   if (row === "limit_warn") return { key: row, value: !st.limit_warn, sample: false }
   if (row === "memory") return { key: row, value: !st.memory, sample: false }
   if (row === "intonation" || row === "earcons") return { key: row, value: !st[row], sample: false }
+  if (row === "done_facts") return { key: row, value: !st.done_facts, sample: false }
   if (row === "news_every") {
     var k = NEWS_EVERY.length, j = NEWS_EVERY.indexOf(st.news_every)
     return { key: row, value: NEWS_EVERY[j < 0 ? 0 : ((j + dx) % k + k) % k], sample: false }

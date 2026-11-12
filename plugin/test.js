@@ -266,7 +266,7 @@ assert.strictEqual(M.taken("", { key: "chat:1", role: "me", text: "" }), false)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 20)
+assert.strictEqual(M.SETTINGS_ROWS.length, 21)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "kseniya", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
@@ -299,7 +299,9 @@ assert.strictEqual(M.settingStep("news_every", Object.assign({}, cfg, { news_eve
 assert.strictEqual(M.settingStep("news_every", Object.assign({}, cfg, { news_every: 7 }), 1).value, 0, "set by hand off the list — from the start")
 assert.deepStrictEqual(M.newsEvery(t => t).map(o => o.value), ["0", "2", "5", "10", "15", "30"], "the stock Dropdown keeps strings")
 assert.deepStrictEqual(M.newsEvery(ru).map(o => o.label), ["Без ограничения", "2 мин", "5 мин", "10 мин", "15 мин", "30 мин"])
-assert.deepStrictEqual(M.SETTINGS_SECTIONS[4].rows.slice(0, 3), ["agents_voice", "progress_digest", "news_every"])
+assert.deepStrictEqual(M.SETTINGS_SECTIONS[4].rows.slice(0, 4), ["agents_voice", "progress_digest", "news_every", "done_facts"])
+// git facts in results: a switch right after «Results aloud at most every»
+assert.deepStrictEqual(M.settingStep("done_facts", Object.assign({}, cfg, { done_facts: true }), 1), { key: "done_facts", value: false, sample: false })
 // «Память ›» right after its switch: a page, not a value
 assert.strictEqual(M.SETTINGS_ROWS[M.SETTINGS_ROWS.indexOf("memory") + 1], "memory_page")
 // every row steps but the hours (two dropdowns, the window walks them) and the memory page's link
