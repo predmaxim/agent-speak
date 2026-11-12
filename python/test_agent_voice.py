@@ -2854,18 +2854,25 @@ def test_reply_without_sound_in_tail_of_previous_phrase_ends_speaking():
     assert oma.conv.state == "listening" and oma.conv.played_at == 100.7
 
 
-def test_user_pause_mid_answer_ends_speaking():
-    # 2026-11-12 (ревью): пауза пользователя посреди её ответа возвращает фразу в очередь службы — voiced не растёт;
-    # «говорю» кончается по paused строки состояния: слушает с таймером тишины, разговор кончается сам
+def _status_feed(oma):
+    """Строки состояния службы → события Омы, как подписка; paused — очередь на паузе (её или его), user — его."""
     from agent_voice.__main__ import status_events
-    sent, emitted = [], []
-    clk, oma = _oma(sent, emitted)
     last = {}
 
-    async def status(speaking, voiced, paused):
-        line = {"running": True, "speaking": speaking, "voiced": voiced, "played_at": 10.0, "paused": paused}
+    async def status(speaking, voiced, paused, user=None):
+        line = {"running": True, "speaking": speaking, "voiced": voiced, "played_at": 10.0, "paused": paused,
+                "user_paused": paused if user is None else user}
         for ev in status_events(line, last):
             await oma.event(ev)
+    return status
+
+
+def test_user_pause_mid_answer_ends_speaking():
+    # 2026-11-12 (ревью): пауза пользователя посреди её ответа возвращает фразу в очередь службы — voiced не растёт;
+    # «говорю» кончается по user_paused строки состояния: слушает с таймером тишины, разговор кончается сам
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    status = _status_feed(oma)
 
     async def go():
         await status(False, 0, False)
@@ -2884,13 +2891,86 @@ def test_user_pause_mid_answer_ends_speaking():
 
 
 def test_user_pause_between_her_phrases_ends_speaking():
-    # пауза, пока её следующая фраза ещё не встала в очередь службы (speaking уже false): строка меняет только paused
+    # пауза, пока её следующая фраза ещё не встала в очередь службы (speaking уже false): строка меняет только user_paused
     from agent_voice.__main__ import status_events
     last = {}
-    line = lambda paused: {"running": True, "speaking": False, "voiced": 0, "played_at": 1.0, "paused": paused}
+    line = lambda paused: {"running": True, "speaking": False, "voiced": 0, "played_at": 1.0, "paused": paused,
+                           "user_paused": paused}
     status_events(line(False), last)
     assert status_events(line(True), last) == [("audio", False, 1.0, 0, True)]
     assert status_events(line(True), last) == []
+    assert status_events(dict(line(True), user_paused=False), last) == [("audio", False, 1.0, 0, False)], \
+        "её пауза при перебиве — не его"
+
+
+def test_reply_during_user_pause_does_not_stick_in_speaking():
+    # 2026-11-12 (ревью раунда 4): пауза пользователя, Ома слушает; он заговорил — её новый ответ встаёт в очередь на
+    # паузе, звука нет. Служба засчитывает такую реплику сразу (строка с выросшим voiced): «говорю» кончается, а не
+    # держится с открытым микрофоном без таймера тишины до снятия паузы
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    status = _status_feed(oma)
+
+    async def go():
+        await status(False, 0, False)
+        await oma.command({"do": "talk"})
+        oma.conv.ask("расскажи про погоду")
+        await oma.event(("delta", "Солнечно и тепло. Плюс двадцать."))
+        await oma.event(("done", None))
+        await status(True, 0, False)
+        await status(True, 0, True)  # кнопка «пауза»
+        await status(False, 0, True)
+        assert oma.conv.state == "listening"
+        oma.conv.ask("а что с почтой")
+        await settle(oma)
+        await oma.event(("delta", "Почта пуста. "))
+        await oma.event(("done", None))
+        assert oma.conv.state == "speaking"
+        await status(False, 1, True)  # служба: реплика на паузе пользователя отработана сразу
+        assert oma.conv.state == "listening" and oma.conv.quiet_at is not None
+        clk.t += 31
+        await oma.event(("tick",))
+        assert not oma.conv.active, "тишина 30 с — разговор кончился"
+    run(go())
+
+
+def test_barge_in_answered_on_topic_stays_speaking_until_voiced():
+    # 2026-11-12 (ревью раунда 4): перебив в наушниках — её пауза (oma_pause); мозг ответил по делу — Ома выбрасывает
+    # прерванный ответ (hush), снимает паузу и говорит новый. Строка службы на hush приходит, пока её пауза ещё стоит
+    # (paused true): это не пауза пользователя — «говорю» держится, пока новый ответ не отработан, и кашель во время
+    # него снова ставит её паузу, а не обрывает ответ
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    status = _status_feed(oma)
+
+    async def go():
+        await status(False, 0, False)
+        await oma.command({"do": "talk"})
+        oma.ear.echo = False
+        oma.conv.ask("расскажи про погоду")
+        await oma.event(("delta", "Солнечно и тепло. Плюс двадцать. "))
+        await status(True, 0, False)
+        await oma.event(("start", 2))
+        assert {"cmd": "oma_pause", "on": True} in sent
+        await status(True, 0, True, user=False)
+        await status(False, 0, True, user=False)
+        await oma.event(("phrase", "подожди, а что с почтой", 2))
+        clk.t += SEND_PAUSE
+        await oma.event(("tick",))
+        await settle(oma)
+        old = oma.says
+        await oma.event(("delta", "Почта пуста, новых писем нет. "))
+        assert oma.says > old and oma.conv.state == "speaking"
+        await status(False, old, True, user=False)  # hush: прерванный засчитан, её пауза ещё стоит
+        assert oma.conv.state == "speaking", "её пауза — не пауза пользователя"
+        await oma.event(("done", None))
+        await status(False, old, False)  # oma_pause off
+        await status(True, old, False)   # новый ответ зазвучал
+        assert oma.conv.state == "speaking"
+        n = len(sent)
+        await oma.event(("start", 5))  # кашель, пока звучит новый ответ
+        assert {"cmd": "oma_pause", "on": True} in sent[n:] and {"cmd": "hush"} not in sent[n:]
+    run(go())
 
 
 HERE ="Эй, ты тут? Есть новости."

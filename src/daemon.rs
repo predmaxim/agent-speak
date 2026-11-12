@@ -137,7 +137,8 @@ struct Status<'a> {
     trouble: usize, // агентов со срочной нерешённой проблемой — сигнал орба
     played_at: f64, // когда кончается (кончился) звук последней речи, CLOCK_MONOTONIC, с; 0 — речи не было
     out: &'a str,   // куда идёт голос: speakers | headphones
-    voiced: u64,    // реплик (`voice`) нынешней Омы отработано: звук записан, оборван или его не будет
+    voiced: u64,    // реплик (`voice`) нынешней Омы отработано: звук записан, оборван, его не будет или пришла на паузу пользователя
+    user_paused: bool, // очередь на паузе пользователя (кнопка), а не на её паузе при перебиве (oma_pause)
 }
 
 /// Процесс Омы (python -m agent_voice): команды — строками в stdin, события — через сокет.
@@ -832,6 +833,7 @@ impl State {
             played_at: *self.shared.played.lock().unwrap(),
             out: self.out(),
             voiced: self.voices - self.voice_base - self.shared.voices_left(self.voice_base) as u64,
+            user_paused: paused && !self.oma_paused,
         };
         format!("{}\n", serde_json::to_string(&st).unwrap())
     }
@@ -1178,13 +1180,20 @@ impl State {
         }
         // образец — один элемент: каждый push Preview вытесняет прежний
         let sentences = if kind == Kind::Preview && !sentences.is_empty() { vec![sentences.join(" ")] } else { sentences };
+        // реплика Омы с номером — её звука Ома ждёт; пришедшая на паузу пользователя ждёт снятия паузы, а не Ома — без номера
+        let voice = if kind == Kind::Voice && !self.user_paused() { self.voices } else { 0 };
         let mut q = self.shared.queue.lock().unwrap();
         for text in sentences {
-            q.push(Item { session: session.into(), text, kind: kind.clone(), voice: if kind == Kind::Voice { self.voices } else { 0 } });
+            q.push(Item { session: session.into(), text, kind: kind.clone(), voice });
         }
         drop(q);
         self.shared.cv.notify_all();
         n
+    }
+
+    /// Очередь на паузе пользователя (кнопка), а не на её паузе при перебиве.
+    fn user_paused(&self) -> bool {
+        !self.oma_paused && self.shared.queue.lock().unwrap().paused()
     }
 
     /// Перебив Омы: on — пауза (звучащая фраза потом повторится с начала), off — дальше. Только своя пауза:
@@ -1418,9 +1427,10 @@ impl State {
             Msg::Hush => self.shared.hush(), // новость, удержанная за Омой, не теряется
             Msg::Voice { text } => {
                 self.voices += 1;
-                // звучит ли — решает audible; звука не будет (только код, эмодзи, тишина) — реплика отработана сразу:
-                // строка с выросшим voiced, иначе Ома ждала бы конца звука вечно
-                if self.enqueue(Agent::Claude, "voice", &text, Kind::Voice) == 0 {
+                // звучит ли — решает audible; звука не будет (только код, эмодзи, тишина) или очередь на паузе
+                // пользователя — реплика отработана сразу: строка с выросшим voiced, иначе Ома ждала бы конца звука
+                // вечно (на паузе — до её снятия)
+                if self.enqueue(Agent::Claude, "voice", &text, Kind::Voice) == 0 || self.user_paused() {
                     self.broadcast();
                 }
             }
@@ -2146,7 +2156,7 @@ mod tests {
         let st = test_state();
         assert_eq!(
             st.status_line(),
-            "{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":true,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0,\"trouble\":0,\"played_at\":0.0,\"out\":\"speakers\",\"voiced\":0}\n"
+            "{\"running\":true,\"speaking\":false,\"paused\":false,\"speaker\":\"xenia\",\"rate\":\"medium\",\"project\":\"\",\"oma\":\"off\",\"talking\":false,\"agents_voice\":true,\"progress_digest\":false,\"quiet\":false,\"quiet_schedule\":true,\"quiet_from\":\"23:00\",\"quiet_to\":\"08:00\",\"orb_pos\":\"bottom-right,0,0\",\"orb_over_fullscreen\":true,\"waiting\":0,\"trouble\":0,\"played_at\":0.0,\"out\":\"speakers\",\"voiced\":0,\"user_paused\":false}\n"
         );
     }
 
@@ -2215,6 +2225,31 @@ mod tests {
         st.shared.busy.store(true, Ordering::SeqCst); // звучит прежнее — счётчик всё равно растёт, «говорю» кончит !speaking
         st.on_msg(Msg::Voice { text: "🙂".into() });
         assert_eq!(voiced(&mut r), [(true, 3, end)]);
+    }
+
+    #[test]
+    fn voice_during_user_pause_is_handled_at_once() {
+        // пауза пользователя: её ответ ждёт в очереди до снятия паузы, а Ома его звука не ждёт — строка с выросшим voiced
+        // сразу, иначе «говорю» до снятия паузы (ревью раунда 4); снятая пауза счёт назад не отматывает
+        let mut st = test_state();
+        let mut r = sub(&mut st);
+        st.on_msg(Msg::Pause);
+        drain(&mut r);
+        st.on_msg(Msg::Voice { text: "Почта пуста.".into() });
+        assert_eq!(voiced(&mut r), [(false, 1, 0.0)]);
+        assert!(st.shared.queue.lock().unwrap().has("voice"), "ответ ждёт снятия паузы");
+        st.on_msg(Msg::Pause);
+        assert_eq!(voiced(&mut r), [(false, 1, 0.0)]);
+        assert_eq!(texts(&st), ["Почта пуста."]);
+        // её пауза при перебиве — не его: реплика ждёт звука
+        st.on_msg(Msg::OmaPause { on: true });
+        drain(&mut r);
+        st.on_msg(Msg::Voice { text: "Ещё.".into() });
+        assert!(voiced(&mut r).is_empty());
+        st.on_msg(Msg::OmaPause { on: false });
+        texts(&st);
+        assert_eq!(voiced(&mut r), [(false, 1, 0.0)], "строка снятой паузы");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["voiced"], 2, "отзвучала");
     }
 
     #[test]
@@ -2405,18 +2440,22 @@ mod tests {
     fn oma_pause_is_hers_only() {
         let mut st = test_state();
         let paused = |st: &State| st.shared.queue.lock().unwrap().paused();
+        // в строке состояния пауза пользователя — отдельно от её: «говорю» Ома кончает только по его паузе
+        let user = |st: &State| serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap()["user_paused"].as_bool().unwrap();
         st.on_msg(Msg::OmaPause { on: true });
-        assert!(paused(&st));
+        assert!(paused(&st) && !user(&st));
         st.on_msg(Msg::OmaPause { on: false });
         assert!(!paused(&st), "перебив оказался кашлем — дальше");
         st.on_msg(Msg::Pause); // пауза пользователя
+        assert!(user(&st));
         st.on_msg(Msg::OmaPause { on: true });
         st.on_msg(Msg::OmaPause { on: false });
-        assert!(paused(&st), "чужую паузу Ома не снимает");
+        assert!(paused(&st) && user(&st), "чужую паузу Ома не снимает");
         st.on_msg(Msg::Pause);
         st.on_msg(Msg::OmaPause { on: true });
         st.on_msg(Msg::Pause); // пользователь снял паузу кнопкой
         st.on_msg(Msg::Pause); // и поставил свою
+        assert!(user(&st));
         st.on_msg(Msg::OmaPause { on: false });
         assert!(paused(&st), "пауза теперь его");
         st.on_msg(Msg::Pause);
