@@ -13,7 +13,7 @@ import traceback
 
 from . import link, memory, wake
 from .context import MIC_WATCH, foreign_capture, locked, mic_outputs, muted, on_ac
-from .conversation import Conversation
+from .conversation import Conversation, gendered
 from .orders import Orders
 from .turn import SmartTurn
 from .wake import strip_wake
@@ -52,6 +52,10 @@ def status_events(d, last):
     limit = d.get("limit") or ""  # фраза «лимит почти кончился»; нет поля (старая служба) — как пустая
     if last.get("limit", "") != limit:
         evs.append(("limit", limit))
+    gender = "m" if d.get("gender") == "m" else "f"  # род Омы по голосу; нет поля (старая служба) — женский, как раньше
+    if last.get("gender", "f") != gender:
+        evs.append(("gender", gender))
+    last["gender"] = gender
     remember = d.get("memory") is not False
     if last.get("memory") != remember:  # и первая строка: включили, пока Омы не было, — узнаётся по метке на диске
         evs.append(("memory", remember))
@@ -108,6 +112,7 @@ class Oma:
         self.out = None    # куда идёт её голос (out службы): speakers | headphones
         self.why = ""      # причина тишины (quiet_why службы): "" | dnd | screencast
         self.limit = ""    # фраза службы «лимит почти кончился» (limit); "" — окна у порога нет
+        self.gender = "f"  # её род по голосу (gender службы): "f" | "m"; его же знают мозг и поручения
         self.notified = (None, 0.0)  # последнее уведомление: текст, время
         self.ask_id = None  # id набранной реплики из окна, пока команда ask идёт: её строка в чате вернётся с ним
         self.ear_sent = ("", None, "off")  # (вход, quiet_at, побудка) последней строки ear службе: как у неё до первой строки
@@ -348,6 +353,8 @@ class Oma:
             self.why = ev[1]
         elif kind == "limit":
             self.limit = ev[1]
+        elif kind == "gender":  # голос сменили: её слова о себе — в его роде, мозгу — со следующей реплики
+            self.gender = self.brain.gender = self.orders.gender = ev[1]
         elif kind == "memory":  # сказанное при выключенной памяти в заметки дней не попадёт
             self.bg(asyncio.to_thread(memory.switched, ev[1]))
         elif kind == "mic":
@@ -417,14 +424,15 @@ class Oma:
 
     def _sound(self):
         """Её звук одной строкой для мозга: тихий режим, его причина и куда идёт голос — из строки состояния службы
-        (quiet, quiet_why, out): мозг не выдумывает причину молчания; окно лимита у порога — следующей строкой фраза
-        службы (limit)."""
+        (quiet, quiet_why, out): мозг не выдумывает причину молчания; в конце строки — её род по голосу (gender): смена
+        голоса посреди чата действует со следующего ответа; окно лимита у порога — следующей строкой фраза службы (limit)."""
         if self.conv.quiet:
             why = {"screencast": "показ экрана", "dnd": "не беспокоить"}.get(self.why, "тихий режим")
             sound = f"Твой голос: выключен ({why}), ответы только текстом в окне."
         else:
             where = {"speakers": "в динамиках", "headphones": "в наушниках"}.get(self.out)
             sound = f"Твой голос: включён, звучит {where}." if where else "Твой голос: включён."
+        sound += gendered(" Ты говоришь о себе в {мужском|женском} роде.", self.gender)
         return f"{sound}\n{self.limit}" if self.limit else sound
 
     async def _deliver(self, text, ctx, voiced, parts, pre, sound, n, id=None):
