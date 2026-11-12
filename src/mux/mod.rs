@@ -40,10 +40,9 @@ pub trait Mux: Sync {
     fn type_text(&self, pane: &Pane, text: &str) -> Result<(), String>;
     /// Что видно на экране терминала, построчно.
     fn screen(&self, pane: &Pane) -> Result<String, String>;
-    /// Агент в терминале ждёт ввода пользователя (меню, разрешение) — по мнению самого мультиплексора; не знает — false.
-    fn waits(&self, _pane: &Pane) -> Result<bool, String> {
-        Ok(false)
-    }
+    /// Агент в терминале ждёт ввода пользователя (меню, разрешение) — по мнению самого мультиплексора; не знает — Err.
+    /// Без умолчания: новый адаптер, молча «никогда не ждёт», пустил бы черновик в меню.
+    fn waits(&self, pane: &Pane) -> Result<bool, String>;
     /// Папки, где мультиплексор умеет запустить агента.
     fn projects(&self) -> Result<Vec<String>, String> {
         Ok(Vec::new())
@@ -340,6 +339,7 @@ mod tests {
         fn key(&self, _: &Pane, key: &Key) -> Result<(), String> { self.0.lock().unwrap().push(format!("{key:?}")); Ok(()) }
         fn type_text(&self, _: &Pane, text: &str) -> Result<(), String> { self.0.lock().unwrap().push(format!("type:{text}")); Ok(()) }
         fn screen(&self, _: &Pane) -> Result<String, String> { Ok(String::new()) }
+        fn waits(&self, _: &Pane) -> Result<bool, String> { Ok(false) }
     }
 
     #[test]

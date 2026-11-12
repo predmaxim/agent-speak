@@ -273,7 +273,8 @@ def oma_tools(snapshot, send, orders=None) -> list:
         e, why = pick_agent(snapshot(), args.get("agent", ""))
         if not e:
             return _text(why)
-        draft = str(args.get("draft")).lower() in ("true", "1")  # true и строкой «true», «1»: черновик ничего не отправляет
+        # не явное «нет» — черновик: он ничего не отправляет, а набранное в окне ушло бы сразу, с Enter
+        draft = str(args.get("draft", False)).strip().lower() not in ("false", "0", "", "none", "no")
         return _text(await orders.tell(e, args.get("text", ""), args.get("gist", ""), int(args.get("option") or 0), draft))
 
     where = {"type": "string", "enum": ["orca", "herdr"]}

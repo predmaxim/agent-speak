@@ -123,11 +123,16 @@ fn focused_pane(out: &str) -> Option<String> {
     panes.iter().find(|p| p["focused"] == true)?["pane_id"].as_str().map(str::to_string)
 }
 
-/// Ответ `pane get`: агент панели ждёт ввода — `blocked`, тот же признак, по которому herdr не пускает `agent prompt`.
+/// Ответ `pane get`: агент панели ждёт ввода — `blocked`, тот же признак, по которому herdr не пускает `agent prompt`;
+/// `unknown` (herdr агента не распознал) и мусор — ошибка: «не знаю» за «не ждёт» не выдаём.
 fn blocked(out: &str) -> Result<bool, String> {
     ok(out)?;
     let v: Value = serde_json::from_str(out.trim()).map_err(|_| out.chars().take(200).collect::<String>())?;
-    Ok(v["result"]["pane"]["agent_status"] == "blocked")
+    match v["result"]["pane"]["agent_status"].as_str() {
+        Some("blocked") => Ok(true),
+        Some("idle" | "working" | "done") => Ok(false),
+        _ => Err("herdr не знает, ждёт ли агент ввода".into()),
+    }
 }
 
 /// Отказ `agent prompt` — повод послать текст командой; агент в диалоге (agent_blocked) — нет: Enter выбрал бы пункт.
@@ -191,7 +196,8 @@ mod tests {
         let get = |s: &str| format!(r#"{{"id":"cli:pane:get","result":{{"pane":{{"agent_status":"{s}","pane_id":"w5:p1"}},"type":"pane_info"}}}}"#);
         assert_eq!(blocked(&get("blocked")), Ok(true));
         assert_eq!(blocked(&get("idle")), Ok(false));
-        assert_eq!(blocked(&get("unknown")), Ok(false));
+        assert_eq!(blocked(&get("working")), Ok(false));
+        assert!(blocked(&get("unknown")).is_err(), "herdr агента не распознал — не «не ждёт»");
         assert!(blocked(r#"{"error":{"code":"pane_not_found","message":"pane w5:p1 not found"}}"#).unwrap_err().contains("not found"));
         assert!(blocked("мусор").is_err());
     }

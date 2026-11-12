@@ -193,14 +193,16 @@ const DRAFT_MENU: &str = "агент ждёт выбора в меню — че�
 
 /// Черновик: текст в поле ввода без Enter и без Ctrl+U — отправит пользователь сам, недонабранное им не стирается.
 /// Агент ждёт в меню (вопрос, план, разрешение) — отказ: поля ввода там нет, а буквы и цифры выбирали бы пункты.
-/// Вердикт терминала (waits) и экран — всегда: у Codex вызова в полёте нет, у Claude он ложится в транскрипт не сразу,
+/// Экран и вердикт терминала (waits) — всегда: у Codex вызова в полёте нет, у Claude он ложится в транскрипт не сразу,
 /// а подтверждения, которое у tell защищает от ослышки, у черновика нет. Не прочитались — отказ, не пишем вслепую.
+/// Вердикт — последним, ближе всего к вводу: меню Codex видно только по нему.
+// shortcut: меню, открывшееся между проверкой и вводом (~0,5 с), не поймать; станет бить — терминал с атомарным «введи, если не ждёт»
 fn draft_steps(call: Option<&Value>, text: &str, waits: impl FnOnce() -> Result<bool, String>, screen: impl FnOnce() -> Result<String, String>) -> Result<Vec<Step>, String> {
     let text = text.trim();
     match call.and_then(|c| c["name"].as_str()) {
         _ if text.is_empty() => Err("пустой текст".into()),
         Some("AskUserQuestion" | "ExitPlanMode") => Err(DRAFT_MENU.into()),
-        _ if waits()? || menu_on(&screen()?) => Err(DRAFT_MENU.into()),
+        _ if menu_on(&screen()?) || waits()? => Err(DRAFT_MENU.into()),
         _ => Ok(vec![Step::Type(text.into())]),
     }
 }

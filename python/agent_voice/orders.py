@@ -169,7 +169,7 @@ class Orders:
         if entry.get("chat"):  # чат Orca: CLI Orca пишет только в терминалы — спрашивать «да, передай» не о чем
             return f"Не передано: {p} — {CHAT}. Скажи пользователю коротко."
         if draft:
-            return await self._draft(entry, text, option, n)
+            return await self._draft(entry, text, option)
         d = self.gate(text, ask, option)  # до чтения экрана: по реплике хода, в котором мозг вызвал tell
         item, question, also = chosen(ask, option), f"Передать проекту {p}: {gist}?", ""
         expect = item.split(" — ")[0]  # метка варианта, как её видел мозг: tell жмёт, только если в вызове агента та же
@@ -190,7 +190,7 @@ class Orders:
                                  f"«{told} проекту {p}: …» — смысл, не текст задания.",
                                  question, "передай", shown)
 
-    async def _draft(self, entry, text, option, n):
+    async def _draft(self, entry, text, option):
         """Черновик: текст в поле ввода агента без Enter — агенту ничего не уходит, отправит пользователь сам, поэтому без
         «да, передай». Пункт меню черновиком не бывает: цифра — уже выбор."""
         p = entry["project"]
@@ -198,8 +198,6 @@ class Orders:
             return "Не вставлено: черновик — только текст, вариант меню — уже выбор: его передают без draft."
         if self.tripped:  # в этом ходе уже спрошено «да, передай»: «нет» не снял бы текст из поля
             return "Не вставлено: поручение уже ждёт подтверждения, вопрос уже задан вслух."
-        if n != self.n:  # прерванный ход ничего не пишет
-            return "Не вставлено: ход прерван новой репликой пользователя."
         ok, out = await self.run("draft", entry["id"], text)
         if not ok:
             return f"Не вставлено: {out}. Скажи пользователю коротко, что не вышло."

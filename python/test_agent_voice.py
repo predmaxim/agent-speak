@@ -1799,9 +1799,6 @@ def test_draft_refuses_menu_option_chat_and_interrupted_turn():
     assert run(o.tell(E[0], "", "второй", option=2, draft=True)).startswith("Не вставлено: черновик — только текст") and not calls
     r = run(o.tell(dict(E[0], chat=True), "Проверь логи", "логи", draft=True))
     assert "в чат Orca передать не могу" in r and not calls, "у чата Orca поля ввода через CLI нет"
-    o.turn(True, "напиши почте привет, не отправляй", n=1)
-    o.n = 2  # пока мозг думал, пользователь заговорил снова
-    assert run(o._draft(E[0], "Привет", 0, 1)) == "Не вставлено: ход прерван новой репликой пользователя." and not calls
     o, calls = _orders()
     o.turn(True, "передай почте: прогони тесты, и ещё напиши, но не отправляй")
     run(o.tell(E[0], "Прогони тесты", "тесты"))  # спросило «да, передай»
@@ -1819,8 +1816,9 @@ def test_tell_tool_passes_draft_and_prompt_names_it():
     run(tool.handler({"agent": "s1", "text": "Прогони тесты", "gist": "тесты"}))
     run(tool.handler({"agent": "s1", "text": "Прогони тесты", "gist": "тесты", "draft": "True"}))
     run(tool.handler({"agent": "s1", "text": "Прогони тесты", "gist": "тесты", "draft": False}))
-    assert o.told == [("s1", "Прогони тесты", "тесты", 0, True), ("s1", "Прогони тесты", "тесты", 0),
-                      ("s1", "Прогони тесты", "тесты", 0, True), ("s1", "Прогони тесты", "тесты", 0)], "по умолчанию — отправить"
+    run(tool.handler({"agent": "s1", "text": "Прогони тесты", "gist": "тесты", "draft": "yes"}))
+    d, t = ("s1", "Прогони тесты", "тесты", 0, True), ("s1", "Прогони тесты", "тесты", 0)
+    assert o.told == [d, t, d, t, d], "по умолчанию и явное false — отправить; любое другое — черновик, он ничего не шлёт"
     assert "draft" in tool.input_schema["properties"] and "draft=true" in brain.OMA_PROMPT and "«я отправлю сам»" in brain.OMA_PROMPT
 
 
