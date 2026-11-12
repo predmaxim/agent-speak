@@ -260,6 +260,7 @@ struct State {
     asm: Assembler,
     tail: Tailer,
     focus_cache: Option<(Instant, Option<SessionRef>)>, // None — устарел
+    hushed: std::collections::HashSet<String>, // вопрос пришёл, когда агент был в окне в фокусе и пользователь тут: ждёт ухода из окна
     focus_src: Box<dyn FnMut() -> Option<SessionRef>>, // окно в фокусе; в тестах — подделка
     clock: Box<dyn Fn() -> Instant>,
     subs: Vec<UnixStream>,
@@ -296,7 +297,7 @@ struct State {
     presence_seen: String,      // прошлые факты снимка словами — смену пишем в журнал
     viewing: String,            // чат какого агента открыт в окне Омы; пусто — никакого
     window: Option<u32>,        // процесс окна в фокусе — по событиям Hyprland (Event::Window), не опросом
-    under: fn(u32, u32) -> bool, // процесс (агент) — потомок процесса окна; в тестах — подделка
+    under: fn(u32, u32) -> bool, // агент — в окне: потомок его процесса (чат Orca) или терминал его мультиплексора; в тестах — подделка
     welcome: bool,              // вернулся после долгого отсутствия: следующие новости — с приветствием и обзором
     night_keep: bool,           // тишина настала, пока пользователя нет: накопленное ждёт утра
     quiet_why: QuietWhy,        // тишина по причине: Ома молчит, новости копятся
@@ -480,6 +481,7 @@ pub fn run() {
         asm: Assembler::new(),
         tail: Tailer::new(),
         focus_cache: None,
+        hushed: Default::default(),
         focus_src: Box::new(focus::focused),
         clock: Box::new(Instant::now),
         subs: Vec::new(),
@@ -525,7 +527,7 @@ pub fn run() {
         presence_seen: String::new(),
         viewing: String::new(),
         window: None,
-        under: focus::under,
+        under: in_app,
         welcome: false,
         night_keep: false,
         quiet_why: QuietWhy::default(),
@@ -632,6 +634,12 @@ fn pane_for(e: &Entry, locate: impl Fn(u32) -> Option<Pane>) -> Option<Pane> {
 }
 
 /// Факты о агенте без чтения диска: то, что знает реестр.
+/// Агент pid — в окне win: потомок его процесса (чат Orca, агент в терминале) или в терминале его мультиплексора (pty-хост
+/// Orca — потомок systemd, а не окна, — mux::in_app_window, как его находит show).
+fn in_app(pid: u32, win: u32) -> bool {
+    focus::under(pid, win) || mux::in_app_window(win, pid)
+}
+
 fn blank_facts(e: &Entry, activity: u64) -> Facts {
     Facts {
         id: e.id.clone(), project: e.project.clone(), state: e.state,
@@ -1049,7 +1057,7 @@ impl State {
             // сводки не будет (выключена или считать нечего): итоги за тишину выбросить сейчас, как выбросила бы она, — иначе
             // окно пачки их придержит и они прозвучат после; вопросы, срочное и восстановление — по своим правилам
             self.quiet_over = false;
-            self.board.retain_classes(&[Class::Urgent, Class::Now, Class::Restore, Class::Question]);
+            self.board.retain_classes(&[Class::Urgent, Class::Now, Class::Restore, Class::Question], &[]);
         }
         true
     }
@@ -1071,10 +1079,10 @@ impl State {
         // тишина по причине доску не трогает: накопленное прозвучит сводкой
         if quiet {
             if !self.night_keep {
-                self.board.retain_classes(&[]);
+                self.board.retain_classes(&[], &[]);
             }
         } else if !self.cfg.agents_voice {
-            self.board.retain_classes(&[]); // за агентами не следим — о них ни слова
+            self.board.retain_classes(&[], &[]); // за агентами не следим — о них ни слова
         }
         if self.muted() {
             // новости выброшены — окно ответа по чужой речи не откроется, невыпущенный «Ты тут?» не прозвучит
@@ -1403,7 +1411,9 @@ impl State {
             Ask::Progress => d.important.then_some("status"),
             Ask::Hung => None,
         };
-        if let Some(kind) = kind {
+        // агент окна в фокусе, пользователь тут — он видит его в окне: ни пузыря, ни голоса (итог — не на доску, вопрос ждёт)
+        let hush = self.hush(&d.session);
+        if let Some(kind) = kind.filter(|_| !hush) {
             self.bubble(&d.session, &format!("{kind}-{}", d.session), &who, &heard, kind);
         }
         // промежуточное — только строка «что сейчас» и пузырь (важное): вслух его нет
@@ -1413,9 +1423,17 @@ impl State {
             Ask::Step => d.important.then_some(Class::Final),
             Ask::Progress | Ask::Hung => None,
         };
-        if let Some(class) = class.filter(|_| !self.quiet()) {
+        if hush && class == Some(Class::Final) {
+            self.board.drop_focused(std::slice::from_ref(&d.session)); // и прежний его итог: новый заглушён, старый не звучит
+        }
+        if let Some(class) = class.filter(|c| !self.quiet() && !(hush && *c == Class::Final)) {
             if class == Class::Question {
                 self.board.answered(&d.session); // новый вопрос — прежний уже решён; «нужно» ждёт ответа пользователя
+                if hush {
+                    self.hushed.insert(d.session.clone());
+                } else {
+                    self.hushed.remove(&d.session);
+                }
             }
             let born = (self.now_secs)();
             self.board.push(News { session: d.session.clone(), class, project: d.project, say: d.say, important: d.important, born, facts: d.facts });
@@ -1428,7 +1446,7 @@ impl State {
             Some(c) => self.quiet() || self.board.has(&d.session, c),
             None => d.ask == Ask::Progress && d.important,
         };
-        if let Some(tone) = kind.filter(|_| unsaid) {
+        if let Some(tone) = kind.filter(|_| unsaid && !hush) {
             self.ripple(&d.session, tone);
         }
     }
@@ -1470,12 +1488,12 @@ impl State {
             self.quiet_over &= mode == Mode::Unsure; // и сводка тишины тоже
             return;
         }
-        // и не тогда, когда сказать есть только о чатах Orca под окном в фокусе: их знают события Hyprland
-        let chats = self.chats_engaged();
-        if !self.board.sayable(now, &chats) && !summary(&self.board, &chats) {
-            if mode != Mode::Unsure {
-                self.board.drop_focused(&chats); // итог чата под окном в фокусе снимается молча (пузырь остался), как ниже в take
-            }
+        // и не тогда, когда сказать есть только заглушённые вопросы агентов окна в фокусе: их знают события Hyprland
+        self.hushed.retain(|s| self.board.has(s, Class::Question)); // ответили, сменился вопрос — пометка снята
+        let shown = self.hushed_in_window();
+        if !self.board.sayable(now, &shown) && !summary(&self.board, &shown) {
+            self.welcome &= mode == Mode::Unsure; // как выше: вводить в курс нечем — приветствие следующих новостей не ждёт
+            self.quiet_over &= mode == Mode::Unsure;
             return;
         }
         let focused = self.engaged();
@@ -1521,10 +1539,12 @@ impl State {
                 // агент остаётся красным в орбе и окне, срочное сторожа звучит по своим правилам. Без сводки — как после тишины.
                 if self.cfg.hush_summary {
                     self.board.drop_focused(&focused);
-                    parts.extend(self.board.overview(QUIET_OVER, &[]).map(Chunk::oma));
-                    self.board.retain_classes(&[Class::Urgent, Class::Now, Class::Restore]);
+                    // заглушённый вопрос агента окна в фокусе сводка не считает и не снимает: он прозвучит, когда уйдёшь из окна
+                    let hushed = self.hushed_in_window();
+                    parts.extend(self.board.overview(QUIET_OVER, &hushed).map(Chunk::oma));
+                    self.board.retain_classes(&[Class::Urgent, Class::Now, Class::Restore], &hushed);
                 } else {
-                    self.board.retain_classes(&[Class::Urgent, Class::Now, Class::Restore, Class::Question]);
+                    self.board.retain_classes(&[Class::Urgent, Class::Now, Class::Restore, Class::Question], &[]);
                 }
             }
             parts.extend(self.board.take(now, &focused));
@@ -1613,15 +1633,16 @@ impl State {
         }
     }
 
-    /// Агенты, которыми пользователь занят, — их новости не вслух (пузыри остаются): чат агента открыт в окне Омы; его
-    /// вкладка в фокусе, и пользователь печатает (ввод за FOCUS_INPUT) или ждёт его ответа (свой промпт за FOCUS_PROMPT) —
-    /// просто вкладка в фокусе — нет: может, отошёл или смотрит в телефон; все чаты Orca, пока её окно в фокусе: какой чат
-    /// на экране, Orca не сообщает (нет CLI «активный чат», docs/upstream/orca-active-chat.md).
+    /// Агенты, которыми пользователь занят, — их новости не вслух: чат агента открыт в окне Омы; его вкладка в фокусе, и
+    /// пользователь печатает (ввод за FOCUS_INPUT) или ждёт его ответа (свой промпт за FOCUS_PROMPT) — просто вкладка в
+    /// фокусе — нет: может, отошёл или смотрит в телефон; все агенты окна в фокусе, пока пользователь за компьютером
+    /// (hushed_in_window).
     fn engaged(&mut self) -> Vec<String> {
+        let mut out = self.hushed_in_window(); // заглушённые ждут и при открытом чате в окне Омы: окно Омы — слой, фокус у Orca
         if !self.viewing.is_empty() {
-            return vec![self.viewing.clone()];
+            out.push(self.viewing.clone());
+            return out;
         }
-        let mut out = self.chats_engaged();
         let Some(id) = self.focused().map(|f| f.id) else { return out };
         let now = (self.now_secs)();
         let typing = now.saturating_sub(self.presence.last_input(now)) < FOCUS_INPUT;
@@ -1633,15 +1654,41 @@ impl State {
         out
     }
 
-    /// Чаты Orca под окном в фокусе: их процесс — потомок окна, как его находит show. Окно — из событий Hyprland, без hyprctl.
-    fn chats_engaged(&self) -> Vec<String> {
+    /// Агенты окна в фокусе (Orca — её чаты и терминалы, терминал) — пользователь их и так видит (решение пользователя
+    /// 2026-11-13). Окно — из событий Hyprland, без hyprctl.
+    fn window_agents(&self) -> Vec<String> {
         let Some(w) = self.window else { return vec![] };
-        self.registry.entries().iter().filter(|e| e.chat && (self.under)(e.pid, w)).map(|e| e.id.clone()).collect()
+        self.registry.entries().iter().filter(|e| (self.under)(e.pid, w)).map(|e| e.id.clone()).collect()
+    }
+
+    /// Новость агента глушится, если пришла, когда он в окне в фокусе и пользователь тут (присутствие Here): решается по
+    /// приходу, а не когда Ома собралась говорить, — иначе «Ты тут?» звучал бы ради неё и после «да» молчал, а пришедшее,
+    /// пока его не было, глушилось бы по возвращении.
+    fn hush(&self, session: &str) -> bool {
+        self.presence.mode((self.now_secs)()) == Mode::Here && self.window_agents().iter().any(|s| s == session)
+    }
+
+    /// Заглушённые вопросы, чей агент всё ещё в окне в фокусе: ждут, пока пользователь уйдёт из окна (присутствие не в
+    /// счёт: ради них и «Ты тут?» не спрашивается).
+    fn hushed_in_window(&self) -> Vec<String> {
+        if self.hushed.is_empty() {
+            return vec![];
+        }
+        let shown = self.window_agents();
+        self.hushed.iter().filter(|s| shown.contains(s)).cloned().collect()
     }
 
     /// Окно в фокусе сменилось (событие Hyprland): чаты ушедшего окна снова звучат — сразу, а не с тика.
     fn on_window(&mut self, w: Option<u32>) {
         self.window = w;
+        // вошёл в окно и он тут — его агентов видно: их итоги на доске снимаются молча, вопросы ждут ухода из окна
+        if self.presence.mode((self.now_secs)()) == Mode::Here {
+            let shown = self.window_agents();
+            self.board.drop_focused(&shown);
+            for s in shown.into_iter().filter(|s| self.board.has(s, Class::Question)) {
+                self.hushed.insert(s);
+            }
+        }
         self.speak_news();
     }
 
@@ -2813,6 +2860,7 @@ mod tests {
             asm: Assembler::new(),
             tail: Tailer::new(),
             focus_cache: None,
+            hushed: Default::default(),
             focus_src: Box::new(|| None), // hyprctl в тестах не зовётся
             clock: Box::new(Instant::now),
             subs: Vec::new(),
@@ -2849,7 +2897,7 @@ mod tests {
             presence_seen: String::new(),
             viewing: String::new(),
             window: None,
-            under: focus::under,
+            under: in_app,
             welcome: false,
             night_keep: false,
             quiet_why: QuietWhy::default(),
@@ -6575,14 +6623,14 @@ mod tests {
     }
 
     #[test]
-    fn orca_chats_keep_quiet_while_the_orca_window_is_focused() {
-        // какой чат Orca на экране, Orca не сообщает: её окно в фокусе (событие Hyprland) — все её чаты «заняты»: пузыри
-        // без голоса; терминал под тем же окном — как прежде; другое окно — чаты звучат сразу, по событию
+    fn agents_of_the_focused_window_keep_quiet_while_the_user_is_there() {
+        // решение пользователя 2026-11-13: окно в фокусе (Orca) — его агенты, чаты и терминалы, ни вслух, ни пузырём: он их
+        // и так видит; итог снимается молча, вопрос ждёт ухода из окна; агент другого окна — как прежде
         let mut st = test_state();
-        let live = vec![Live { chat: true, pid: 11, ..live("s") }, Live { pid: 12, ..live("t") }];
+        let live = vec![Live { chat: true, pid: 11, ..live("s") }, Live { pid: 12, ..live("t") }, Live { pid: 3, ..live("u") }];
         st.scan = Box::new(move || live.clone());
         st.rescan();
-        st.under = |pid, win| win == 99 && pid > 10; // 11 и 12 — потомки окна 99 (Orca)
+        st.under = |pid, win| win == 99 && pid > 10; // 11 (чат) и 12 (терминал) — в окне 99 (Orca), 3 — нет
         let calls = Arc::new(Mutex::new(0));
         let c = calls.clone();
         st.focus_src = Box::new(move || {
@@ -6594,19 +6642,81 @@ mod tests {
         hello(&mut r);
         final_s(&mut st);
         st.on_digest(dg("t", Ask::Final, false, "Тесты прошли."));
+        st.on_digest(dg("u", Ask::Final, false, "Сборка готова."));
         st.tick();
-        assert_eq!(texts(&st), ["плуг: Тесты прошли."], "итог чата s — только пузырём");
-        assert_eq!(bubbles(&mut r).len(), 2, "пузыри — у обоих");
-        question(&mut st, "s", true, "Удалить старый код?");
+        assert_eq!(texts(&st), ["плуг: Сборка готова."], "вслух — только агент не из окна в фокусе");
+        assert_eq!(bubbles(&mut r).len(), 1, "пузырь — только у него");
+        question(&mut st, "t", true, "Удалить старый код?");
         *calls.lock().unwrap() = 0;
         for _ in 0..3 {
             st.focus_cache = None;
             st.tick();
         }
-        assert!(texts(&st).is_empty(), "вопрос чата ждёт, пока окно Orca в фокусе");
-        assert_eq!(*calls.lock().unwrap(), 0, "ждущий вопрос чата hyprctl на каждом тике не спрашивает");
+        assert!(texts(&st).is_empty(), "вопрос агента окна ждёт, пока окно в фокусе");
+        assert!(bubbles(&mut r).is_empty(), "и пузыря у вопроса нет");
+        assert_eq!(*calls.lock().unwrap(), 0, "ждущий вопрос hyprctl на каждом тике не спрашивает");
         st.on_window(Some(5)); // в фокусе другое окно
         assert_eq!(texts(&st), ["плуг: Удалить старый код?"], "по событию, тика не ждёт");
+    }
+
+    #[test]
+    fn focused_window_does_not_hush_news_that_came_while_the_user_was_away() {
+        // окно Orca в фокусе, а пользователь давно ничего не трогал: может, отошёл — пришедшее не глушится (и потом тоже)
+        let mut st = test_state();
+        let live = vec![Live { pid: 12, ..live("t") }];
+        st.scan = Box::new(move || live.clone());
+        st.rescan();
+        st.under = |pid, win| win == 99 && pid > 10;
+        st.on_window(Some(99));
+        assert!(st.hush("t"), "за компьютером — агент окна глушится");
+        st.on_presence(r#"{"at":1000,"idle_since":90}"#);
+        assert!(!st.hush("t"), "не уверена, что он тут, — окно не глушит");
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        st.on_digest(dg("t", Ask::Final, false, "Тесты прошли."));
+        assert_eq!(bubbles(&mut r).len(), 1, "пузырь есть");
+        assert!(st.board.has("t", Class::Final), "итог на доске: прозвучит, когда он вернётся");
+    }
+
+    #[test]
+    fn hushed_question_does_not_loop_are_you_there() {
+        // ревью 2026-11-13: глушили по присутствию в момент речи — «Ты тут?» ради вопроса агента окна, «да» — и тишина,
+        // так каждую минуту. Глушится по приходу: заглушённый вопрос «Ты тут?» не вызывает, ждёт ухода из окна
+        let mut st = test_state();
+        let live = vec![Live { pid: 12, ..live("t") }];
+        st.scan = Box::new(move || live.clone());
+        st.rescan();
+        st.under = |pid, win| win == 99 && pid > 10;
+        st.on_window(Some(99));
+        question(&mut st, "t", true, "Удалить старый код?");
+        st.on_presence(r#"{"at":1000,"idle_since":90}"#); // минута без ввода — не уверена, что он тут
+        for _ in 0..3 {
+            st.focus_cache = None;
+            st.tick();
+        }
+        assert!(texts(&st).is_empty(), "ни «Ты тут?», ни вопроса: агента видно в окне");
+        st.on_window(Some(5));
+        assert!(st.hushed_in_window().is_empty() && st.board.has("t", Class::Question), "ушёл из окна — вопрос больше не заглушён, дальше как обычно");
+    }
+
+    #[test]
+    fn hushed_final_is_not_spoken_later_after_leaving_the_window() {
+        // ревью 2026-11-13: итог агента окна, пришедший в паузу пачки, оставался на доске и звучал, когда уходишь из окна
+        let mut st = test_state();
+        st.board.every = 600; // пачка итогов — не чаще раза в 10 мин
+        let live = vec![Live { pid: 12, ..live("t") }, Live { pid: 3, ..live("u") }];
+        st.scan = Box::new(move || live.clone());
+        st.rescan();
+        st.under = |pid, win| win == 99 && pid > 10;
+        st.on_window(Some(99));
+        st.on_digest(dg("u", Ask::Final, false, "Сборка готова."));
+        st.tick();
+        texts(&st); // пачка ушла — следующая через news_every
+        st.on_digest(dg("t", Ask::Final, false, "Тесты прошли."));
+        assert!(!st.board.has("t", Class::Final), "итог агента окна в фокусе — не на доску");
+        st.on_window(Some(5));
+        st.tick();
+        assert!(texts(&st).is_empty(), "ушёл из окна — снятый итог не звучит");
     }
 
     #[test]
@@ -7324,5 +7434,227 @@ mod tests {
         assert_eq!(sub_call(&dir.join("s.jsonl"), &call).unwrap()["input"]["command"], "git push");
         assert_eq!(sub_call(&dir.join("s.jsonl"), &serde_json::json!({"id": "другой"})), None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+    // ---- окно в фокусе: сценарии ревью 2026-11-13 (до правки падали) ----
+    fn window_hush_rv_setup() -> (State, Arc<Mutex<u64>>) {
+        let mut st = test_state();
+        let live = vec![Live { pid: 12, ..live("t") }, Live { pid: 3, ..live("u") }, Live { pid: 4, ..live("v") }];
+        st.scan = Box::new(move || live.clone());
+        st.rescan();
+        st.under = |pid, win| win == 99 && pid > 10; // t — в окне 99
+        let now = secs_at(&mut st, 1000);
+        (st, now)
+    }
+
+    #[test]
+    fn window_hush_rv6_quiet_summary_counts_hushed_question() {
+        let (mut st, now) = window_hush_rv_setup();
+        st.on_window(Some(99));
+        sharing(&mut st, 1000, true);
+        question(&mut st, "t", true, "Удалить старый код?");
+        assert!(st.hushed.contains("t"));
+        *now.lock().unwrap() = 1030;
+        sharing(&mut st, 1030, false);
+        st.tick();
+        let t = texts(&st);
+        assert!(t.is_empty(), "RV6 {t:?}");
+    }
+
+    #[test]
+    fn window_hush_rv6u_quiet_summary_unsure_asks_are_you_there_for_hushed() {
+        let (mut st, now) = window_hush_rv_setup();
+        st.on_window(Some(99));
+        sharing(&mut st, 1000, true);
+        question(&mut st, "t", true, "Удалить старый код?");
+        assert!(st.hushed.contains("t"));
+        *now.lock().unwrap() = 1090;
+        snap(&mut st, serde_json::json!({"at": 1090, "idle_since": 1000, "screencast": false}));
+        st.tick();
+        let t = texts(&st);
+        assert!(t.is_empty(), "RV6u {t:?}");
+    }
+
+    #[test]
+    fn window_hush_rv2_stale_welcome() {
+        let (mut st, now) = window_hush_rv_setup();
+        st.on_window(Some(99));
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 0}));
+        question(&mut st, "t", true, "Удалить старый код?");
+        assert!(st.hushed.contains("t"));
+        st.tick();
+        assert!(texts(&st).is_empty());
+        *now.lock().unwrap() = 1700;
+        snap(&mut st, serde_json::json!({"at": 1700, "idle_since": 1000}));
+        st.tick();
+        assert!(texts(&st).is_empty());
+        *now.lock().unwrap() = 1800;
+        snap(&mut st, serde_json::json!({"at": 1800, "idle_since": 0}));
+        st.tick();
+        assert!(texts(&st).is_empty());
+        for t in (1830..5000).step_by(30) {
+            *now.lock().unwrap() = t;
+            snap(&mut st, serde_json::json!({"at": t, "idle_since": 0}));
+            st.tick();
+        }
+        assert!(texts(&st).is_empty());
+        st.on_window(Some(5));
+        let t = texts(&st);
+        assert!(!t.iter().any(|s| s.contains("возвращением")), "RV2 {t:?}");
+    }
+
+    #[test]
+    fn window_hush_rv_viewing_drops_hush() {
+        let (mut st, _now) = window_hush_rv_setup();
+        st.on_window(Some(99));
+        question(&mut st, "t", true, "Удалить старый код?");
+        st.tick();
+        assert!(texts(&st).is_empty());
+        st.on_msg(Msg::View { agent: "u".into() }); // окно Омы (layer) открыто на чате u; активное окно — всё ещё Orca
+        st.on_digest(dg("v", Ask::Final, false, "Сборка готова."));
+        st.tick();
+        let t = texts(&st);
+        assert!(!t.iter().any(|s| s.contains("Удалить")), "RVview {t:?}");
+    }
+
+    #[test]
+    fn window_hush_rv_ripple_quiet_mode_hushed() {
+        let (mut st, _now) = window_hush_rv_setup();
+        st.on_window(Some(99));
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        st.cfg.quiet_override = "on".into();
+        st.on_digest(dg("t", Ask::Final, false, "Готово."));
+        let all = drain(&mut r);
+        let rp: Vec<_> = all.iter().filter_map(|v| v["ripple"]["tone"].as_str().map(String::from)).collect();
+        let bb: Vec<_> = all.iter().filter(|v| v.get("bubble").is_some()).collect();
+        assert!(rp.is_empty(), "RVripple {rp:?}");
+    }
+
+    #[test]
+    fn window_hush_rv_switch_into_window_then_final_spoken() {
+        // итог t пришёл, пока в фокусе другое окно, и ждёт окна пачки; пользователь перешёл в Orca и тут — итог звучит?
+        let (mut st, now) = window_hush_rv_setup();
+        st.board.every = 600;
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 0}));
+        st.on_window(Some(5));
+        st.on_digest(dg("u", Ask::Final, false, "Сборка готова."));
+        assert_eq!(texts(&st), ["плуг: Сборка готова."]);
+        st.on_digest(dg("t", Ask::Final, false, "Тесты прошли."));
+        assert!(st.board.has("t", Class::Final));
+        st.on_window(Some(99)); // перешёл в Orca посмотреть
+        for t in (1030..1700).step_by(30) {
+            *now.lock().unwrap() = t;
+            snap(&mut st, serde_json::json!({"at": t, "idle_since": 0}));
+            st.tick();
+        }
+        let t = texts(&st);
+        assert!(t.is_empty(), "RVswitch {t:?}");
+    }
+
+    #[test]
+    fn window_hush_rv_old_final_survives_hushed_newer() {
+        let (mut st, now) = window_hush_rv_setup();
+        st.board.every = 600;
+        st.on_window(Some(5));
+        st.on_digest(dg("u", Ask::Final, false, "Сборка готова."));
+        texts(&st);
+        st.on_digest(dg("t", Ask::Final, false, "Старый итог."));
+        st.on_window(Some(99));
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        st.on_digest(dg("t", Ask::Final, false, "Новый итог."));
+        let rp: Vec<_> = drain(&mut r).iter().filter_map(|v| v["ripple"]["tone"].as_str().map(String::from)).collect();
+        st.on_window(Some(5));
+        *now.lock().unwrap() = 1700;
+        st.tick();
+        let t = texts(&st);
+        assert!(t.is_empty(), "RVold {t:?}");
+    }
+
+    #[test]
+    fn window_hush_rv_hushed_question_welcome_overview_counts() {
+        // вопрос t заглушён; ушёл надолго, вернулся; пришёл итог v — приветствие с обзором
+        let (mut st, now) = window_hush_rv_setup();
+        st.on_window(Some(99));
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 0}));
+        question(&mut st, "t", true, "Удалить старый код?");
+        *now.lock().unwrap() = 1700;
+        snap(&mut st, serde_json::json!({"at": 1700, "idle_since": 1000}));
+        st.tick();
+        *now.lock().unwrap() = 1800;
+        snap(&mut st, serde_json::json!({"at": 1800, "idle_since": 0}));
+        st.tick();
+        st.on_digest(dg("v", Ask::Final, false, "Сборка готова."));
+        let t = texts(&st);
+        assert!(!t.iter().any(|s| s.contains("ждёт ответа")), "RVwelcome {t:?}");
+    }
+
+    #[test]
+    fn window_hush_rv_branch_switch_into_orca_chat_final() {
+        let mut st = test_state();
+        let live = vec![Live { chat: true, pid: 12, ..live("t") }, Live { pid: 3, ..live("u") }];
+        st.scan = Box::new(move || live.clone());
+        st.rescan();
+        st.under = |pid, win| win == 99 && pid > 10;
+        let now = secs_at(&mut st, 1000);
+        st.board.every = 600;
+        snap(&mut st, serde_json::json!({"at": 1000, "idle_since": 0}));
+        st.on_window(Some(5));
+        st.on_digest(dg("u", Ask::Final, false, "Сборка готова."));
+        assert_eq!(texts(&st), ["плуг: Сборка готова."]);
+        st.on_digest(dg("t", Ask::Final, false, "Тесты прошли."));
+        st.on_window(Some(99));
+        for t in (1030..1700).step_by(30) {
+            *now.lock().unwrap() = t;
+            snap(&mut st, serde_json::json!({"at": t, "idle_since": 0}));
+            st.tick();
+        }
+        let t = texts(&st);
+        assert!(t.is_empty(), "RVbranchchat {t:?}");
+    }
+
+    #[test]
+    fn window_hush_rv6_hushed_kept_after_summary() {
+        let (mut st, now) = window_hush_rv_setup();
+        st.on_window(Some(99));
+        sharing(&mut st, 1000, true);
+        question(&mut st, "t", true, "Удалить старый код?");
+        *now.lock().unwrap() = 1030;
+        sharing(&mut st, 1030, false);
+        st.tick();
+        texts(&st);
+        assert!(st.board.has("t", Class::Question), "не снят");
+        st.on_window(Some(5));
+        let t = texts(&st);
+        assert_eq!(t, ["плуг: Удалить старый код?"]);
+    }
+
+    #[test]
+    fn window_hush_rv1_unsure_final_spoken_after_yes() {
+        let (mut st, now) = window_hush_rv_setup();
+        st.on_window(Some(99));
+        snap(&mut st, serde_json::json!({"at": 1090, "idle_since": 1000}));
+        *now.lock().unwrap() = 1090;
+        st.on_digest(dg("t", Ask::Final, false, "Тесты прошли."));
+        st.tick();
+        let a = texts(&st);
+        *now.lock().unwrap() = 1095;
+        snap(&mut st, serde_json::json!({"at": 1095, "idle_since": 0}));
+        st.tick();
+        let b = texts(&st);
+        assert_eq!(b, ["плуг: Тесты прошли."]);
+    }
+
+    #[test]
+    fn window_hush_rv_ripple_progress_hushed() {
+        let (mut st, _now) = window_hush_rv_setup();
+        st.on_window(Some(99));
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        st.on_digest(dg("t", Ask::Progress, true, "Половина готова."));
+        let all = drain(&mut r);
+        let rp: Vec<_> = all.iter().filter_map(|v| v["ripple"]["tone"].as_str().map(String::from)).collect();
+        let bb = all.iter().filter(|v| v.get("bubble").is_some()).count();
+        assert!(rp.is_empty(), "RVprog ripples {rp:?} bubbles {bb}");
     }
 }

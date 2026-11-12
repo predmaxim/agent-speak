@@ -158,8 +158,8 @@ impl Board {
         queued.chain(self.asked.iter().map(|(q, _)| q.session.clone())).collect()
     }
 
-    pub fn retain_classes(&mut self, keep: &[Class]) {
-        self.items.retain(|i| keep.contains(&i.class));
+    pub fn retain_classes(&mut self, keep: &[Class], sessions: &[String]) {
+        self.items.retain(|i| keep.contains(&i.class) || sessions.contains(&i.session)); // sessions — их новости остаются все
     }
 
     /// Куски следующей пачки; взятое с доски снимается, пусто — сказать нечего. skip — агенты, которыми он занят (в фокусе,
@@ -262,7 +262,8 @@ impl Board {
         let mut done: Vec<&str> = finals.map(|i| i.session.as_str()).collect();
         done.sort_unstable();
         done.dedup();
-        let (d, w) = (done.len(), self.question_sessions().len());
+        let w = self.question_sessions().iter().filter(|s| !skip.contains(s)).count(); // skip — и вопросы (заглушённые)
+        let d = done.len();
         let mut parts = Vec::new();
         if d > 0 {
             parts.push(format!("{d} {} {}", plural(d, ["проект", "проекта", "проектов"]), plural(d, ["закончил", "закончили", "закончили"])));
@@ -613,7 +614,7 @@ mod tests {
         b.push(n("a", Class::Final, "A.", 1));
         b.push(n("q", Class::Question, "Q?", 1));
         b.retain_sessions(|s| s != "gone");
-        b.retain_classes(&[Class::Restore, Class::Question]); // agents_voice выключен
+        b.retain_classes(&[Class::Restore, Class::Question], &[]); // agents_voice выключен
         assert_eq!(tk(&mut b, 10, None).unwrap(), "Q?");
         b.answered("q");
         assert_eq!(tk(&mut b, 11, None), None);
