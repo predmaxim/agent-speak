@@ -1568,6 +1568,8 @@ impl State {
         }
         self.oma.state = "off".into();
         self.oma.talking = false;
+        // её слуха нет; новая начинает строку ear с этих же пустых значений
+        (self.oma.ear_in, self.oma.listen_until, self.oma.listen_secs) = (String::new(), None, 0.0);
         self.listen_sent = false; // ответа на listen от упавшей не будет
         self.hold(false);
         self.purge();
@@ -3175,6 +3177,11 @@ mod tests {
         assert_eq!((v["ear_in"].as_str(), v["listen_until"].as_f64(), v["listen_secs"].as_f64()), (Some("alsa_input.pci"), Some(1794812345.2), Some(20.0)));
         st.on_msg(Msg::Ear { ear_in: String::new(), until: None, secs: 0.0 });
         assert!(next(&mut r)["listen_until"].is_null(), "заговорил или слух закрыт — дуги нет");
+        // упала посреди слушания — её слуха нет: новая Ома начинает с тех же пустых значений, что и служба
+        st.on_msg(Msg::Ear { ear_in: "alsa_input.pci".into(), until: Some(1794812345.2), secs: 20.0 });
+        st.oma_down();
+        let v = serde_json::from_str::<serde_json::Value>(&st.status_line()).unwrap();
+        assert_eq!((v["ear_in"].as_str(), v["listen_until"].is_null(), v["listen_secs"].as_f64()), (Some(""), true, Some(0.0)));
     }
 
     #[test]
