@@ -2269,7 +2269,9 @@ def test_order_filler_does_not_claim_delivery():
     # слово звучит при вызове инструмента, до проверки «да, передай»: «Передаю агенту» обещало бы то, чего ещё нет
     for name in ("mcp__oma__tell", "mcp__oma__launch"):
         said = [a[1] for a in _thinking("передай агенту почты").tool(name) if a[0] == "say"]
-        assert said and not any(w in said[0] for w in ("Передаю", "Запускаю")), said
+        assert said and said[0] in FILLERS[name], said
+        for v in FILLERS[name]:  # варианты звучат по кругу — ни один не обещает доставку
+            assert not any(w in v for w in ("Передаю", "Запускаю", "Передала", "Запустила")), v
 
 
 def test_thinking_first_says_a_word():
@@ -3117,6 +3119,29 @@ def test_are_you_there_echo_judged_by_its_own_question():
         cv.phrase("Да, тут.", 2)
         clk.t += SEND_PAUSE
         assert ("presence", "here") in cv.tick(), sound_first
+
+
+def _here_variants():
+    """Варианты «Ты тут?» — из таблицы службы (src/phrases.rs, HERE): одна правда на двоих."""
+    import re
+    rs = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "phrases.rs"), encoding="utf-8").read()
+    return re.findall(r'"([^"]*)"', re.search(r"pub const HERE: &\[&str\] = &\[(.*?)\];", rs).group(1))
+
+
+def test_every_are_you_there_variant_hears_the_answer_under_its_echo():
+    # ответ, начатый, пока вопрос ещё звучит из динамиков, — не эхо: слов ответа в самом вопросе нет (кроме «тут»)
+    variants = _here_variants()
+    assert len(variants) == 3 and HERE in variants
+    for v in variants:
+        for answer in ("да, тут", "давай", "да, рассказывай"):
+            clk, cv = _conv()
+            cv.echo = True
+            cv.listen(20, "here", v)
+            cv.audio(True)
+            cv.speech_start(1)
+            cv.phrase(answer, 1)
+            clk.t += SEND_PAUSE
+            assert ("presence", "here") in cv.tick(), (v, answer)
 
 
 def test_are_you_there_window_is_not_cut_by_echo_or_room_talk():

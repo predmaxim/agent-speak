@@ -1115,8 +1115,10 @@ impl State {
         acc.push_str(text);
     }
 
-    /// Задание на пересказ; сессии не из реестра (не пользователя) не пересказываем.
+    /// Задание на пересказ; сессии не из реестра (не пользователя) не пересказываем. fallback — фраза без модели;
+    /// у Ask::Final её всегда ставит круг DONE, вызывающий передаёт None.
     fn ask(&mut self, session: &str, ask: Ask, text: &str, fallback: Option<String>) {
+        debug_assert!(ask != Ask::Final || fallback.is_none(), "запасную фразу итога ставит круг DONE");
         if !self.cfg.agents_voice {
             return; // «Следить за агентами» выключено: модель не зовём
         }
