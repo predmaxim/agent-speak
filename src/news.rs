@@ -292,8 +292,22 @@ impl Board {
         self.items.iter().filter(|i| i.class == Class::Final).count()
     }
 
-    pub fn take_finals(&mut self) -> Vec<News> {
-        self.drain(|i| i.class == Class::Final)
+    /// Итоги на доске, кроме сессий except.
+    pub fn take_finals(&mut self, except: &[String]) -> Vec<News> {
+        self.drain(|i| i.class == Class::Final && !except.contains(&i.session))
+    }
+
+    /// Пользователь вернулся: итог сессии с готовым recap агента (of → фраза) звучит им — своей фразой, как важный,
+    /// а не именем в пачке. Сессии с recap — в ответ: сводке Haiku их итоги не нужны.
+    pub fn recap(&mut self, of: impl Fn(&str) -> Option<String>) -> Vec<String> {
+        let mut got = Vec::new();
+        for i in self.items.iter_mut().filter(|i| i.class == Class::Final && i.session != SUMMARY) {
+            if let Some(say) = of(&i.session) {
+                (i.say, i.important) = (say, true);
+                got.push(i.session.clone());
+            }
+        }
+        got
     }
 
     #[cfg(test)]
@@ -789,6 +803,30 @@ mod tests {
         b.push(with("d", "site: выкатка готова, нужна проверка.", 6, true, git(2, 0)));
         assert_eq!(sp(&mut b, 20).unwrap(), "omarchy-mail: нужно решить, куда пушить. Не закоммичен 1 файл. site: выкатка готова, нужна проверка. \
             Закончили ещё: datebook, agent-speak. В agent-speak не закоммичены 3 файла.", "одна фраза на репозиторий");
+    }
+
+    #[test]
+    fn recap_speaks_its_own_phrase_and_stays_out_of_the_summary() {
+        let board = || {
+            let mut b = Board::default();
+            b.push(n("a", Class::Final, "datebook: готово.", 1));
+            b.push(n("b", Class::Final, "agent-speak: эхо починено.", 2));
+            b.push(n("c", Class::Final, "omarchy-mail: тесты зелёные.", 3));
+            b.push(n("q", Class::Question, "site: куда пушить?", 4));
+            b
+        };
+        let recap = |s: &str| (s != "c").then(|| format!("Чиним {s}."));
+        let mut b = board();
+        assert_eq!(b.recap(recap), ["a", "b"], "вопрос не трогается");
+        assert_eq!(sp(&mut b, 10).unwrap(), "site: куда пушить?");
+        b.answered("q");
+        b.asked = None;
+        assert_eq!(sp(&mut b, 20).unwrap(), "datebook: Чиним a. agent-speak: Чиним b. Закончил ещё: omarchy-mail.", "recap — своей фразой");
+        let mut b = board();
+        let got = b.recap(recap);
+        let rest: Vec<String> = b.take_finals(&got).iter().map(News::line).collect();
+        assert_eq!(rest, ["omarchy-mail: тесты зелёные."], "на сводку — только итоги без recap");
+        assert_eq!(b.finals(), 2);
     }
 
     #[test]
