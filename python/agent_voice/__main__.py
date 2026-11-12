@@ -11,7 +11,7 @@ import sys
 import time
 import traceback
 
-from . import link, memory, wake
+from . import earlog, link, memory, wake
 from .context import MIC_WATCH, foreign_capture, locked, mic_outputs, muted, on_ac
 from .conversation import Conversation, gendered
 from .orders import Orders
@@ -310,9 +310,11 @@ class Oma:
                 # сверка — с тем, что вошло в черновик: обращение «Ома» Conversation.phrase срезает
                 self.utter.append(pcm if c.draft.endswith(strip_wake(ev[1]).strip()) else None)
                 self._prehear()
+            verdict = "принята" if c.draft != before else ("эхо" if ev[2] == c.echo_n else "не принята")
             if ev[1].strip():  # без текста: в нём бывает чужой разговор в комнате
-                verdict = "принята" if c.draft != before else ("эхо" if ev[2] == c.echo_n else "не принята")
                 print(f"agent_voice: слух: фраза {len(ev[1].split())} сл., {verdict}", file=sys.stderr, flush=True)
+            earlog.verdict(ev[2], verdict=verdict, draft=c.draft, state=c.state, her_words=c.said[-300:],
+                           window=(c.window or {}).get("kind"), started_under_her_voice=ev[2] == c.echo_n)
             await self.act(acts + c.tick())  # срок отправки уже настал (Smart Turn уверен) — не ждать тика (до 0,2 с)
         elif kind == "tick":
             await self.act(c.tick())
@@ -420,6 +422,7 @@ class Oma:
         except Exception as e:
             print(f"agent_voice: реплика целиком: {e!r}", file=sys.stderr, flush=True)
             return text
+        earlog.whole(text, whole)
         if whole and whole != text:  # сам текст в журнал не пишем: в нём бывает чужой разговор в комнате
             print(f"agent_voice: реплика целиком распознана иначе, чем по кускам ({len(whole)} и {len(text)} знаков)", file=sys.stderr, flush=True)
         return whole or text

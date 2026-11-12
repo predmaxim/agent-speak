@@ -4532,3 +4532,32 @@ def test_gender_change_reconnects_brain_with_fresh_prompt(monkeypatch, tmp_path)
     assert len(made) == 2, "переподключение — один раз, на смене рода"
     assert "я бы не стала:" in made[0].opts.system_prompt and "я бы не стал:" in made[1].opts.system_prompt
     assert len(made[1].sent) == 2, "вторая и третья реплики — новым подключением"
+
+
+def test_ear_log_is_off_without_its_dir_and_keeps_last_ten(monkeypatch, tmp_path):
+    # диагностика слуха (разрешил пользователь 2026-11-12): каталога нет — ничего не пишется; есть — кусок, звук до него,
+    # решение и реплика целиком; держит последние 10
+    import json, os, wave
+    from agent_voice import earlog
+    d = tmp_path / "ear"
+    monkeypatch.setattr(earlog, "DIR", str(d))
+    monkeypatch.setattr(earlog, "_checked", -10.0)
+    monkeypatch.setattr(earlog, "_last", {})
+    earlog._ring.clear()
+    earlog.frame(b"\0" * 1024)
+    earlog.phrase(1, b"\0" * 3200, "да")
+    assert not d.exists() and not earlog._ring, "выключено — ни файла, ни звука в памяти"
+    d.mkdir()
+    monkeypatch.setattr(earlog, "_checked", -10.0)
+    for _ in range(40):
+        earlog.frame(b"\1" * 1024)
+    for n in range(1, 13):
+        earlog.phrase(n, b"\0" * 3200, f"фраза {n}")
+    dirs = sorted(os.listdir(d))
+    assert len(dirs) == 10 and dirs[0].endswith("-000003") and dirs[-1].endswith("-000012"), "последние 10, старые удалены"
+    earlog.verdict(12, verdict="эхо", her_words="Скажи: да, передай.")
+    earlog.whole("да передай", "Да, передай.")
+    info = json.load(open(d / dirs[-1] / "info.json"))
+    assert info["text"] == "фраза 12" and info["verdict"] == "эхо" and info["sent_whole"] == "Да, передай."
+    with wave.open(str(d / dirs[-1] / "stream.wav")) as w:
+        assert w.getframerate() == 16000 and w.getnframes() == 40 * 512

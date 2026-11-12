@@ -10,6 +10,7 @@ import time
 
 import numpy as np
 
+from . import earlog
 from .context import MIC_EVENT, OWN_NODE, mic_target, muted
 from .segment import Segmenter
 from .wake import HOTWORDS, Waker, named
@@ -231,6 +232,7 @@ class Ear:
             try:
                 model = await self.whisper.get()
                 text = await asyncio.to_thread(transcribe, model, pcm)
+                earlog.phrase(n, pcm, text)
                 self.audio[n] = pcm  # реплику из нескольких фраз Ома при отправке распознаёт целиком
                 await self.out.put(("phrase", text, n))
             except Exception as e:
@@ -287,6 +289,7 @@ class Ear:
                     a = await aec.stdout.readexactly(FRAME * 2)
                     if self.speaking:
                         b = a
+                earlog.frame(b)  # диагностика слуха: каталога нет — ничего
                 if self.waking != mode:  # побудка ↔ разговор: начатая в другом режиме речь не тянется
                     seg, mode = Segmenter(), self.waking
                     at, self._replay = self._replay, None
