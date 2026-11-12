@@ -1,8 +1,9 @@
 """Задания и ответы агентам от Омы: голосом ничего не уходит без подтверждения отдельной репликой — обычное после
 «да, передай», опасное после «подтверждаю …». Совпадение проверяет код по распознанному тексту, не модель: модель
 могла бы «услышать» подтверждение в ослышке или принять за него «продолжай» (так и было 2026-10-29).
-Передаёт CLI `agent-speak tell | launch | projects` — исход мозгу нужен сразу."""
+Передаёт CLI `agent-speak tell | launch | projects | later` — исход мозгу нужен сразу."""
 import asyncio
+import json
 import os
 import re
 import time
@@ -156,7 +157,7 @@ class Orders:
         ok, out = await self.run(*args)
         if not ok:
             return f"Не передано: {out}. Скажи пользователю коротко, что не вышло."
-        return ok_reply + (f" Нажат пункт «{out}» — назови его пользователю." if out else "")  # tell: метка с экрана
+        return ok_reply + (f" Нажат пункт «{out}» — назови его пользователю." if out and args[0] == "tell" else "")  # tell: метка с экрана
 
     async def tell(self, entry, text, gist, option=0):
         n, p, ask = self.n, entry["project"], asked(entry)
@@ -185,6 +186,47 @@ class Orders:
                                  f"Агент запущен в проекте {name}. Скажи пользователю одной фразой: "
                                  f"«Запустила агента в проекте {name}: …» — смысл задания.",
                                  f"Запустить агента в проекте {name}: {gist}?", "запускай", f"Запущу агента в проекте {name}: «{task}»")
+
+    async def later_list(self):
+        """Отложенные поручения службы: (список, "") или (None, ошибка)."""
+        ok, out = await self.run("later", "list")
+        if not ok:
+            return None, out
+        try:
+            return json.loads(out), ""
+        except ValueError:
+            return None, "служба ответила не списком"
+
+    async def later_tell(self, entry, text, gist):
+        """Передать агенту, когда он закончит ход: голосом — тот же код подтверждения, что у tell («да, передай», опасное —
+        «подтверждаю …»); одно подтверждение — одна передача позже, Ома скажет о ней вслух. Свободному и второе поручение
+        тому же агенту — отказ до вопроса: подтверждать зря нечего."""
+        n, p = self.n, entry["project"]
+        if entry.get("state") != "working":
+            return f"Не поставлено: {p} сейчас не работает — передай сейчас через tell."
+        listed, err = await self.later_list()
+        if listed is None:
+            return f"Не поставлено: {err}. Скажи пользователю коротко, что не вышло."
+        old = next((o for o in listed if o.get("kind") == "tell" and o.get("agent") == entry["id"]), None)
+        if old:
+            return (f"Не поставлено: у {p} уже есть отложенное «{old.get('gist', '')}». Скажи пользователю; отменить его можно "
+                    "в окне или later cancel.")
+        return await self._order(("later", "tell", entry["id"], text, gist), self.gate(text), n,
+                                 f"Передам проекту {p}, когда закончит: {gist}.",
+                                 f"Поставлено: передам проекту {p}, когда он закончит ход. Скажи пользователю одной фразой: "
+                                 f"«Передам, когда закончит: …» — смысл, не текст задания.",
+                                 f"Когда {p} закончит, передать: {gist}?", "передай", f"Передам проекту {p}, когда закончит: «{text}»")
+
+    async def later_checks(self, path, pr):
+        """Сказать, когда пройдут (или упадут) проверки PR в папке path: агенту ничего не пишется — без подтверждения."""
+        ok, out = await self.run("later", "checks", path, str(pr))
+        if not ok:
+            return f"Не поставлено: {out}. Скажи пользователю коротко."
+        return f"Поставлено: скажу, когда кончатся проверки PR {pr} в {_name(path)}."
+
+    async def later_cancel(self, id):
+        ok, out = await self.run("later", "cancel", id)
+        return "Отменено." if ok else f"Не отменено: {out}."
 
     async def projects(self, where="orca"):
         ok, out = await self.run("projects", where)
@@ -215,6 +257,6 @@ class Orders:
             return None
         self.pending = None
         ok, out = await self.run(*p["args"])
-        said = (p["said"] + (f" Нажала «{out}»." if out else "")) if ok else f"Не вышло: {out}."  # tell: метка с экрана
+        said = (p["said"] + (f" Нажала «{out}»." if out and p["args"][0] == "tell" else "")) if ok else f"Не вышло: {out}."  # tell: метка с экрана
         self.note = f"(Пользователь подтвердил голосом, Ома сама: {said}) "
         return said
