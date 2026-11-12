@@ -1029,6 +1029,16 @@ Item {
                 }
               }
 
+              SettingRow {
+                key: "orb_satellites"
+                label: root.tr("Agent satellites")
+                ToggleSwitch {
+                  checked: root.speech.orb_satellites === true
+                  foreground: root.fg
+                  onToggled: root.step("orb_satellites", 1)
+                }
+              }
+
               PanelSectionHeader {
                 leftPadding: Style.spacing.rowPaddingX
                 topPadding: Style.space(14)

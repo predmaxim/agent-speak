@@ -3,7 +3,7 @@ const fs = require("fs")
 const assert = require("assert")
 const load = (file, names) =>
   new Function(fs.readFileSync(__dirname + "/" + file, "utf8").replace(".pragma library", "") + "; return { " + names + " }")()
-const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken")
+const M = load("Model.js", "OFFLINE, SAMPLE, parseLine, orbMode, headItems, orbTip, pushBubble, expire, dismiss, ago, stateLabel, chatApply, corner, omaCmd, HOURS, cmd, set, say, sections, OLDEST_NEAR, OLDEST_FAR, maskAlpha, chatFor, SETTINGS_SECTIONS, SETTINGS_ROWS, settingStep, parsePos, place, withDraft, tone, TONE_ALPHA, escWanted, view, plainCopy, rowKey, rowIndex, omaUp, askable, taken, dotKind, byUrgency, peekRows, PEEK_MAX, satSlots, SAT_MAX, asks, agentById")
 const I = load("I18n.js", "TABLES, translator")
 const ru = I.translator("ru")
 const st = { running: true, oma: "idle", waiting: 0, quiet: false }
@@ -200,7 +200,7 @@ assert.strictEqual(M.taken("", { key: "chat:1", role: "me", text: "" }), false)
 
 // Settings rows: choices go round, switches flip, quiet now overrides the schedule
 const cfg = { speaker: "xenia", rate: "x-fast", quiet: false, quiet_schedule: true }
-assert.strictEqual(M.SETTINGS_ROWS.length, 8)
+assert.strictEqual(M.SETTINGS_ROWS.length, 9)
 assert.deepStrictEqual(M.settingStep("speaker", cfg, -1), { key: "speaker", value: "eugene", sample: true })
 assert.deepStrictEqual(M.settingStep("rate", cfg, 1), { key: "rate", value: "x-slow", sample: true })
 assert.strictEqual(M.settingStep("rate", Object.assign({}, cfg, { rate: "" }), 1).value, "x-slow")
@@ -209,6 +209,7 @@ assert.strictEqual(M.settingStep("quiet_now", Object.assign({}, cfg, { quiet: tr
 assert.deepStrictEqual(M.settingStep("quiet_schedule", cfg, 1), { key: "quiet_schedule", value: false, sample: false })
 assert.strictEqual(M.settingStep("quiet_hours", cfg, 1), null)
 assert.deepStrictEqual(M.settingStep("orb_over_fullscreen", Object.assign({}, cfg, { orb_over_fullscreen: true }), 1), { key: "orb_over_fullscreen", value: false, sample: false })
+assert.deepStrictEqual(M.settingStep("orb_satellites", Object.assign({}, cfg, { orb_satellites: true }), 1), { key: "orb_satellites", value: false, sample: false })
 assert.deepStrictEqual(M.settingStep("progress_digest", cfg, 1), { key: "progress_digest", value: true, sample: false })
 assert.deepStrictEqual(M.settingStep("agents_voice", Object.assign({}, cfg, { agents_voice: true }), 1), { key: "agents_voice", value: false, sample: false })
 // every row steps but the hours (two dropdowns, the window walks them)
@@ -224,6 +225,49 @@ const page = winQml.slice(winQml.indexOf("id: settingsPage"), winQml.indexOf("co
 const drawn = [...page.matchAll(/text: root\.tr\("([^"]+)"\)\.toUpperCase\(\)|\bkey: "(\w+)"/g)].map(m => m[1] ? "#" + m[1] : m[2])
 assert.deepStrictEqual(drawn, [].concat(...M.SETTINGS_SECTIONS.filter(s => s.rows.length).map(s => (s.title ? ["#" + s.title] : []).concat(s.rows))))
 assert.ok(!/\brow:\s*\d|cursor === \d/.test(page), "a settings row by its number")
+
+// The orb's hover card: an agent per row, the most urgent first — waiting (the longest waiting on top), the watch's
+// word, working, done, idle (in 3–5 the freshest on top); its second line: the question's first line, the word, the status
+const ag = (id, state, since, more) => Object.assign({ id, state, since, title: "", project: "p-" + id, status: "s-" + id, health: "", ask: "" }, more)
+const crowd = [ag("i", "idle", 10), ag("d1", "done", 20), ag("w1", "working", 30), ag("q2", "waiting", 50, { ask: "\nКакой вид: плитка или список?\n\nЖдёт ответа на AskUserQuestion" }),
+  ag("h", "working", 5, { health: "завис" }), ag("w2", "working", 40, { title: "Astral.Edo" }), ag("q1", "waiting", 45)]
+assert.deepStrictEqual(M.byUrgency(crowd).map(a => a.id), ["q1", "q2", "h", "w2", "w1", "d1", "i"])
+assert.deepStrictEqual(crowd.map(M.dotKind), ["idle", "done", "working", "waiting", "health", "working", "waiting"])
+assert.strictEqual(M.dotKind(ag("x", "waiting", 0, { health: "завис" })), "waiting")   // the question's red stays first
+const peek = M.peekRows(crowd, 45 + 15 * 60)
+assert.strictEqual(peek.more, 0)
+assert.deepStrictEqual(peek.rows.map(r => [r.id, r.dot, r.name, r.text]), [
+  ["q1", "waiting", "p-q1", "s-q1"], ["q2", "waiting", "p-q2", "Какой вид: плитка или список?"], ["h", "health", "p-h", "завис"],
+  ["w2", "working", "Astral.Edo", "s-w2"], ["w1", "working", "p-w1", "s-w1"], ["d1", "done", "p-d1", "s-d1"], ["i", "idle", "p-i", "s-i"]])
+assert.deepStrictEqual(peek.rows[0].ago, ["%1 min", 15])
+assert.strictEqual(M.peekRows([ag("x", "working", 0, { status: "я".repeat(80) })], 0).rows[0].text.length, 60)
+const many = Array.from({ length: 11 }, (_, i) => ag("a" + i, "working", i))
+assert.deepStrictEqual([M.peekRows(many, 0).rows.length, M.peekRows(many, 0).more], [M.PEEK_MAX, 3])
+assert.deepStrictEqual(M.peekRows([], 0), { rows: [], more: 0 })
+// a QML signal's sequence (Array.isArray false) is still the list
+assert.deepStrictEqual(M.byUrgency({ 0: crowd[0], length: 1 }).map(a => a.id), ["i"])
+
+// Satellites: an agent keeps its place while it lives, a new one takes the first free place (the most urgent first),
+// a gone one frees its own; over SAT_MAX — the most urgent SAT_MAX - 1 and the hollow «more» ("+") last
+assert.strictEqual(M.SAT_MAX, 5)
+let sl = M.satSlots([], [ag("a", "working", 1), ag("b", "waiting", 2)], 5)
+assert.deepStrictEqual(sl, ["b", "a", "", "", ""])
+sl = M.satSlots(sl, [ag("a", "working", 1), ag("c", "working", 3)], 5)
+assert.deepStrictEqual(sl, ["c", "a", "", "", ""])
+sl = M.satSlots(sl, [ag("a", "waiting", 1), ag("c", "working", 3), ag("d", "done", 4)], 5)
+assert.deepStrictEqual(sl, ["c", "a", "d", "", ""], "a question does not move a dot")
+const six = ["a", "c", "d", "e", "f", "g"].map((id, i) => ag(id, i === 5 ? "waiting" : "working", i))
+sl = M.satSlots(sl, six, 5)
+assert.deepStrictEqual(sl, ["g", "f", "d", "e", "+"], "«more»: the four most urgent (g waits, then the freshest), d holds its place")
+assert.deepStrictEqual(M.satSlots(sl, six.slice(0, 3), 5), ["c", "a", "d", "", ""])
+assert.deepStrictEqual(M.satSlots(null, [], 5), ["", "", "", "", ""])
+assert.strictEqual(M.agentById(crowd, "h").health, "завис")
+assert.strictEqual(M.agentById(crowd, ""), null)
+// A satellite flashes when its own agent turns to waiting — not a new agent, not one that waited already
+assert.strictEqual(M.asks("a:working", "a:waiting"), true)
+assert.strictEqual(M.asks("a:health", "a:waiting"), true)
+for (const [was, key] of [["", "a:waiting"], ["b:working", "a:waiting"], ["a:waiting", "a:waiting"], ["a:waiting", "a:working"], ["a:working", ""]])
+  assert.strictEqual(M.asks(was, key), false, was + " -> " + key)
 
 // Russian plural forms
 assert.deepStrictEqual([1, 2, 5, 11, 12, 21, 22, 25, 111, 0].map(n => ru("%1 agents", n)),
