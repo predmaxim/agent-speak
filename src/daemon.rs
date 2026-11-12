@@ -2029,8 +2029,8 @@ mod tests {
         let mut r = sub(&mut st);
         st.on_acted(mux::Done { session: "a".into(), what: What::Interrupt, err: None });
         let b = bubbles(&mut r);
-        assert_eq!((b.len(), b[0]["agent"].as_str(), b[0]["text"].as_str()), (1, Some("a"), Some("a: сабагент завис — прервала, агент перезапустит.")));
-        assert_eq!(st.board.take(2000, None).unwrap(), "a: сабагент завис — прервала, агент перезапустит.");
+        assert_eq!((b.len(), b[0]["agent"].as_str(), b[0]["text"].as_str()), (1, Some("a"), Some("a: прервала зависшего сабагента, агент запустит его заново.")));
+        assert_eq!(st.board.take(2000, None).unwrap(), "a: прервала зависшего сабагента, агент запустит его заново.");
     }
 
     #[test]
@@ -2146,7 +2146,7 @@ mod tests {
         st.watch_tick();
         let lines = drain(&mut r);
         assert!(lines.iter().any(|v| v["running"] == true && v["trouble"] == 1), "{lines:?}");
-        assert_eq!(st.board.take(2000, None).unwrap(), "a: агент завис посреди push — не трогаю, посмотри сам.");
+        assert_eq!(st.board.take(2000, None).unwrap(), "a: агент висит на опасном шаге — push; не трогаю, загляни, пожалуйста.");
     }
 
     #[test]

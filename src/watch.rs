@@ -3,6 +3,7 @@
 
 use crate::agents::State;
 use crate::mux::{Job, Key, Pane, Step};
+use crate::phrases::{self, Rotor};
 use crate::source::claude::ApiError;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -131,6 +132,7 @@ pub struct Watch {
     last: HashMap<String, Facts>,
     limit_said: Option<u64>, // о кончившемся лимите с этим сбросом уже сказано
     hung_after: u64,
+    rotor: Rotor, // фразы пользователю — варианты по кругу
 }
 
 fn say(session: &str, text: String, urgent: bool) -> Vec<Act> {
@@ -174,7 +176,7 @@ impl Watch {
                 t.active = f.active_at;
                 t.calm();
             }
-            acts.extend(agent(t, &mut self.limit_said, ctx, &f));
+            acts.extend(agent(t, &mut self.limit_said, &mut self.rotor, ctx, &f));
             self.last.insert(f.id.clone(), f);
         }
         acts
@@ -216,22 +218,22 @@ impl Watch {
         let p = t.project.clone();
         if err.is_some() {
             (t.alarm, t.alarm_at, t.revived) = (true, now, 0);
-            return Some(Act::Say { session: session.into(), text: format!("{p}: написать агенту не вышло — посмотри сам."), urgent: true });
+            return Some(Act::Say { session: session.into(), text: format!("{p}: сообщение агенту не ушло — {}.", self.rotor.next(phrases::END)), urgent: true });
         }
         let text = match what {
             What::Kill => {
                 t.killed_at = now;
                 return None;
             }
-            What::Resume if t.ours => "агент завис — перезапустила.",
-            What::Interrupt if t.sub => "сабагент завис — прервала, агент перезапустит.",
-            What::Interrupt => "агент завис — прервала и попросила продолжить.",
-            What::Resume => "агент закрылся посреди хода — перезапустила.",
-            What::Wake => "лимит сброшен — разбудила агента.",
-            What::Continue => "оборвалась связь — попросила агента продолжить.",
-            What::Nudge => "помощник агента молчит — написала агенту.",
+            What::Resume if t.ours => phrases::REVIVED,
+            What::Interrupt if t.sub => phrases::SUB_STOPPED,
+            What::Interrupt => phrases::STOPPED,
+            What::Resume => phrases::RESUMED,
+            What::Wake => phrases::WOKE,
+            What::Continue => phrases::CONTINUED,
+            What::Nudge => phrases::NUDGED,
         };
-        Some(Act::Say { session: session.into(), text: format!("{p}: {text}"), urgent: false })
+        Some(Act::Say { session: session.into(), text: format!("{p}: {}", self.rotor.next(text)), urgent: false })
     }
 
     /// SessionEnd: агент вышел сам — его исчезновение не падение.
@@ -266,7 +268,7 @@ impl Watch {
 }
 
 /// Правила для живого агента по порядку: ошибка API, пора будить, тишина, забытый вопрос.
-fn agent(t: &mut Track, limit_said: &mut Option<u64>, ctx: &Ctx, f: &Facts) -> Vec<Act> {
+fn agent(t: &mut Track, limit_said: &mut Option<u64>, rotor: &mut Rotor, ctx: &Ctx, f: &Facts) -> Vec<Act> {
     let (p, now) = (&f.project, ctx.now);
     // старая ошибка — история: демон перезапустили, агент давно стоит или уже ушёл дальше
     if let Some(e) = f.error.as_ref().filter(|e| e.at != t.err_at && now.saturating_sub(e.at) > ERROR_FRESH) {
@@ -284,7 +286,8 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, ctx: &Ctx, f: &Facts) -> V
                 let key = e.resets_at.unwrap_or(0);
                 if *limit_said != Some(key) && !e.resets_at.is_some_and(|r| r <= now) {
                     *limit_said = Some(key);
-                    let text = e.resets_at.map_or("Кончился лимит Claude.".into(), |r| format!("Кончился лимит Claude, сброс в {}.", clock(r)));
+                    let v = rotor.next(phrases::LIMIT);
+                    let text = e.resets_at.map_or(v.replace(", сброс в {t}", ""), |r| v.replace("{t}", &clock(r)));
                     return say("limit", text, false);
                 }
             }
@@ -298,12 +301,12 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, ctx: &Ctx, f: &Facts) -> V
                         t.net.push(now);
                         return match &f.pane {
                             Some(pane) => run(f, pane, What::Continue, vec![Step::Text(NET.into())]),
-                            None => outside(t, f, now),
+                            None => outside(t, rotor, f, now),
                         };
                     }
                     if !t.net_said {
                         (t.net_said, t.alarm, t.alarm_at) = (true, true, now);
-                        return say(&f.id, format!("{p}: связь с Claude не держится — посмотри сам."), true);
+                        return say(&f.id, format!("{p}: связь с Claude не держится — {}.", rotor.next(phrases::END)), true);
                     }
                     return vec![];
                 }
@@ -316,7 +319,7 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, ctx: &Ctx, f: &Facts) -> V
                     "authentication_failed" | "oauth_org_not_allowed" => "нужен вход в Claude",
                     _ => "неизвестная ошибка",
                 };
-                return say(&f.id, format!("{p}: ошибка API — {what}."), true);
+                return say(&f.id, format!("{p}: {}", rotor.next(phrases::API).replace("{что}", what)), true);
             }
         }
     }
@@ -325,7 +328,7 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, ctx: &Ctx, f: &Facts) -> V
         t.health.clear();
         return match &f.pane {
             Some(pane) => run(f, pane, What::Wake, vec![Step::Text(if doc { WAKE_DOC } else { WAKE }.into())]),
-            None => say(&f.id, format!("{p}: лимит сброшен — разбуди агента сам, он не в herdr или Orca."), false),
+            None => say(&f.id, format!("{p}: лимит сброшен; агент не в herdr и не в Orca — разбуди его, пожалуйста."), false),
         };
     }
     let quiet = now.saturating_sub(f.active_at);
@@ -333,19 +336,19 @@ fn agent(t: &mut Track, limit_said: &mut Option<u64>, ctx: &Ctx, f: &Facts) -> V
     let asks = f.call.as_ref().is_some_and(|c| ASKS_USER.contains(&c["name"].as_str().unwrap_or_default()));
     let running = !f.turn_over || f.helpers > 0;
     if f.state == State::Working && f.active_at > 0 && quiet >= ctx.hung_after && running && t.limited.is_none() && !asks {
-        return hang(t, ctx, f, quiet);
+        return hang(t, rotor, ctx, f, quiet);
     }
     vec![]
 }
 
 /// Агент не в herdr и не в Orca: сделать ничего нельзя — только сказать.
-fn outside(t: &mut Track, f: &Facts, now: u64) -> Vec<Act> {
+fn outside(t: &mut Track, rotor: &mut Rotor, f: &Facts, now: u64) -> Vec<Act> {
     (t.said, t.alarm, t.alarm_at) = (true, true, now);
-    say(&f.id, format!("{}: агент завис, но он не в herdr или Orca — перезапусти сам.", f.project), true)
+    say(&f.id, format!("{}: агент висит вне herdr и Orca, мне его не достать — {}.", f.project, rotor.next(phrases::END)), true)
 }
 
-/// Попыток за час не осталось — сказать пользователю один раз; None — пробовать можно.
-fn spent(t: &mut Track, f: &Facts, now: u64, what: &str) -> Option<Vec<Act>> {
+/// Попыток за час не осталось — сказать пользователю один раз; None — пробовать можно. {конец} в what — хвост END.
+fn spent(t: &mut Track, rotor: &mut Rotor, f: &Facts, now: u64, what: &str) -> Option<Vec<Act>> {
     t.attempts.retain(|&x| now.saturating_sub(x) < ATTEMPTS_WINDOW);
     if t.attempts.len() < ATTEMPTS {
         return None;
@@ -355,11 +358,12 @@ fn spent(t: &mut Track, f: &Facts, now: u64, what: &str) -> Option<Vec<Act>> {
     }
     (t.gave_up, t.alarm, t.alarm_at) = (true, true, now);
     let n = (t.attempts[0] + ATTEMPTS_WINDOW - now).div_ceil(60);
+    let what = what.replace("{конец}", rotor.next(phrases::END));
     Some(say(&f.id, format!("{}: {what}. Через {n} мин попробую снова.", f.project), true))
 }
 
 /// Работает, а событий нет `quiet` секунд: помощники, опасное, лестница Esc → Ctrl+C → перезапуск.
-fn hang(t: &mut Track, ctx: &Ctx, f: &Facts, quiet: u64) -> Vec<Act> {
+fn hang(t: &mut Track, rotor: &mut Rotor, ctx: &Ctx, f: &Facts, quiet: u64) -> Vec<Act> {
     let (p, now, n) = (&f.project, ctx.now, quiet / 60);
     if f.helpers > 0 {
         // помощник бывает сервером и молчит часами: писать агенту — только по вердикту модели «висит»
@@ -370,10 +374,10 @@ fn hang(t: &mut Track, ctx: &Ctx, f: &Facts, quiet: u64) -> Vec<Act> {
                     return vec![];
                 }
                 (t.said, t.alarm, t.alarm_at) = (true, true, now);
-                return say(&f.id, format!("{p}: агент не ответил на просьбу проверить помощника — посмотри сам."), true);
+                return say(&f.id, format!("{p}: агент не ответил про помощника — {}.", rotor.next(phrases::END)), true);
             }
             Ladder::Hung => {
-                if let Some(acts) = spent(t, f, now, "помощник агента снова молчит — посмотри сам") {
+                if let Some(acts) = spent(t, rotor, f, now, "помощник агента снова молчит — {конец}") {
                     return acts;
                 }
                 t.nudged = now;
@@ -390,7 +394,7 @@ fn hang(t: &mut Track, ctx: &Ctx, f: &Facts, quiet: u64) -> Vec<Act> {
         let text = format!("Твой фоновый помощник молчит {n} мин — похоже, завис. Проверь его: завис — останови и перезапусти.");
         return match &f.pane {
             Some(pane) => run(f, pane, What::Nudge, vec![Step::Text(text)]),
-            None => outside(t, f, now),
+            None => outside(t, rotor, f, now),
         };
     }
     t.health = "завис".into();
@@ -400,7 +404,7 @@ fn hang(t: &mut Track, ctx: &Ctx, f: &Facts, quiet: u64) -> Vec<Act> {
                 return vec![];
             }
             t.ladder = Ladder::Killed(now);
-            let Some(pane) = &f.pane else { return outside(t, f, now) };
+            let Some(pane) = &f.pane else { return outside(t, rotor, f, now) };
             return run(f, pane, What::Kill, vec![Step::Key(Key::CtrlC), Step::Pause(400), Step::Key(Key::CtrlC)]);
         }
         Ladder::Killed(at) => {
@@ -408,7 +412,7 @@ fn hang(t: &mut Track, ctx: &Ctx, f: &Facts, quiet: u64) -> Vec<Act> {
                 return vec![];
             }
             (t.said, t.alarm, t.alarm_at) = (true, true, now);
-            return say(&f.id, format!("{p}: агент снова завис — поднять не получилось, посмотри сам."), true);
+            return say(&f.id, format!("{p}: агент снова висит, поднять не вышло — {}.", rotor.next(phrases::END)), true);
         }
         _ => {}
     }
@@ -421,22 +425,22 @@ fn hang(t: &mut Track, ctx: &Ctx, f: &Facts, quiet: u64) -> Vec<Act> {
         (t.said, t.alarm, t.alarm_at) = (true, true, now);
         let tool = f.sub_call.as_ref().and_then(|c| c["name"].as_str()).unwrap_or_default();
         let text = if what == "непонятный вызов" {
-            format!("{p}: сабагент завис на вызове {tool} — не знаю, безопасно ли прервать. Посмотри сам.")
+            format!("{p}: сабагент висит на вызове {tool}, прерывать ли — не знаю; {}.", rotor.next(phrases::END))
         } else {
-            format!("{p}: сабагент завис посреди {what} — не трогаю, посмотри сам.")
+            format!("{p}: сабагент висит на опасном шаге — {what}; не трогаю, {}.", rotor.next(phrases::END))
         };
         return say(&f.id, text, true);
     }
     if let Some(what) = f.call.as_ref().and_then(danger) {
         (t.said, t.alarm, t.alarm_at) = (true, true, now);
         let text = if what == "непонятный вызов" {
-            format!("{p}: агент завис на вызове {name} — не знаю, безопасно ли прервать. Посмотри сам.")
+            format!("{p}: агент висит на вызове {name}, прерывать ли — не знаю; {}.", rotor.next(phrases::END))
         } else {
-            format!("{p}: агент завис посреди {what} — не трогаю, посмотри сам.")
+            format!("{p}: агент висит на опасном шаге — {what}; не трогаю, {}.", rotor.next(phrases::END))
         };
         return say(&f.id, text, true);
     }
-    if let Some(acts) = spent(t, f, now, "агент снова завис — поднять не получилось, посмотри сам") {
+    if let Some(acts) = spent(t, rotor, f, now, "агент снова висит, поднять не вышло — {конец}") {
         return acts;
     }
     let sub = matches!(name, "Agent" | "Task");
@@ -455,7 +459,7 @@ fn hang(t: &mut Track, ctx: &Ctx, f: &Facts, quiet: u64) -> Vec<Act> {
         }
     }
     // вне мультиплексора — только сказать, и лишь когда зависание подтверждено
-    let Some(pane) = &f.pane else { return outside(t, f, now) };
+    let Some(pane) = &f.pane else { return outside(t, rotor, f, now) };
     t.attempts.push(now);
     (t.sub, t.ladder) = (sub, Ladder::Interrupted(now));
     let text = if sub {
@@ -573,6 +577,23 @@ mod tests {
     }
 
     #[test]
+    fn phrases_go_round_in_order() {
+        // одна и та же беда у многих агентов (сброс лимита) — варианты по кругу; хвост срочных — свой круг на всех
+        let mut w = Watch::default();
+        for s in ["a", "b", "c", "d"] {
+            w.tracks.entry(s.into()).or_default().project = "p".into();
+        }
+        let mut say = |s: &str, what, err: Option<&str>| match w.done(s, what, err.map(String::from), 1) {
+            Some(Act::Say { text, .. }) => text,
+            other => panic!("{other:?}"),
+        };
+        let woke: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| say(s, What::Wake, None)).collect();
+        assert_eq!(woke, ["разбудила агента: лимит сброшен.", "лимит сброшен, агента разбудила.", "после сброса лимита разбудила агента.", "разбудила агента: лимит сброшен."].map(|t| format!("p: {t}")));
+        assert_eq!(say("a", What::Nudge, Some("нет терминала")), "p: сообщение агенту не ушло — загляни, пожалуйста.");
+        assert_eq!(say("b", What::Nudge, Some("нет терминала")), "p: сообщение агенту не ушло — нужна твоя помощь.");
+    }
+
+    #[test]
     fn crash_while_user_away_resumes_in_its_shell() {
         let mut w = Watch::default();
         assert!(w.check(&ctx(100, 0), vec![f("a")], |_| true, |_| false).is_empty());
@@ -614,7 +635,7 @@ mod tests {
         let mut w = Watch::default();
         let a = Facts { call: Some(json!({"name": "Bash", "input": {"command": "git push origin main"}})), ..f("a") };
         let acts = w.check(&ctx(800, 999), vec![a.clone()], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент завис посреди push — не трогаю, посмотри сам."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент висит на опасном шаге — push; не трогаю, загляни, пожалуйста."), "{acts:?}");
         assert!(w.check(&ctx(900, 999), vec![a], |_| true, |_| false).is_empty(), "один раз");
         assert_eq!((w.trouble(), w.health("a").as_str()), (1, "завис"));
     }
@@ -624,7 +645,7 @@ mod tests {
         let mut w = Watch::default();
         let a = Facts { call: Some(json!({"name": "mcp__db__delete_row", "input": {}})), ..f("a") };
         let acts = w.check(&ctx(800, 999), vec![a], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text.contains("delete_row") && text.contains("безопасно ли прервать")), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент висит на вызове mcp__db__delete_row, прерывать ли — не знаю; загляни, пожалуйста."), "{acts:?}");
     }
 
     #[test]
@@ -639,7 +660,7 @@ mod tests {
         let j = run_of(&acts[0]).unwrap();
         assert_eq!((j.what, &j.steps[..2]), (What::Interrupt, &[Step::Key(Key::Esc), Step::Pause(1500)][..]));
         assert!(text_of(j).starts_with("Ход завис на 14 мин, я прервала его."), "{}", text_of(j));
-        assert!(matches!(w.done("a", What::Interrupt, None, 861), Some(Act::Say { urgent: false, text, .. }) if text == "p: агент завис — прервала и попросила продолжить."));
+        assert!(matches!(w.done("a", What::Interrupt, None, 861), Some(Act::Say { urgent: false, text, .. }) if text == "p: прервала зависший ход, попросила продолжить."));
         assert!(w.check(&ctx(1000, 999), vec![a.clone()], |_| true, |_| false).is_empty());
         assert_eq!(run_of(&w.check(&ctx(861 + 360, 999), vec![a], |_| true, |_| false)[0]).unwrap().what, What::Kill);
     }
@@ -676,7 +697,7 @@ mod tests {
         }
         let a = Facts { call: Some(json!({"name": "Agent", "input": {}})), active_at: t, ..f("a") };
         let acts = w.check(&ctx(t + 800, 999), vec![a.clone()], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент снова завис — поднять не получилось, посмотри сам. Через 20 мин попробую снова."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент снова висит, поднять не вышло — загляни, пожалуйста. Через 20 мин попробую снова."), "{acts:?}");
         assert_eq!(w.trouble(), 1);
         assert!(w.check(&ctx(4400, 999), vec![a.clone()], |_| true, |_| false).is_empty(), "сказано один раз, попытки ещё в окне");
         assert_eq!(run_of(&w.check(&ctx(4401, 999), vec![a], |_| true, |_| false)[0]).unwrap().what, What::Interrupt, "первая попытка вышла из часа — не сдаёмся");
@@ -693,7 +714,7 @@ mod tests {
         let j = run_of(&acts[0]).unwrap();
         assert_eq!((j.what, &j.steps[..]), (What::Nudge, &[Step::Text("Твой фоновый помощник молчит 14 мин — похоже, завис. Проверь его: завис — останови и перезапусти.".into())][..]));
         assert!(w.check(&ctx(900, 0), vec![a], |_| true, |_| false).is_empty());
-        assert!(matches!(w.done("a", What::Nudge, None, 901), Some(Act::Say { text, .. }) if text == "p: помощник агента молчит — написала агенту."));
+        assert!(matches!(w.done("a", What::Nudge, None, 901), Some(Act::Say { text, .. }) if text == "p: написала агенту: его помощник молчит."));
     }
 
     #[test]
@@ -713,7 +734,7 @@ mod tests {
         let acts = w.check(&ctx(800, 999), vec![a], |_| true, |_| false);
         let j = run_of(&acts[0]).unwrap();
         assert_eq!(text_of(j), "Сабагент висел 13 мин, я прервала ход. Перезапусти его, если он ещё нужен.");
-        assert!(matches!(w.done("a", What::Interrupt, None, 801), Some(Act::Say { text, .. }) if text == "p: сабагент завис — прервала, агент перезапустит."));
+        assert!(matches!(w.done("a", What::Interrupt, None, 801), Some(Act::Say { text, .. }) if text == "p: прервала зависшего сабагента, агент запустит его заново."));
     }
 
     #[test]
@@ -729,7 +750,7 @@ mod tests {
         let wakes = w.check(&ctx(5061, 0), five.clone(), |_| true, |_| false);
         assert_eq!(wakes.iter().filter_map(run_of).filter(|j| j.what == What::Wake && text_of(j) == "Лимит сброшен, продолжай с того места, где остановился.").count(), 5);
         assert!(w.check(&ctx(5200, 0), five, |_| true, |_| false).is_empty(), "будим один раз");
-        assert!(matches!(w.done("a0", What::Wake, None, 5201), Some(Act::Say { text, .. }) if text == "p: лимит сброшен — разбудила агента."));
+        assert!(matches!(w.done("a0", What::Wake, None, 5201), Some(Act::Say { text, .. }) if text == "p: разбудила агента: лимит сброшен."));
     }
 
     #[test]
@@ -743,7 +764,7 @@ mod tests {
         let mut w = Watch::default();
         w.limited("b", 5000);
         let acts = w.check(&ctx(5061, 0), vec![Facts { pane: None, ..a }.clone_as("b")], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: false, text, .. }] if text == "p: лимит сброшен — разбуди агента сам, он не в herdr или Orca."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { urgent: false, text, .. }] if text == "p: лимит сброшен; агент не в herdr и не в Orca — разбуди его, пожалуйста."), "{acts:?}");
     }
 
     #[test]
@@ -758,7 +779,7 @@ mod tests {
             assert!(w.check(&ctx(at + 150, 0), vec![lost(at)], |_| true, |_| false).is_empty(), "та же ошибка — одна просьба");
         }
         let acts = w.check(&ctx(800, 0), vec![lost(700)], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: связь с Claude не держится — посмотри сам."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: связь с Claude не держится — загляни, пожалуйста."), "{acts:?}");
         assert!(w.check(&ctx(1000, 0), vec![lost(900)], |_| true, |_| false).is_empty(), "сказано один раз");
     }
 
@@ -788,7 +809,7 @@ mod tests {
         let mut w = Watch::default();
         let a = Facts { pane: None, call: Some(json!({"name": "Agent", "input": {}})), ..f("a") };
         let acts = w.check(&ctx(800, 999), vec![a], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент завис, но он не в herdr или Orca — перезапусти сам."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент висит вне herdr и Orca, мне его не достать — загляни, пожалуйста."), "{acts:?}");
     }
 
     #[test]
@@ -801,14 +822,14 @@ mod tests {
         assert!(matches!(&w.check(&ctx(1600, 999), vec![a.clone()], |_| true, |_| false)[..], [Act::Judge { .. }]));
         w.judged("a", true, 1605);
         let acts = w.check(&ctx(1660, 999), vec![a], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент завис, но он не в herdr или Orca — перезапусти сам."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент висит вне herdr и Orca, мне его не достать — загляни, пожалуйста."), "{acts:?}");
     }
 
     #[test]
     fn failed_action_is_urgent() {
         let mut w = Watch::default();
         w.check(&ctx(800, 999), vec![Facts { call: Some(json!({"name": "Agent", "input": {}})), ..f("a") }], |_| true, |_| false);
-        assert!(matches!(w.done("a", What::Interrupt, Some("таймаут".into()), 801), Some(Act::Say { urgent: true, text, .. }) if text == "p: написать агенту не вышло — посмотри сам."));
+        assert!(matches!(w.done("a", What::Interrupt, Some("таймаут".into()), 801), Some(Act::Say { urgent: true, text, .. }) if text == "p: сообщение агенту не ушло — загляни, пожалуйста."));
         assert_eq!(w.trouble(), 1);
     }
 
@@ -869,10 +890,10 @@ mod tests {
         let mut w = Watch::default();
         let a = Facts { call: Some(json!({"name": "Agent", "input": {}})), sub_call: Some(json!({"name": "Bash", "input": {"command": "npx prisma migrate deploy"}})), ..f("a") };
         let acts = w.check(&ctx(800, 999), vec![a], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: сабагент завис посреди миграция — не трогаю, посмотри сам." || text.contains("миграц")), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: сабагент висит на опасном шаге — миграция; не трогаю, загляни, пожалуйста."), "{acts:?}");
         let mut w = Watch::default();
         let b = Facts { call: Some(json!({"name": "Agent", "input": {}})), sub_call: Some(json!({"name": "mcp__db__write", "input": {}})), ..f("b") };
-        assert!(matches!(&w.check(&ctx(800, 999), vec![b], |_| true, |_| false)[..], [Act::Say { urgent: true, text, .. }] if text.contains("безопасно ли прервать")));
+        assert!(matches!(&w.check(&ctx(800, 999), vec![b], |_| true, |_| false)[..], [Act::Say { urgent: true, text, .. }] if text.contains("прерывать ли — не знаю")));
     }
 
     #[test]
@@ -899,7 +920,7 @@ mod tests {
         w.check(&ctx(t + 800, 0), vec![a.clone()], |_| true, |_| false);
         w.judged("a", true, t + 801);
         let acts = w.check(&ctx(t + 802, 0), vec![a.clone()], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: помощник агента снова молчит — посмотри сам. Через 15 мин попробую снова."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: помощник агента снова молчит — загляни, пожалуйста. Через 15 мин попробую снова."), "{acts:?}");
         assert!(w.check(&ctx(t + 900, 0), vec![a.clone()], |_| true, |_| false).is_empty());
         assert_eq!(run_of(&w.check(&ctx(803 + 3600, 0), vec![a], |_| true, |_| false)[0]).unwrap().what, What::Nudge, "окно освободилось — пишем снова");
     }
@@ -913,7 +934,7 @@ mod tests {
         assert_eq!(run_of(&w.check(&ctx(802, 0), vec![a.clone()], |_| true, |_| false)[0]).unwrap().what, What::Nudge);
         assert!(w.check(&ctx(802 + 719, 0), vec![a.clone()], |_| true, |_| false).is_empty(), "ждём ответа агента");
         let acts = w.check(&ctx(802 + 720, 0), vec![a.clone()], |_| true, |_| false);
-        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент не ответил на просьбу проверить помощника — посмотри сам."), "{acts:?}");
+        assert!(matches!(&acts[..], [Act::Say { urgent: true, text, .. }] if text == "p: агент не ответил про помощника — загляни, пожалуйста."), "{acts:?}");
         assert!(w.check(&ctx(2000, 0), vec![a.clone()], |_| true, |_| false).is_empty(), "один раз");
         assert_eq!(w.trouble(), 1);
         assert!(w.check(&ctx(2100, 0), vec![Facts { active_at: 2050, ..a }], |_| true, |_| false).is_empty());
@@ -957,7 +978,7 @@ mod tests {
         w.ended("a"); // Ctrl+C дважды — Claude Code шлёт SessionEnd
         let acts = w.check(&ctx(1210, 0), vec![], |_| true, |_| false);
         assert_eq!(run_of(&acts[0]).unwrap().what, What::Resume);
-        assert!(matches!(w.done("a", What::Resume, None, 1215), Some(Act::Say { text, .. }) if text == "p: агент завис — перезапустила."));
+        assert!(matches!(w.done("a", What::Resume, None, 1215), Some(Act::Say { text, .. }) if text == "p: перезапустила зависшего агента."));
         let mut w = Watch::default();
         w.check(&ctx(800, 0), vec![a.clone()], |_| true, |_| false);
         w.check(&ctx(1200, 0), vec![a.clone()], |_| true, |_| false);
