@@ -42,6 +42,10 @@ impl Mux for Herdr {
         };
         envs.iter().map(&mut one).collect()
     }
+    fn focus(&self, pane: &Pane) -> Result<(), String> {
+        // цель `agent focus` — id панели или имя агента (herdr --skill, «Use IDs and caller context»)
+        ok(&cli(herdr(pane, &["agent", "focus", &pane.id]))?)
+    }
     fn screen(&self, pane: &Pane) -> Result<String, String> {
         cli(herdr(pane, &["pane", "read", &pane.id, "--source", "visible", "--lines", "40"]))
     }

@@ -50,6 +50,9 @@ impl Mux for Orca {
         };
         envs.iter().map(&mut one).collect()
     }
+    fn focus(&self, pane: &Pane) -> Result<(), String> {
+        succeeded(&cli(orca(pane, &["switch"]))?) // `orca terminal switch --terminal <handle>`: вкладка в окне Orca
+    }
     fn projects(&self) -> Result<Vec<String>, String> {
         let mut c = Command::new(orca_bin());
         c.args(["worktree", "list", "--json"]);

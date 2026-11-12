@@ -57,6 +57,10 @@ pub trait Mux: Sync {
     fn launch(&self, _cwd: &str, _prompt: &str) -> Result<(), String> {
         Err(format!("{} не запускает агентов", self.name()))
     }
+    /// Терминал на экран мультиплексора (вкладка Orca, панель herdr); окно приложения поднимает вызывающий.
+    fn focus(&self, _pane: &Pane) -> Result<(), String> {
+        Err(format!("{} не умеет показать терминал", self.name()))
+    }
 }
 
 /// Вызов CLI мультиплексора дольше этого — завис: поток действий не встаёт.
@@ -148,6 +152,10 @@ fn among(pids: &[u32], shown: impl Fn(u32) -> Option<bool>) -> Option<u32> {
 
 pub fn screen(pane: &Pane) -> Result<String, String> {
     adapter(pane)?.screen(pane)
+}
+
+pub fn focus(pane: &Pane) -> Result<(), String> {
+    adapter(pane)?.focus(pane)
 }
 
 #[derive(Clone, Debug, PartialEq)]

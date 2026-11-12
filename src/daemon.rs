@@ -42,6 +42,7 @@ enum Event {
     Acted(mux::Done), // поток действий: исход действия сторожа в терминале агента
     Tell(Box<dyn FnOnce() + Send>), // ответ агенту от Омы — в поток действий; ответ CLI шлёт само дело
     Turn(Sender<String>), // ход мозга Омы: свежий фокус, ответ — строка агентов
+    Show(String, Sender<Result<String, String>>), // `agent-speak show`: агент (пусто — следующий ждущий), ответ — его проект или ошибка
     Bt(&'static str, bool), // режим наушников переключён (headset | music) и переключала ли его Ома
     Outs(String, String), // выходы звука сменились: выход по умолчанию, динамики ноутбука — от потока `pactl subscribe`
 }
@@ -531,6 +532,7 @@ pub fn run() {
             Event::Turn(reply) => {
                 let _ = reply.send(st.turn());
             }
+            Event::Show(agent, reply) => st.show(&agent, reply),
             Event::Bt(mode, switched) => st.on_bt(mode, switched),
             Event::Outs(default, speakers) => st.on_outs(default, speakers),
         }
@@ -759,7 +761,7 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
         match serde_json::from_str::<Msg>(&line) {
             // ответ лёг бы между строками рассылки, а его таймаут записи (общий у клонов сокета) — на подписчика:
             // запрос не исполняется, отказ пишется с таймаутом подписки
-            Ok(Msg::Tell { .. } | Msg::Turn) if subscribed => {
+            Ok(Msg::Tell { .. } | Msg::Turn | Msg::Show { .. }) if subscribed => {
                 let err = serde_json::json!({"err": "запрос — отдельным соединением: это подписано на рассылку"});
                 if (&conn).write_all(format!("{err}\n").as_bytes()).is_err() {
                     break;
@@ -775,6 +777,23 @@ fn serve(conn: UnixStream, tx: Sender<Event>) {
                     Some(Ok(chosen)) => serde_json::json!({"ok": chosen}),
                     Some(Err(e)) => serde_json::json!({"err": e}),
                     None => serde_json::json!({"err": "служба не передала: поток действий не работает"}),
+                };
+                if !answer(&conn, &format!("{reply}\n")) {
+                    break;
+                }
+            }
+            Ok(Msg::Show { agent, quiet }) => {
+                let (rtx, rrx) = mpsc::channel();
+                let shown = tx.send(Event::Show(agent, rtx)).ok().and_then(|()| rrx.recv().ok());
+                let shown = shown.unwrap_or_else(|| Err("служба не показала: поток действий не работает".into()));
+                if let (Err(e), false) = (&shown, quiet) {
+                    // клавиша и двойной клик ответа не видят: окно Омы уже закрылось
+                    let b = serde_json::json!({"bubble": {"id": "show", "agent": "", "who": "Ома", "text": e, "kind": "oma", "append": false, "drop": false}});
+                    let _ = tx.send(Event::Msg(Msg::Emit { line: b }));
+                }
+                let reply = match shown {
+                    Ok(name) => serde_json::json!({"ok": name}),
+                    Err(e) => serde_json::json!({"err": e}),
                 };
                 if !answer(&conn, &format!("{reply}\n")) {
                     break;
@@ -1751,7 +1770,7 @@ impl State {
                 self.on_back(back);
             }
             Msg::View { agent } => self.viewing = agent,
-            Msg::Subscribe | Msg::Tell { .. } | Msg::Turn => {} // приходят как Event::Subscribe, Event::Tell и Event::Turn
+            Msg::Subscribe | Msg::Tell { .. } | Msg::Turn | Msg::Show { .. } => {} // приходят как Event::Subscribe, Tell, Turn и Show
         }
         if changes {
             self.broadcast();
@@ -1871,6 +1890,20 @@ impl State {
         if !self.quiet_why.any() {
             self.enqueue(Agent::Claude, "summary", &text, Kind::Read);
         }
+    }
+
+    /// `agent-speak show`: агент (пусто — следующий ждущий по кругу, Registry::jump) — на экран. hyprctl и CLI
+    /// мультиплексора — в потоке действий: цикл событий их не ждёт; ответ шлёт само дело. В терминал ничего не пишется.
+    fn show(&mut self, agent: &str, reply: Sender<Result<String, String>>) {
+        let Some(e) = self.registry.jump(agent) else {
+            let _ = reply.send(Err(if agent.is_empty() { "Никто не ждёт ответа" } else { "Такого агента нет" }.into()));
+            return;
+        };
+        let (pid, name) = (e.pid, if e.project.is_empty() { e.title.clone() } else { e.project.clone() });
+        // поток действий упал — дело с ответом выброшено, serve ответит ошибкой
+        let _ = self.act.send(mux::Work::Other(Box::new(move || {
+            let _ = reply.send(crate::focus::bring(pid).map(|()| name));
+        })));
     }
 
     fn on_hook(&mut self, kind: &str, p: &serde_json::Value) {
@@ -2515,6 +2548,53 @@ mod tests {
         work(); // так его исполнит поток действий
         let reply = next(&mut reader(client));
         assert_eq!(reply["err"], "агента нет среди живых");
+    }
+
+    #[test]
+    fn show_is_a_request_and_its_error_a_bubble() {
+        // клавиша и окно ответа не видят: ошибка — ещё и пузырём Омы; зовёт сама Ома (quiet) — скажет сама
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (server, client) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || serve(server, tx));
+        let mut w = client.try_clone().unwrap();
+        let mut r = reader(client);
+        w.write_all(b"{\"cmd\":\"show\",\"agent\":\"\"}\n").unwrap();
+        let Ok(Event::Show(agent, reply)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("show не дошёл до цикла") };
+        assert_eq!(agent, "");
+        reply.send(Err("Никто не ждёт ответа".into())).unwrap();
+        assert_eq!(next(&mut r)["err"], "Никто не ждёт ответа");
+        let Ok(Event::Msg(Msg::Emit { line })) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("ошибка — пузырём") };
+        assert_eq!((line["bubble"]["text"].as_str(), line["bubble"]["kind"].as_str(), line["bubble"]["who"].as_str()),
+            (Some("Никто не ждёт ответа"), Some("oma"), Some("Ома")));
+        w.write_all(b"{\"cmd\":\"show\",\"agent\":\"s\",\"quiet\":true}\n").unwrap();
+        let Ok(Event::Show(agent, reply)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("show не дошёл до цикла") };
+        assert_eq!(agent, "s");
+        reply.send(Err("Orca закрыта — открой её".into())).unwrap();
+        assert_eq!(next(&mut r)["err"], "Orca закрыта — открой её");
+        w.write_all(b"{\"cmd\":\"show\"}\n").unwrap();
+        let Ok(Event::Show(_, reply)) = rx.recv_timeout(Duration::from_secs(3)) else { panic!("пузыря у quiet нет — сразу следующий show") };
+        reply.send(Ok("datebook".into())).unwrap();
+        assert_eq!(next(&mut r)["ok"], "datebook");
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "показала — пузыря нет");
+    }
+
+    #[test]
+    fn show_picks_the_waiting_and_acts_off_the_loop() {
+        let mut st = test_state();
+        let (atx, arx) = mpsc::channel();
+        st.act = atx;
+        let (rtx, rrx) = mpsc::channel();
+        st.show("", rtx.clone());
+        assert_eq!(rrx.try_recv().unwrap(), Err("Никто не ждёт ответа".into()));
+        assert!(arx.try_recv().is_err(), "некого — ни hyprctl, ни CLI");
+        with_agents(&mut st, &["a", "b"]);
+        st.registry.question("b", "?", 1000);
+        st.show("", rtx.clone());
+        assert!(matches!(arx.try_recv(), Ok(mux::Work::Other(_))), "окно и вкладка — в потоке действий, не в цикле событий");
+        assert!(rrx.try_recv().is_err(), "ответ — от дела");
+        assert_eq!(st.registry.jump("").unwrap().id, "b", "ждёт один b — по кругу снова он");
+        st.show("нет", rtx);
+        assert_eq!(rrx.try_recv().unwrap(), Err("Такого агента нет".into()));
     }
 
     #[test]

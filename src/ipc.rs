@@ -44,6 +44,9 @@ pub enum Msg {
     Tell { session: String, option: usize, text: String, #[serde(default)] expect: String },
     /// Средний клик по орбу: сводка агентов одной фразой (вслух и пузырём Омы); что-то звучит — стоп, как `read`.
     Summary,
+    /// `agent-speak show`: агента (session; пусто — следующий ждущий) — на экран, в терминал ничего не пишется. Запрос с
+    /// ответом `{"ok": проект}` или `{"err": …}`; ошибка — ещё и пузырём Омы, кроме quiet (зовёт сама Ома — скажет сама).
+    Show { #[serde(default)] agent: String, #[serde(default)] quiet: bool },
 }
 
 pub fn socket_path() -> PathBuf {
@@ -101,6 +104,9 @@ mod tests {
         let tell = serde_json::from_str::<Msg>("{\"cmd\":\"tell\",\"session\":\"s\",\"option\":1,\"text\":\"\"}").unwrap();
         assert!(matches!(tell, Msg::Tell { ref session, option: 1, ref expect, .. } if session == "s" && expect.is_empty()), "метка — по желанию");
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"summary\"}").unwrap(), Msg::Summary));
+        let show = serde_json::from_str::<Msg>("{\"cmd\":\"show\",\"agent\":\"s\"}").unwrap();
+        assert!(matches!(show, Msg::Show { ref agent, quiet: false } if agent == "s"));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"show\"}").unwrap(), Msg::Show { ref agent, .. } if agent.is_empty()), "без агента — следующий ждущий");
     }
 
     #[test]

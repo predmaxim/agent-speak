@@ -142,6 +142,53 @@ fn codex_under(win: u32) -> Vec<(u32, SessionRef)> {
     out
 }
 
+/// `agent-speak show`: агент (pid) — на экран. Вкладку Orca или панель herdr выбирает его мультиплексор, окно поднимает
+/// Hyprland; в терминал ничего не пишется. Окна нет — Ома ничего не открывает и говорит, почему.
+pub fn bring(pid: u32) -> Result<(), String> {
+    let pane = crate::mux::locate(pid);
+    let clients = crate::mux::run(Command::new("hyprctl").args(["clients", "-j"]), HYPRCTL_TIMEOUT)?;
+    let win = window_of(&clients, |w| under(pid, w) || crate::mux::in_app_window(w, pid));
+    show_steps(pane.as_ref(), win.as_deref(), crate::mux::focus, raise)
+}
+
+const HYPRCTL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Порядок показа: окно найдено — вкладка, потом окно. Окна нет — CLI мультиплексора не зовётся (открыл бы закрытое), кроме
+/// herdr: окно его клиента — терминал, где он запущен, а агент — потомок сервера herdr, и по дереву процессов окно не найти.
+fn show_steps(pane: Option<&crate::mux::Pane>, win: Option<&str>, focus: impl FnOnce(&crate::mux::Pane) -> Result<(), String>,
+              raise: impl FnOnce(&str) -> Result<(), String>) -> Result<(), String> {
+    match (pane, win) {
+        (Some(p), None) if p.mux == "orca" => Err("Orca закрыта — открой её".into()),
+        (Some(p), None) => {
+            focus(p)?;
+            Err(format!("в {} выбрала его панель, а окно {} не нашла", p.mux, p.mux))
+        }
+        (None, None) => Err("окно агента не нашла".into()),
+        (pane, Some(w)) => {
+            if let Some(p) = pane {
+                focus(p)?;
+            }
+            raise(w)
+        }
+    }
+}
+
+/// Окно из ответа `hyprctl clients -j`, чей процесс держит агента (holds); адрес — только 0x и hex: он уходит в Lua.
+fn window_of(clients: &str, holds: impl Fn(u32) -> bool) -> Option<String> {
+    let v: Value = serde_json::from_str(clients).ok()?;
+    let w = v.as_array()?.iter().find(|w| w["pid"].as_u64().and_then(|p| u32::try_from(p).ok()).is_some_and(&holds))?;
+    let a = w["address"].as_str()?;
+    a.strip_prefix("0x").filter(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_hexdigit())).map(|_| a.to_string())
+}
+
+/// Окно вперёд — как док оболочки Omarchy (hl.dsp.focus по адресу): на Hyprland с конфигом Lua `dispatch` принимает
+/// только выражение Lua, прежний `focuswindow pid:…` — ошибка синтаксиса. Успех — ответ «ok», окна нет — warning.
+fn raise(address: &str) -> Result<(), String> {
+    let lua = format!("hl.dsp.focus({{ window = \"address:{address}\" }})");
+    let out = crate::mux::run(Command::new("hyprctl").args(["dispatch", &lua]), HYPRCTL_TIMEOUT)?;
+    if out.trim() == "ok" { Ok(()) } else { Err(format!("окно не подняла: {}", out.trim())) }
+}
+
 pub fn parse_learned(out: &str, asked: &[String]) -> Vec<(String, String)> {
     out.lines()
         .filter_map(|l| l.split_once('\t'))
@@ -170,6 +217,43 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn window_of_the_agent_by_its_address() {
+        let clients = r#"[{"address":"0x5a","pid":10},{"address":"0x5b","pid":20},{"address":"0x5c\") os.exit(","pid":30},{"pid":40}]"#;
+        assert_eq!(window_of(clients, |w| w == 20).as_deref(), Some("0x5b"));
+        assert_eq!(window_of(clients, |w| w == 99), None);
+        assert_eq!(window_of(clients, |w| w == 30), None, "адрес уходит в Lua — только 0x и hex");
+        assert_eq!(window_of(clients, |w| w == 40), None);
+        assert_eq!(window_of("мусор", |_| true), None);
+        // по дереву процессов: окно — предок агента (терминал без мультиплексора)
+        let me = std::process::id();
+        let parent = ppid(me).unwrap();
+        let live = format!(r#"[{{"address":"0xab","pid":{parent}}}]"#);
+        assert_eq!(window_of(&live, |w| under(me, w)).as_deref(), Some("0xab"));
+    }
+
+    #[test]
+    fn show_order_and_closed_apps() {
+        use crate::mux::Pane;
+        let calls = std::cell::RefCell::new(Vec::<String>::new());
+        let go = |pane: Option<&Pane>, win: Option<&str>| {
+            calls.borrow_mut().clear();
+            let r = show_steps(pane, win, |p| { calls.borrow_mut().push(format!("focus {}", p.mux)); Ok(()) },
+                               |w| { calls.borrow_mut().push(format!("raise {w}")); Ok(()) });
+            (r, calls.borrow().clone())
+        };
+        let orca = Pane { mux: "orca", id: "term_1".into(), via: "/x/orca".into() };
+        let herdr = Pane { mux: "herdr", id: "w1:p1".into(), via: "/s.sock".into() };
+        assert_eq!(go(Some(&orca), Some("0x1")), (Ok(()), vec!["focus orca".into(), "raise 0x1".into()]), "вкладка, потом окно");
+        assert_eq!(go(Some(&orca), None), (Err("Orca закрыта — открой её".into()), vec![]), "закрытую Orca CLI открыл бы — не зовём");
+        let (r, c) = go(Some(&herdr), None);
+        assert!(r.unwrap_err().contains("окно herdr не нашла") && c == ["focus herdr"], "окно клиента herdr по дереву не найти — панель всё же выбрана");
+        assert_eq!(go(None, Some("0x2")), (Ok(()), vec!["raise 0x2".into()]), "агент в простом терминале — только окно");
+        assert_eq!(go(None, None).0, Err("окно агента не нашла".into()));
+        let failed = show_steps(Some(&orca), Some("0x1"), |_| Err("нет терминала".into()), |_| panic!("вкладка не вышла — окно не трогаем"));
+        assert_eq!(failed, Err("нет терминала".into()));
+    }
 
     #[test]
     fn user_codex_only() {
