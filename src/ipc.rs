@@ -50,8 +50,9 @@ pub enum Msg {
     /// Колесо над орбом, пока Ома говорит: темп этого ответа на step шагов RATES (+ быстрее); config.toml не пишется.
     RateStep { step: i64 },
     /// Слух Омы для орба: её вход (узел PipeWire; "" — вход по умолчанию), до когда она ещё слушает (эпоха, с; нет —
-    /// дуги нет) и длина этого окна, с. Шлёт при смене, отдельно от voice_state: его повтор держал бы новости и чистил очередь.
-    Ear { #[serde(default)] ear_in: String, #[serde(default)] until: Option<f64>, #[serde(default)] secs: f64 },
+    /// дуги нет) и длина этого окна, с; wake — слово-побудка у неё: on | off | battery | muted | busy | no_model | no_mic.
+    /// Шлёт при смене, отдельно от voice_state: его повтор держал бы новости и чистил очередь.
+    Ear { #[serde(default)] ear_in: String, #[serde(default)] until: Option<f64>, #[serde(default)] secs: f64, #[serde(default)] wake: String },
 }
 
 pub fn socket_path() -> PathBuf {
@@ -114,8 +115,10 @@ mod tests {
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"show\"}").unwrap(), Msg::Show { ref agent, .. } if agent.is_empty()), "без агента — следующий ждущий");
         assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"rate_step\",\"step\":-1}").unwrap(), Msg::RateStep { step: -1 }));
         let ear = serde_json::from_str::<Msg>("{\"cmd\":\"ear\",\"ear_in\":\"alsa_input.x\",\"until\":1794812345.2,\"secs\":20}").unwrap();
-        assert!(matches!(ear, Msg::Ear { ref ear_in, until: Some(u), secs } if ear_in == "alsa_input.x" && u == 1794812345.2 && secs == 20.0));
-        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"ear\"}").unwrap(), Msg::Ear { until: None, .. }), "поля — по желанию");
+        assert!(matches!(ear, Msg::Ear { ref ear_in, until: Some(u), secs, .. } if ear_in == "alsa_input.x" && u == 1794812345.2 && secs == 20.0));
+        assert!(matches!(serde_json::from_str::<Msg>("{\"cmd\":\"ear\"}").unwrap(), Msg::Ear { until: None, ref wake, .. } if wake.is_empty()), "поля — по желанию");
+        let ear = serde_json::from_str::<Msg>("{\"cmd\":\"ear\",\"wake\":\"battery\"}").unwrap();
+        assert!(matches!(ear, Msg::Ear { ref wake, .. } if wake == "battery"));
     }
 
     #[test]

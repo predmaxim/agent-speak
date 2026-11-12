@@ -185,6 +185,11 @@ impl Presence {
         self.facts.as_ref().map_or(Buds::Unknown, |f| f.buds)
     }
 
+    /// Экран заблокирован по свежему снимку; снимка нет или он устарел — нет (Ома сама спросит перед разговором).
+    pub fn locked(&self, now: u64) -> bool {
+        self.facts.as_ref().is_some_and(|f| f.locked && now.saturating_sub(f.at) <= STALE_AFTER)
+    }
+
     /// Показывают ли экран; None — снимка нет или он старше STALE_AFTER: фактов нет.
     pub fn screencast(&self, now: u64) -> Option<bool> {
         self.facts.as_ref().filter(|f| now.saturating_sub(f.at) <= STALE_AFTER).map(|f| f.screencast)

@@ -52,6 +52,8 @@ pub struct Config {
     pub earcons: bool,
     /// интонация по смыслу: пауза после проекта, вопрос выше, беда ниже и медленнее, итог быстрее (SSML адаптера Silero)
     pub intonation: bool,
+    /// слово-побудка «Ома»: в покое она слушает своё имя встроенным микрофоном — только от сети, не в тишине и не под блокировкой
+    pub wake_word: bool,
 }
 
 impl Default for Config {
@@ -60,7 +62,7 @@ impl Default for Config {
             orb_satellites: true, orb_moods: true, orb_idle_motion: true,
             quiet_schedule: true, quiet_from: "23:00".into(), quiet_to: "08:00".into(), quiet_override: String::new(), agents_voice: true, progress_digest: false, orb_pos: "bottom-right,0,0".into(),
             orb_over_fullscreen: true, watch_every: 60, hung_after: 12, limit_threshold: 95, screencast_privacy: true, hush_summary: true, music_pause: true,
-            limit_warn: true, limit_warn_at: 90, memory: true, news_every: 10, earcons: true, intonation: true }
+            limit_warn: true, limit_warn_at: 90, memory: true, news_every: 10, earcons: true, intonation: true, wake_word: true }
     }
 }
 
@@ -142,6 +144,7 @@ impl Config {
             "news_every" if in_range(value, 0, 60) => self.news_every = value.as_u64().unwrap(),
             "earcons" if value.is_boolean() => self.earcons = value.as_bool().unwrap(),
             "intonation" if value.is_boolean() => self.intonation = value.as_bool().unwrap(),
+            "wake_word" if value.is_boolean() => self.wake_word = value.as_bool().unwrap(),
             _ => return false,
         }
         true
@@ -288,6 +291,15 @@ mod tests {
         assert!(c.music_pause && parse("speaker = \"baya\"").unwrap().music_pause, "старый файл без ключа — пауза музыки включена");
         assert!(c.set("music_pause", &json!(false)) && !c.music_pause);
         assert!(!c.set("music_pause", &json!("false")));
+    }
+
+    #[test]
+    fn wake_word_on_by_default_and_set() {
+        use serde_json::json;
+        let mut c = Config::default();
+        assert!(c.wake_word && parse("speaker = \"baya\"").unwrap().wake_word, "старый файл без ключа — побудка включена (от сети)");
+        assert!(c.set("wake_word", &json!(false)) && !c.wake_word);
+        assert!(!c.set("wake_word", &json!("on")));
     }
 
     #[test]
