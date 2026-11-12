@@ -32,6 +32,9 @@ impl Mux for Herdr {
     fn type_text(&self, pane: &Pane, text: &str) -> Result<(), String> {
         ok(&cli(herdr(pane, &["pane", "send-text", &pane.id, text]))?)
     }
+    fn typed(&self, pane: &Pane) -> Result<String, String> {
+        Ok(composer_text(&cli(herdr(pane, &["pane", "read", &pane.id, "--source", "visible", "--lines", "40", "--format", "ansi"]))?))
+    }
     fn waits(&self, pane: &Pane) -> Result<bool, String> {
         blocked(&cli(herdr(pane, &["pane", "get", &pane.id]))?)
     }
@@ -123,6 +126,73 @@ fn focused_pane(out: &str) -> Option<String> {
     panes.iter().find(|p| p["focused"] == true)?["pane_id"].as_str().map(str::to_string)
 }
 
+/// Поле ввода Claude Code на экране с цветами (`pane read --format ansi`): строки между двумя последними рамками «────»,
+/// первая — с «❯». Набранное — буквы без своего цвета и не под курсором (инверсия): серую подсказку и заглушку Claude
+/// Code рисует цветом (`38;2;…`), как и Orca их отделяет. Поля на экране нет (меню) — пусто.
+fn composer_text(ansi: &str) -> String {
+    let rows: Vec<&str> = ansi.lines().collect();
+    let plain = |l: &str| strip(l).0;
+    let frames: Vec<usize> = rows.iter().enumerate().filter(|(_, l)| plain(l).trim_start().starts_with("────")).map(|(i, _)| i).collect();
+    let [.., top, bottom] = frames[..] else { return String::new() };
+    if !plain(rows.get(top + 1).unwrap_or(&"")).trim_start().starts_with('❯') {
+        return String::new();
+    }
+    let text: Vec<String> = rows[top + 1..bottom].iter().map(|l| strip(l).1).collect();
+    let joined = text.join(" ");
+    let joined = joined.trim_start().strip_prefix('❯').unwrap_or(&joined);
+    joined.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Строка с цветами → (весь текст, только буквы без своего цвета и не в инверсии).
+fn strip(line: &str) -> (String, String) {
+    let (mut all, mut typed) = (String::new(), String::new());
+    let (mut colored, mut inverse) = (false, false);
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.next_if_eq(&'[').is_none() {
+                continue;
+            }
+            let mut params = String::new();
+            let mut end = ' ';
+            for p in chars.by_ref() {
+                if p.is_ascii_alphabetic() || p == '~' {
+                    end = p;
+                    break;
+                }
+                params.push(p);
+            }
+            if end == 'm' {
+                let codes: Vec<&str> = params.split(';').collect();
+                let mut i = 0;
+                while i < codes.len() {
+                    match codes[i] {
+                        "" | "0" => (colored, inverse) = (false, false),
+                        "7" => inverse = true,
+                        "27" => inverse = false,
+                        "39" => colored = false,
+                        // цвет текста, фона, подчёркивания: числа после них — его параметры, а не коды
+                        x @ ("38" | "48" | "58") => {
+                            colored |= x == "38";
+                            i += if codes.get(i + 1) == Some(&"2") { 4 } else { 2 };
+                        }
+                        c if c.len() == 2 && (c.starts_with('3') || c.starts_with('9')) && c != "39" => colored = true,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if c == '\r' {
+            continue;
+        }
+        all.push(c);
+        typed.push(if colored || inverse { ' ' } else { c });
+    }
+    (all, typed)
+}
+
 /// Ответ `pane get`: агент панели ждёт ввода — `blocked`, тот же признак, по которому herdr не пускает `agent prompt`;
 /// `unknown` (herdr агента не распознал) и мусор — ошибка: «не знаю» за «не ждёт» не выдаём.
 fn blocked(out: &str) -> Result<bool, String> {
@@ -146,6 +216,7 @@ fn key_name(key: &Key) -> String {
         Key::Esc => "esc".into(),
         Key::CtrlC => "ctrl+c".into(),
         Key::CtrlU => "ctrl+u".into(),
+        Key::CtrlS => "ctrl+s".into(),
         Key::Enter => "enter".into(),
         Key::Digit(d) => d.to_string(),
     }
@@ -188,6 +259,22 @@ mod tests {
     fn blocked_agent_gets_no_command_fallback() {
         assert!(!as_command("agent w1:p1 is blocked and requires interactive input"), "текст с Enter в диалог — выбор пункта");
         assert!(as_command("agent target w1:p1 not found"), "herdr не распознал агента — команда в оболочку");
+    }
+
+    #[test]
+    fn composer_text_from_ansi_screen() {
+        // строки — как их отдал herdr 0.9.5 (`pane read --format ansi`) с Claude Code 2.1.322
+        let frame = "\x1b[0m\x1b[38;2;57;147;212m────────────────────\x1b[0m\r";
+        let screen = |rows: &[&str]| format!("  ✻ готово\r\n{frame}\n{}\n{frame}\n  \x1b[0m\x1b[38;2;129;131;135m⏸ manual mode on\x1b[0m", rows.join("\n"));
+        assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[0m\x1b[7m \x1b[0m\r"])), "", "пустое поле, курсор");
+        assert_eq!(composer_text(&screen(&["❯\u{a0}печатаю\x1b[0m\x1b[7m \x1b[0m\r"])), "печатаю");
+        assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[48;2;30;35;97mна фоне\x1b[0m\r"])), "на фоне", "параметры фона — не цвет текста");
+        assert_eq!(composer_text(&screen(&["❯\u{a0}слово слово\r", "  слово конец\x1b[0m\x1b[7m \x1b[0m\r"])), "слово слово слово конец", "перенос строк");
+        // серая подсказка после хода: курсор на первой букве, остальное серым (вживую не снята — по разбору Orca)
+        assert_eq!(composer_text(&screen(&["❯\u{a0}\x1b[7mп\x1b[0m\x1b[38;2;129;131;135mродолжай\x1b[0m\r"])), "");
+        let menu = " Do you want to proceed?\r\n ❯ 1. Yes\r\n   2. No\r\n Esc to cancel";
+        assert_eq!(composer_text(menu), "", "меню — поля нет");
+        assert_eq!(composer_text(&format!("{frame}\n ❯ 1. Yes\n{frame}")), "1. Yes", "рамки с «❯» внутри — поле; меню рамками «────» не обводится");
     }
 
     #[test]

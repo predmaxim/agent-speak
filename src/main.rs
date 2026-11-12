@@ -43,12 +43,21 @@ fn main() {
         Some("statusline") => return statusline(&args[1..]),
         // Ома передаёт агенту ответ: через очередь действий службы (с действиями сторожа не вперемешку), исход — сразу;
         // stdout — метка нажатого пункта меню с экрана (одобрение плана включает и auto mode — Ома её зачитывает)
-        Some("tell") if matches!(args.len(), 4 | 5) => {
-            let told = args[2].parse().map_err(|_| "option — число".to_string()).and_then(|option| {
-                ipc::request(&Msg::Tell { session: args[1].clone(), option, text: args[3].clone(), expect: args.get(4).cloned().unwrap_or_default() })
+        // --keep: в поле ввода агента есть текст, его сохранить (stash) и вернуть после отправки; без него такой текст — отказ
+        Some("tell") if matches!(args.len(), 4..=6) => {
+            let keep = args.iter().any(|a| a == "--keep");
+            let a: Vec<&String> = args.iter().filter(|a| *a != "--keep").collect();
+            if !matches!(a.len(), 4 | 5) {
+                eprintln!("agent-speak tell [--keep] <session> <option> <text> [метка варианта]");
+                std::process::exit(2);
+            }
+            let told = a[2].parse().map_err(|_| "option — число".to_string()).and_then(|option| {
+                ipc::request(&Msg::Tell { session: a[1].clone(), option, text: a[3].clone(), expect: a.get(4).map(|s| s.to_string()).unwrap_or_default(), keep })
             });
             return done(told.map(|chosen| if !chosen.is_empty() { println!("{chosen}") }));
         }
+        // набранное в поле ввода агента — только чтение, без службы: Ома спрашивает, что с ним делать, до «да, передай»
+        Some("input") if args.len() == 2 => return done(orders::input_of(&args[1]).map(|t| println!("{t}"))),
         // черновик: текст в поле ввода агента без Enter, отправит пользователь; через ту же очередь действий службы
         Some("draft") if args.len() == 3 => {
             return done(ipc::request(&Msg::Draft { session: args[1].clone(), text: args[2].clone() }).map(|_| ()));
@@ -133,7 +142,7 @@ fn main() {
             Msg::Hook { kind, payload: serde_json::from_str(&raw).unwrap_or_default() }
         }
         _ => {
-            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | set <ключ> <значение> | hook <kind> [json] | statusline [команда …] | tell <session> <option> <text> [метка варианта] | draft <session> <text> | menu <session> | show [<session>|next] | launch <path> <text> [orca|herdr] | projects [orca|herdr] | note <text> | later tell|checks|cancel|list …");
+            eprintln!("agent-speak on | off | daemon | read | stop | pause | voice | set <ключ> <значение> | hook <kind> [json] | statusline [команда …] | tell [--keep] <session> <option> <text> [метка варианта] | draft <session> <text> | input <session> | menu <session> | show [<session>|next] | launch <path> <text> [orca|herdr] | projects [orca|herdr] | note <text> | later tell|checks|cancel|list …");
             std::process::exit(2);
         }
     };

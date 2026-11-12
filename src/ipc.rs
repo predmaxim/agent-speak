@@ -41,7 +41,8 @@ pub enum Msg {
     View { agent: String },
     /// Ответ агенту от Омы (`agent-speak tell`): запрос с ответом `{"ok": метка нажатого пункта}` или `{"err": …}`;
     /// идёт в очередь потока действий, той же, что у сторожа. expect — метка варианта, пусто — не сверять.
-    Tell { session: String, option: usize, text: String, #[serde(default)] expect: String },
+    /// keep — в поле ввода агента уже есть текст, и пользователь сказал сохранить его: stash, после отправки он вернётся.
+    Tell { session: String, option: usize, text: String, #[serde(default)] expect: String, #[serde(default)] keep: bool },
     /// Черновик агенту от Омы (`agent-speak draft`): текст в поле ввода без Enter — отправит пользователь. Свой вариант,
     /// а не флаг Tell: служба старше него не разберёт строку и не отправит черновик как задание с Enter. Ответ — как у Tell.
     Draft { session: String, text: String },

@@ -86,6 +86,9 @@ OMA_PROMPT = ("Ты — Ома, голосовой заместитель пол
               "Просят написать агенту, но не отправлять («не отправляй», «черновиком», «я отправлю сам», «вставь, я "
               "допишу») — tell с draft=true: текст встанет в поле ввода агента без Enter, ничего не уйдёт, подтверждение "
               "не нужно; потом одной фразой: кому и что отправит пользователь сам. "
+              "tell ответил, что в поле ввода агента уже есть текст, — перескажи его коротко и спроси, что с ним сделать: "
+              "передать, а текст сохранить (keep=true, вернётся в поле после отправки), дописать к нему черновиком "
+              "(draft=true) или оставить и ничего не передавать; сам не решай, стереть его не можешь. "
               "После tell или launch скажи пользователю одной фразой смысл и кому, не текст задания. Не понятно, "
               "о чём речь, — коротко переспроси. "
               "«Покажи его», «покажи datebook», «к следующему» — show: агент выходит на экран, ему ничего не пишется, "
@@ -264,10 +267,12 @@ def oma_tools(snapshot, send, orders=None) -> list:
                   "слов; option — номер варианта, если агент ждёт ответа с вариантами и ответ ровно один из них (у плана: "
                   "1 — одобрить), иначе 0. draft — true, если пользователь просит не отправлять («не отправляй», "
                   "«черновик», «я отправлю сам»): text встанет в поле ввода агента без Enter, агенту ничего не уйдёт, "
-                  "подтверждения не нужно; option тогда 0. По умолчанию false — отправить.",
+                  "подтверждения не нужно; option тогда 0. По умолчанию false — отправить. keep — true, только если tell "
+                  "ответил, что в поле ввода агента уже есть текст, а пользователь сказал передать и текст сохранить: он "
+                  "уйдёт в сторону и вернётся в поле после отправки.",
           {"type": "object", "properties": {"agent": {"type": "string"}, "text": {"type": "string"},
                                             "gist": {"type": "string"}, "option": {"type": "integer"},
-                                            "draft": {"type": "boolean"}},
+                                            "draft": {"type": "boolean"}, "keep": {"type": "boolean"}},
            "required": ["text", "gist"]})
     async def tell(args):
         e, why = pick_agent(snapshot(), args.get("agent", ""))
@@ -275,7 +280,8 @@ def oma_tools(snapshot, send, orders=None) -> list:
             return _text(why)
         # не явное «нет» — черновик: он ничего не отправляет, а набранное в окне ушло бы сразу, с Enter
         draft = str(args.get("draft", False)).strip().lower() not in ("false", "0", "", "none", "no")
-        return _text(await orders.tell(e, args.get("text", ""), args.get("gist", ""), int(args.get("option") or 0), draft))
+        keep = str(args.get("keep", False)).strip().lower() not in ("false", "0", "", "none", "no")  # сохранить — не стереть
+        return _text(await orders.tell(e, args.get("text", ""), args.get("gist", ""), int(args.get("option") or 0), draft, keep))
 
     where = {"type": "string", "enum": ["orca", "herdr"]}
 

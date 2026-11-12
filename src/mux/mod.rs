@@ -14,6 +14,8 @@ pub enum Key {
     CtrlC,
     /// стереть строку до начала (Claude Code, bash, zsh); стёртое возвращает Ctrl+Y
     CtrlU,
+    /// stash Claude Code (`chat:stash`): поле ввода целиком — в сторону, после следующей отправки оно вернётся
+    CtrlS,
     Enter,
     /// цифра 1–9: пункт меню Claude Code
     Digit(u8),
@@ -40,6 +42,9 @@ pub trait Mux: Sync {
     fn type_text(&self, pane: &Pane, text: &str) -> Result<(), String>;
     /// Что видно на экране терминала, построчно.
     fn screen(&self, pane: &Pane) -> Result<String, String>;
+    /// Текст, набранный в поле ввода агента, без серой подсказки и заглушки Claude Code; поле пустое или его нет на
+    /// экране (меню) — пусто.
+    fn typed(&self, pane: &Pane) -> Result<String, String>;
     /// Агент в терминале ждёт ввода пользователя (меню, разрешение) — по мнению самого мультиплексора; не знает — Err.
     /// Без умолчания: новый адаптер, молча «никогда не ждёт», пустил бы черновик в меню.
     fn waits(&self, pane: &Pane) -> Result<bool, String>;
@@ -157,6 +162,10 @@ pub fn screen(pane: &Pane) -> Result<String, String> {
     adapter(pane)?.screen(pane)
 }
 
+pub fn typed(pane: &Pane) -> Result<String, String> {
+    adapter(pane)?.typed(pane)
+}
+
 pub fn waits(pane: &Pane) -> Result<bool, String> {
     adapter(pane)?.waits(pane)
 }
@@ -171,6 +180,9 @@ pub enum Step {
     Text(String),
     /// текст без Enter и без Ctrl+U перед ним (поле меню)
     Type(String),
+    /// текст вставкой (bracketed paste, `ESC[200~`…`ESC[201~`) без Enter и Ctrl+U: Claude Code берёт её как текст —
+    /// пункт меню вставка не выбирает, даже если меню открылось между проверкой и вводом (проверено, 2.1.322)
+    Paste(String),
     /// мс
     Pause(u64),
 }
@@ -213,6 +225,8 @@ fn perform_on(m: &dyn Mux, pane: &Pane, steps: &[Step]) -> Result<(), String> {
                 m.send(pane, t)?
             }
             Step::Type(t) => m.type_text(pane, t)?,
+            // управляющие байты внутри вырезаны: ESC[201~ в тексте закрыл бы вставку, и остальное ушло бы клавишами
+            Step::Paste(t) => m.type_text(pane, &format!("\x1b[200~{}\x1b[201~", t.chars().filter(|c| !c.is_control()).collect::<String>()))?,
             Step::Pause(ms) => std::thread::sleep(Duration::from_millis(*ms)),
         }
     }
@@ -340,6 +354,7 @@ mod tests {
         fn type_text(&self, _: &Pane, text: &str) -> Result<(), String> { self.0.lock().unwrap().push(format!("type:{text}")); Ok(()) }
         fn screen(&self, _: &Pane) -> Result<String, String> { Ok(String::new()) }
         fn waits(&self, _: &Pane) -> Result<bool, String> { Ok(false) }
+        fn typed(&self, _: &Pane) -> Result<String, String> { Ok(String::new()) }
     }
 
     #[test]
@@ -356,6 +371,14 @@ mod tests {
         let pane = Pane { mux: "rec", id: "x".into(), via: String::new() };
         perform_on(&m, &pane, &[Step::Key(Key::Digit(3)), Step::Type("зелёный".into()), Step::Key(Key::Enter)]).unwrap();
         assert_eq!(*m.0.lock().unwrap(), ["Digit(3)", "type:зелёный", "Enter"], "поле меню: Ctrl+U там не нужен");
+    }
+
+    #[test]
+    fn paste_is_bracketed_and_cannot_be_closed_from_inside() {
+        let m = Rec(Default::default());
+        let pane = Pane { mux: "rec", id: "x".into(), via: String::new() };
+        perform_on(&m, &pane, &[Step::Paste("да\x1b[201~1".into())]).unwrap();
+        assert_eq!(*m.0.lock().unwrap(), ["type:\x1b[200~да[201~1\x1b[201~"], "ESC из текста вырезан: «1» осталась внутри вставки");
     }
 
     #[test]

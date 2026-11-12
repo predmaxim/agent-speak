@@ -1679,10 +1679,12 @@ def test_cancel_words_table():
 from agent_voice.orders import Orders, danger, asked
 
 
-def _orders(clk=None, ok=True, out=""):
+def _orders(clk=None, ok=True, out="", typed=""):
     calls = []
 
     async def fake(*args):
+        if args[0] == "input":  # чтение поля ввода агента — не действие: в calls не пишется
+            return True, typed
         calls.append(args)
         return ok, out
 
@@ -1774,8 +1776,8 @@ class FakeOrders:
     def __init__(self):
         self.told, self.voiced = [], False
 
-    async def tell(self, entry, text, gist, option=0, draft=False):
-        self.told.append((entry["id"], text, gist, option) + ((True,) if draft else ()))
+    async def tell(self, entry, text, gist, option=0, draft=False, keep=False):
+        self.told.append((entry["id"], text, gist, option) + ((True,) if draft else ()) + (("keep",) if keep else ()))
         return "Передано"
 
 
@@ -1808,6 +1810,30 @@ def test_draft_refuses_menu_option_chat_and_asked_turn():
     assert "ответь в терминале" in run(o.tell(E[0], "Привет", "привет", draft=True))
 
 
+def test_text_in_agent_input_is_asked_about_before_yes():
+    # в поле агента уже есть текст: Ctrl+U перед заданием стёр бы его — спросить, что с ним делать, до «да, передай»
+    for voiced in (True, False):
+        o, calls = _orders(typed="Мой недописанный вопрос")
+        o.turn(voiced, "скажи почте прогнать тесты")
+        r = run(o.tell(E[0], "Прогони тесты", "тесты"))
+        assert r.startswith("Не передано: в поле ввода omarchy-mail уже есть текст: «Мой недописанный вопрос».") and "keep=true" in r
+        assert calls == [] and o.pending is None and not o.tripped, "ни вопроса, ни передачи"
+    # «передай, а текст сохрани»: keep — без повторного чтения поля, голосом — тот же «да, передай», вопрос говорит о тексте
+    o, calls = _orders(typed="Мой недописанный вопрос")
+    o.turn(True, "передай, а текст сохрани")
+    r = run(o.tell(E[0], "Прогони тесты", "тесты", keep=True))
+    assert "Текст из поля верну после отправки. Скажи: да, передай." in r and calls == []
+    assert run(o.confirm("Да, передай.")) == "Передала проекту omarchy-mail: тесты." and calls == [("tell", "--keep", "s1", "0", "Прогони тесты")]
+    # вариант меню полем не печатается: поле не читается и не мешает
+    o, calls = _orders(typed="Мой недописанный вопрос")
+    o.turn(False, "второй")
+    assert "Передано" in run(o.tell(dict(E[0], ask="Ждёт ответа на AskUserQuestion: Какой? Варианты: А; Б"), "", "Б", option=2))
+    # служба увидела текст уже при вводе (появился после проверки) — тот же вопрос пользователю
+    o, _ = _orders(ok=False, out="в поле ввода агента уже есть текст: «новое»")
+    o.turn(False, "скажи почте прогнать тесты")
+    assert "keep=true" in run(o.tell(E[0], "Прогони тесты", "тесты"))
+
+
 def test_tell_tool_passes_draft_and_prompt_names_it():
     from agent_voice import brain
     o = FakeOrders()
@@ -1820,6 +1846,9 @@ def test_tell_tool_passes_draft_and_prompt_names_it():
     d, t = ("s1", "Прогони тесты", "тесты", 0, True), ("s1", "Прогони тесты", "тесты", 0)
     assert o.told == [d, t, d, t, d], "по умолчанию и явное false — отправить; любое другое — черновик, он ничего не шлёт"
     assert "draft" in tool.input_schema["properties"] and "draft=true" in brain.OMA_PROMPT and "«я отправлю сам»" in brain.OMA_PROMPT
+    o = FakeOrders()
+    run(_tool("tell", E, o).handler({"agent": "s1", "text": "Прогони тесты", "gist": "тесты", "keep": True}))
+    assert o.told == [("s1", "Прогони тесты", "тесты", 0, "keep")] and "keep" in tool.input_schema["properties"] and "keep=true" in brain.OMA_PROMPT
 
 
 def test_tell_refuses_ambiguous_agent():
@@ -3213,7 +3242,8 @@ def test_late_order_delivery_does_not_close_next_turn():
     gate = asyncio.Event()
 
     async def slow(*args):
-        await gate.wait()
+        if args[0] != "input":  # чтение поля до вопроса — сразу, ждёт только передача
+            await gate.wait()
         return True, ""
     oma.orders, _ = _orders(clk)
     oma.orders.run = slow
@@ -3699,7 +3729,7 @@ def test_order_of_interrupted_turn_is_not_passed_and_does_not_trip_the_next():
             return await t, await o.tell(E[0], "Прогони тесты", "прогнать тесты")
         r1, r2 = run(go())
         assert r1.startswith("Не передано: ход прерван") and asked_ == [] and not o.tripped, voiced
-        assert r2.startswith("Передано проекту omarchy-mail") and calls == [("menu", "s1"), ("tell", "s1", "0", "Прогони тесты")]
+        assert r2.startswith("Передано проекту omarchy-mail") and calls == [("menu", "s1"), ("input", "s1"), ("tell", "s1", "0", "Прогони тесты")]
 
 
 # ---- Память между днями (дизайн «Джарвис», «Характер и память»)
