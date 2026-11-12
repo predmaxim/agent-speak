@@ -2,6 +2,7 @@
 В очередь out: ("start", n) — начало речи, ("phrase", текст, n) — распознанная фраза;
 n — Ear.seq, номер речи (растёт всегда, при перезапуске слуха не сбрасывается)."""
 import asyncio
+from collections import deque
 import contextlib
 import os
 import re
@@ -104,6 +105,29 @@ def load_vad():
     return load_silero_vad()
 
 
+class Aligned:
+    """Кадры mic_aec по времени записи. Слух читает сырой вход и mic_aec парами, а mic_aec открывается позже (с началом
+    разговора): пока он запускается, сырой копит отставание (замер 2026-11-13: 110–210 мс) и при чтении парами его не
+    отдаёт. Пара по счёту — кадры разного времени; по времени — тот кадр mic_aec, что записан тогда же, что сырой."""
+
+    def __init__(self, proc):
+        self.proc, self.k, self.base = proc, 0, None
+        self.hist = deque(maxlen=64)  # ~2 с: сырой отстаёт на десятки–сотни мс
+
+    def add(self, a, now):
+        self.k += 1
+        t = now - self.k * FRAME / RATE
+        self.base = t if self.base is None else min(self.base, t)
+        self.hist.append((self.k, a))
+
+    def at(self, t):
+        """Кадр, записанный в t (± пол-кадра); такого нет (mic_aec открыт позже) — None: остаётся сырой."""
+        if not self.hist:
+            return None
+        k, a = min(self.hist, key=lambda h: abs(self.base + h[0] * FRAME / RATE - t))
+        return a if abs(self.base + k * FRAME / RATE - t) <= FRAME / RATE / 2 + 1e-9 else None
+
+
 class Ear:
     """pw-record → VAD → Segmenter → whisper; микрофон включается по start()/stop(). Режим побудки (waking): тот же
     поток, но речь идёт не в whisper, а детектору имени (wake.Waker); подтверждённое имя — событие ("wake", текст, кадр)."""
@@ -119,6 +143,7 @@ class Ear:
         self.echo = False  # слух на входе с эхоподавлением: Ома говорит в динамики
         self.speakers = None  # True — Ома говорит в динамики, хоть наушники и «в ушах»; None — по сервису присутствия
         self.speaking = False  # звучит её голос: в динамиках слух берёт кадры входа с эхоподавлением
+        self.aec_until = 0.0  # конец её звука (played_at, CLOCK_MONOTONIC): кадры, записанные раньше, — с эхоподавлением
         self.waking = False    # слух открыт на «Ома» (Ома в покое): фразы не распознаются
         self.mic_pending = False  # проверка микрофона уже в очереди: пачка событий pactl — одна проверка
         self._aec = None       # второй pw-record — mic_aec, только когда она говорит в динамики
@@ -278,7 +303,7 @@ class Ear:
 
     async def _read(self, proc, phrases):
         import torch
-        seg, mode, waker = Segmenter(), False, None
+        seg, mode, waker, aligned = Segmenter(), False, None, None
         k, base = 0, None  # время по звуку: кадр k записан не позже base + k·32 мс; задержка чтения его не сдвигает
         try:
             while True:
@@ -289,8 +314,14 @@ class Ear:
                 aec = self._aec
                 if aec is not None:  # читаем оба всё время — иначе отстающий поток копит задержку
                     a = await aec.stdout.readexactly(FRAME * 2)
-                    if self.speaking:
-                        b = a
+                    if aligned is None or aligned.proc is not aec:
+                        aligned = Aligned(aec)
+                    aligned.add(a, time.monotonic())
+                    # её голос — по времени записи кадра, а не по часам чтения: сырой отстаёт, и кадры, прочитанные после
+                    # played_at, записаны раньше — в них был бы конец её голоса без эхоподавления
+                    tf = base + k * FRAME / RATE
+                    if self.speaking or tf < self.aec_until:
+                        b = aligned.at(tf) or b
                 earlog.frame(b, self.paused)  # диагностика слуха: каталога нет — ничего
                 if self.waking != mode:  # побудка ↔ разговор: начатая в другом режиме речь не тянется
                     seg, mode = Segmenter(), self.waking
