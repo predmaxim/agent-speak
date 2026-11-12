@@ -878,11 +878,14 @@ impl State {
 
     /// Побудка для строки состояния: выключена, тихо — от службы; иначе — что сказала Ома (on или почему нет).
     fn wake(&self) -> &str {
-        match () {
-            _ if !self.cfg.wake_word => "off",
-            _ if self.muted() => "quiet",
-            _ if self.oma.wake.is_empty() => "off",
-            _ => &self.oma.wake,
+        if !self.cfg.wake_word {
+            "off"
+        } else if self.muted() {
+            "quiet"
+        } else if self.oma.wake.is_empty() {
+            "off"
+        } else {
+            &self.oma.wake
         }
     }
 
