@@ -284,10 +284,12 @@ function topRows(perms, later) {
 }
 
 // The permission cards as the orb's bubbles: from the daemon's `permissions` line, apart from the TTL'd stack — up while
-// the request lives. `hidden` (the screen is shared): no command — the orb draws «Permission» and no buttons.
+// the request lives. The text is the daemon's masked `short`; `hidden` (the screen is shared) or an empty `short` (a key
+// or a password in the command): no command — the orb draws «Permission» and no buttons, the click opens the window.
 function permBubbles(perms, hidden) {
   return Array.prototype.slice.call(perms || []).map(function(p) {
-    return { id: "perm:" + p.id, perm: p.id, agent: p.agent, who: p.who, kind: "permission", text: hidden ? "" : p.tool + ": " + p.text, hidden: !!hidden }
+    var shut = !!hidden || !p.short
+    return { id: "perm:" + p.id, perm: p.id, agent: p.agent, who: p.who, kind: "permission", text: shut ? "" : p.short, hidden: shut }
   })
 }
 

@@ -25,8 +25,8 @@ pub struct Order {
     #[serde(default)]
     pub pr: u64,
     pub since: u64,
-    #[serde(skip)]
-    pub due: bool, // ход агента кончился — передать, как только можно (агент «готово», пользователь не печатает в нём)
+    #[serde(default)]
+    pub due: bool, // ход агента кончился — передать, как только можно (агент «готово», пользователь не печатает в нём); в файле — тоже: после перезапуска не ждёт нового Stop
 }
 
 /// Исход из чужого потока: передача (поток действий) или проверки (поток `gh`).
@@ -88,6 +88,18 @@ impl Later {
         Ok(id)
     }
 
+    /// Ход агента кончился (true) или он снова работает (false): его поручение — к передаче или ждёт; файл — тоже.
+    pub fn due(&mut self, agent: &str, due: bool) {
+        let mut changed = false;
+        for o in self.list.iter_mut().filter(|o| o.kind == "tell" && o.agent == agent && o.due != due) {
+            o.due = due;
+            changed = true;
+        }
+        if changed {
+            self.save();
+        }
+    }
+
     /// Проверки PR pr в папке path: `gh` с --watch в своём потоке.
     pub fn checks(&mut self, path: &str, pr: u64, now: u64) -> Result<String, String> {
         if pr == 0 {
@@ -137,7 +149,7 @@ impl Later {
         }
     }
 
-    /// Строка подписчикам: `{"later":[{id, kind, agent, who, text, gist, path, pr, since}]}`.
+    /// Строка подписчикам: `{"later":[{id, kind, agent, who, text, gist, path, pr, since, due}]}`.
     pub fn line(&self) -> String {
         format!("{}\n", serde_json::json!({"later": self.list}))
     }
@@ -236,7 +248,7 @@ mod tests {
         assert_eq!(l.tell("s1", "datebook", "Ещё", "ещё", 101), Err("у datebook уже есть: «прогони тесты» — сначала отмени его".into()));
         assert!(l.tell("s2", "x", " ", "", 1).is_err());
         let line: serde_json::Value = serde_json::from_str(&l.line()).unwrap();
-        assert_eq!(line["later"][0], serde_json::json!({"id": "later-1", "kind": "tell", "agent": "s1", "who": "datebook", "text": "Прогони тесты и пришли итог", "gist": "прогони тесты", "path": "", "pr": 0, "since": 100}));
+        assert_eq!(line["later"][0], serde_json::json!({"id": "later-1", "kind": "tell", "agent": "s1", "who": "datebook", "text": "Прогони тесты и пришли итог", "gist": "прогони тесты", "path": "", "pr": 0, "since": 100, "due": false}));
         assert_eq!(serde_json::from_str::<serde_json::Value>(&l.json()).unwrap(), line["later"]);
         // перезапуск службы: поручение на месте, номера не повторяются
         let mut again = Later::load(file.clone(), mpsc::channel().0, no_gh);
@@ -248,6 +260,20 @@ mod tests {
         assert_eq!(Later::load(file.clone(), mpsc::channel().0, no_gh).list.len(), 1);
         let _ = std::fs::remove_file(&file);
         assert_eq!(Later::load(PathBuf::new(), mpsc::channel().0, no_gh).json(), "[]");
+    }
+
+    #[test]
+    fn due_survives_a_restart() {
+        // поручение ждало только конца ввода пользователя: после перезапуска — не до следующего Stop агента
+        let file = std::env::temp_dir().join(format!("oma-later-due-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let mut l = Later::load(file.clone(), mpsc::channel().0, no_gh);
+        l.tell("s1", "datebook", "Прогони тесты", "", 100).unwrap();
+        l.due("s1", true);
+        assert!(Later::load(file.clone(), mpsc::channel().0, no_gh).list[0].due);
+        l.due("s1", false);
+        assert!(!Later::load(file.clone(), mpsc::channel().0, no_gh).list[0].due);
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]

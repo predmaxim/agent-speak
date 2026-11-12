@@ -255,9 +255,13 @@ assert.deepStrictEqual(M.topRows({ 0: { id: "p" }, length: 1 }, null), ["perm:p"
 
 // Permission cards on the orb: built from the daemon's list, apart from the TTL'd stack — they never fade or get pushed
 // out; while the screen is shared — no command (the orb draws «Permission» and no buttons)
-const pc = (id) => ({ id, agent: "s", who: "plug", tool: "Bash", text: "cargo test", note: "Run", sub: false, since: 1 })
+const pc = (id) => ({ id, agent: "s", who: "plug", tool: "Bash", text: "cargo test", note: "Run", sub: false, since: 1, short: "Bash: cargo test" })
 assert.deepStrictEqual(M.permBubbles([pc("perm-1")], false), [{ id: "perm:perm-1", perm: "perm-1", agent: "s", who: "plug", kind: "permission", text: "Bash: cargo test", hidden: false }])
 assert.deepStrictEqual(M.permBubbles([pc("perm-1")], true).map(b => [b.text, b.hidden]), [["", true]])
+// a key or a password in the command (the daemon's mask changed it: `short` is empty) — the bubble shows no command and
+// no buttons, as while sharing; the window's card is whole
+const secret = Object.assign(pc("perm-2"), { text: "curl -H 'Authorization: Bearer ghp_x'", short: "" })
+assert.deepStrictEqual(M.permBubbles([secret], false).map(b => [b.text, b.hidden]), [["", true]])
 assert.deepStrictEqual(M.withPerms([{ id: "a" }, { id: "b" }, { id: "c" }], M.permBubbles([pc("perm-1")], false)).map(b => b.id), ["b", "c", "perm:perm-1"])
 assert.deepStrictEqual(M.withPerms([{ id: "a" }], M.permBubbles([pc("1"), pc("2"), pc("3"), pc("4")], false)).map(b => b.id), ["perm:2", "perm:3", "perm:4"])
 assert.deepStrictEqual(M.withPerms([{ id: "a" }], []).map(b => b.id), ["a"])

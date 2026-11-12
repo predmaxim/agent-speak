@@ -128,7 +128,8 @@ impl Cards {
         self.list.iter().filter(|c| c.session == session).count()
     }
 
-    fn withdraw(&mut self, pick: impl Fn(&Card) -> bool) -> bool {
+    /// Снять карточки pick: хукам — «без решения», терминал спрашивает как обычно. true — были.
+    pub fn withdraw(&mut self, pick: impl Fn(&Card) -> bool) -> bool {
         let (gone, keep): (Vec<Card>, Vec<Card>) = std::mem::take(&mut self.list).into_iter().partition(|c| pick(c));
         self.list = keep;
         for c in &gone {
@@ -137,16 +138,20 @@ impl Cards {
         !gone.is_empty()
     }
 
-    pub fn session_of(&self, id: &str) -> Option<String> {
-        self.list.iter().find(|c| c.id == id).map(|c| c.session.clone())
+    /// (сессия, вызов сабагента) открытой карточки.
+    pub fn session_of(&self, id: &str) -> Option<(String, bool)> {
+        self.list.iter().find(|c| c.id == id).map(|c| (c.session.clone(), c.sub))
     }
 
-    /// Строка подписчикам: `{"permissions":[{id, agent, who, tool, text, note, sub, since}]}`, старые первыми; who —
-    /// имя агента для окна (проект).
+    /// Строка подписчикам: `{"permissions":[{id, agent, who, tool, text, note, sub, since, short}]}`, старые первыми; who —
+    /// имя агента для окна (проект); short — текст пузыря у орба «Bash: cargo test»: пузыри не показывают ключей, и если
+    /// маска (`mask_secrets`) его меняет, short пуст — пузырь без команды и кнопок, карточка целиком — в окне.
     pub fn line(&self, who: impl Fn(&str) -> String) -> String {
         let list: Vec<Value> = self.list.iter().map(|c| {
             let (tool, text, note) = view(&c.tool, &c.input);
-            json!({"id": c.id, "agent": c.session, "who": who(&c.session), "tool": tool, "text": text, "note": note, "sub": c.sub, "since": c.since})
+            let line = c.line();
+            let short = if crate::text::clean::mask_secrets(&line) == line { line } else { String::new() };
+            json!({"id": c.id, "agent": c.session, "who": who(&c.session), "tool": tool, "text": text, "note": note, "sub": c.sub, "since": c.since, "short": short})
         }).collect();
         format!("{}\n", json!({"permissions": list}))
     }
@@ -207,7 +212,7 @@ mod tests {
         let (h, mut r) = hook();
         assert_eq!(c.add("perm-1", &bash("cargo test"), h, true, 100).unwrap().line(), "Bash: cargo test");
         let line: Value = serde_json::from_str(&c.line(|s| format!("<{s}>"))).unwrap();
-        assert_eq!(line["permissions"][0], json!({"id": "perm-1", "agent": "s", "who": "<s>", "tool": "Bash", "text": "cargo test", "note": "Run the tests", "sub": false, "since": 100}));
+        assert_eq!(line["permissions"][0], json!({"id": "perm-1", "agent": "s", "who": "<s>", "tool": "Bash", "text": "cargo test", "note": "Run the tests", "sub": false, "since": 100, "short": "Bash: cargo test"}));
         assert!(c.carded("s", "p1") && !c.carded("s", "p2"));
         let (card, ok) = c.decide("perm-1", "allow").unwrap();
         assert!(ok && card.session == "s");

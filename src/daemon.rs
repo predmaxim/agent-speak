@@ -20,7 +20,7 @@ use crate::tts::Tts;
 use crate::watch::{self, Act, Ctx, Facts, Watch};
 use ::notify::{RecursiveMode, Watcher};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -258,6 +258,7 @@ struct State {
     subs: Vec<UnixStream>,
     projects: HashMap<String, String>, // сессия → имя папки проекта (из хуков и окна в фокусе)
     helper_turn: HashMap<String, bool>, // ход начал отчёт помощника (true), пока пользователь в нём не писал
+    worker_turn: HashSet<String>, // в ходе был отчёт воркера Orca (`<agent-message>`): воркеры — отдельные сессии, helpers() их не видит
     turn_at: HashMap<String, u64>, // сессия → время последнего промпта пользователя, эпоха с: начало хода фактам git (лента в FEED_MAX строк его теряет)
     oma: Oma,
     oma_paused: bool, // очередь на паузе по перебиву Омы, а не по кнопке: снимает она сама или конец разговора
@@ -469,6 +470,7 @@ pub fn run() {
         projects: HashMap::new(),
         helper_turn: HashMap::new(),
         turn_at: HashMap::new(),
+        worker_turn: HashSet::new(),
         oma: Oma { state: "off".into(), ..Default::default() },
         oma_paused: false,
         voice_cmd: vec![
@@ -1024,6 +1026,9 @@ impl State {
         if !self.cfg.agents_voice {
             limits::clear_hints(&self.hints, |_| false); // не следим — и подсказок агентам нет
             self.limits_bad = false;
+        }
+        if !self.cfg.permission_buttons && self.perms.withdraw(|_| true) {
+            self.push_perms(); // кнопки выключили — открытые карточки уходят, хуки выходят: терминал спрашивает как обычно
         }
         if !self.cfg.agent_inbox {
             // заметки агентов выключили — уже пришедшие гаснут сразу, а не с промптом пользователя
@@ -2175,6 +2180,8 @@ impl State {
                 *self.helper_turn.entry(session.clone()).or_insert(by_helper) &= by_helper;
                 if !by_helper {
                     self.turn_at.insert(session.clone(), now);
+                } else if prompt.trim_start().starts_with("<agent-message") {
+                    self.worker_turn.insert(session.clone());
                 }
                 self.registry.prompt(&session, prompt, now);
                 // ответили в терминале — Оме спрашивать нечего, и «нужно» агента снято; отчёт помощника — не ответ пользователя
@@ -2224,12 +2231,18 @@ impl State {
                 }
                 self.progress.remove(&session); // промежуточное покрывает итог
                 // shortcut: вопрос текстом в конце такого хода не звучит (AskUserQuestion — звучит), научить, если начнёт теряться; помощник без отчёта держит ход «работает», пока его запуск не уйдёт из хвоста 256 КБ
+                let worker = self.worker_turn.remove(&session);
                 if !waiting {
-                    if self.helper_turn.remove(&session).unwrap_or(false) {
+                    let helper = self.helper_turn.remove(&session).unwrap_or(false);
+                    if helper {
                         self.ask(&session, Ask::Step, &last, None, None); // переписка с помощниками звучит, только если важна
                     } else {
                         self.ask(&session, Ask::Final, &last, None, p["cwd"].as_str());
-                        self.later_due(&session, &last); // ход-отчёт помощника — не конец хода агента
+                    }
+                    // в фоне никого — работа кончилась, и после хода-отчёта помощника тоже; отчёт воркера Orca — нет: он
+                    // отдельная сессия, остальные воркеры могут ещё работать (поручение ждёт хода пользователя)
+                    if !(helper && worker) {
+                        self.later_due(&session, &last);
                     }
                 } else {
                     self.helper_turn.remove(&session);
@@ -2310,10 +2323,11 @@ impl State {
 
     /// Кнопка карточки: клик равен набранному — решение хуку сразу. Агент уже не ждёт (ответили в терминале, а PostToolUse
     /// придёт только после конца команды) — Claude Code решение проигнорировал бы: карточка снимается без решения, и
-    /// пузырь говорит, что запрос уже решён. Решение — строкой в ленте агента.
+    /// пузырь говорит, что запрос уже решён. Решение — строкой в ленте агента. Карточка помощника (agent_id) по состоянию
+    /// сессии не судится: главный поток пишет или кончил ход, а диалог помощника открыт; ответ в терминале — хука уже нет.
     fn permit(&mut self, id: &str, allow: bool) {
-        let Some(session) = self.perms.session_of(id) else { return };
-        let answered = self.registry.get(&session).is_none_or(|e| e.state != agents::State::Waiting);
+        let Some((session, sub)) = self.perms.session_of(id) else { return };
+        let answered = !sub && self.registry.get(&session).is_none_or(|e| e.state != agents::State::Waiting);
         let Some((card, ok)) = self.perms.decide(id, if answered { "" } else if allow { "allow" } else { "deny" }) else { return };
         if answered || !ok {
             self.bubble("", &format!("perm-{session}"), "Ома", "Запрос уже решён в терминале.", "oma");
@@ -2350,7 +2364,7 @@ impl State {
                 let (who, free) = (e.project.clone(), matches!(e.state, agents::State::Done | agents::State::Idle));
                 let r = self.later.tell(&session, &who, &text, &gist, now);
                 if r.is_ok() && free {
-                    self.later.list.iter_mut().filter(|o| o.kind == "tell" && o.agent == session).for_each(|o| o.due = true);
+                    self.later.due(&session, true);
                 }
                 r
             }
@@ -2366,15 +2380,13 @@ impl State {
         r
     }
 
-    /// Ход агента кончился (Stop без помощников в фоне и не ход-отчёт помощника, codex-notify): его поручение — к
+    /// Ход агента кончился (Stop без помощников в фоне, кроме хода-отчёта воркера Orca; codex-notify): его поручение — к
     /// передаче, если ход кончился не вопросом (тогда — со следующим концом хода).
     fn later_due(&mut self, session: &str, last: &str) {
         if crate::later::ends_with_question(last) {
             return;
         }
-        for o in self.later.list.iter_mut().filter(|o| o.kind == "tell" && o.agent == session) {
-            o.due = true;
-        }
+        self.later.due(session, true);
         self.deliver_later();
     }
 
@@ -2386,7 +2398,7 @@ impl State {
         for (id, agent) in due {
             let state = self.registry.get(&agent).map(|e| e.state);
             if !matches!(state, Some(agents::State::Done | agents::State::Idle)) {
-                self.later.list.iter_mut().filter(|o| o.id == id).for_each(|o| o.due = false);
+                self.later.due(&agent, false);
                 continue;
             }
             let now = (self.now_secs)();
@@ -2634,6 +2646,7 @@ mod tests {
             projects: HashMap::new(),
             helper_turn: HashMap::new(),
             turn_at: HashMap::new(),
+            worker_turn: HashSet::new(),
             oma: Oma { state: "off".into(), ..Default::default() },
             oma_paused: false,
             voice_cmd: vec!["sh".into(), "-c".into(), "sleep 30".into(), "x".into()],
@@ -4350,6 +4363,48 @@ mod tests {
     }
 
     #[test]
+    fn permission_sub_card_is_not_judged_by_the_main_thread_state() {
+        // помощник в фоне спросил разрешение, главный поток пишет дальше (MessageDisplay — Working): диалог помощника открыт
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let (h, mut hr) = perm_hook();
+        let mut p = perm_req("a", "p1", "cargo test");
+        p["agent_id"] = "a1".into();
+        st.on_permission("perm-1".into(), p, h);
+        st.registry.status("a", "Пишу дальше.", 1001);
+        st.on_msg(Msg::Permit { id: "perm-1".into(), allow: true });
+        assert_eq!(decision(&mut hr), "allow", "решение доходит до живого хука помощника");
+    }
+
+    #[test]
+    fn turning_permission_buttons_off_withdraws_open_cards() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let (h, mut hr) = perm_hook();
+        st.on_permission("perm-1".into(), perm_req("a", "p1", "cargo test"), h);
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        st.on_msg(Msg::Set { key: "permission_buttons".into(), value: false.into() });
+        assert_eq!(decision(&mut hr), "", "хук выходит без решения: терминал спрашивает как обычно");
+        assert_eq!(perms(&drain(&mut r)).unwrap(), serde_json::json!([]), "в окне и у орба карточки нет");
+    }
+
+    #[test]
+    fn permission_line_carries_masked_bubble_text() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let mut r = sub(&mut st);
+        hello(&mut r);
+        let (h1, _r1) = perm_hook();
+        let (h2, _r2) = perm_hook();
+        st.on_permission("perm-1".into(), perm_req("a", "p1", "cargo test"), h1);
+        st.on_permission("perm-2".into(), perm_req("a", "p1", "curl -H \"Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz0123456789\" x"), h2);
+        let p = perms(&drain(&mut r)).unwrap();
+        assert_eq!((p[0]["short"].as_str(), p[1]["short"].as_str()), (Some("Bash: cargo test"), Some("")), "в пузыре — без ключа: маска меняет текст — команды нет");
+        assert!(p[1]["text"].as_str().unwrap().contains("ghp_abc"), "окно показывает карточку целиком");
+    }
+
+    #[test]
     fn permission_hook_holds_its_connection_and_eof_withdraws() {
         let (tx, rx) = mpsc::channel();
         let (server, mut client) = UnixStream::pair().unwrap();
@@ -4404,6 +4459,28 @@ mod tests {
         st.on_later_done(crate::later::Done::Told { order, result: Ok(()) });
         assert_eq!(bubbles(&mut r)[0]["text"], "a: передала — прогони тесты");
         assert_eq!(board_line(&mut st, 2000).unwrap(), "a: передала — прогони тесты", "исход — сразу, класс СЕЙЧАС");
+    }
+
+    #[test]
+    fn later_tell_goes_after_a_helper_report_turn_but_not_after_an_orca_worker_message() {
+        let mut st = test_state();
+        with_agents(&mut st, &["a"]);
+        let acts = acts(&mut st);
+        st.later_cmd(later_msg("tell", "a", "Прогони тесты")).unwrap();
+        // отчёт помощника, после него в фоне никого: вся работа кончилась
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "a", "prompt": "<task-notification> <task-id>a1</task-id> <status>completed</status> </task-notification>"}));
+        stop(&mut st, "a", "Вся работа готова и влита.");
+        assert!(delivered(&acts), "конец хода-отчёта без помощников в фоне — конец работы");
+        // воркеры Orca — отдельные сессии, помощниками в фоне их не видно: их отчёт — не конец работы оркестратора
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "a", "prompt": "раздай воркерам"}));
+        stop(&mut st, "a", "Воркеры запущены.");
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "a", "prompt": "<agent-message from=\"w1\">готово</agent-message>"}));
+        st.later_cmd(later_msg("tell", "a", "Прогони тесты")).unwrap();
+        stop(&mut st, "a", "Первый воркер закончил, жду второго.");
+        assert!(!delivered(&acts));
+        st.on_hook("user-prompt-submit", &serde_json::json!({"session_id": "a", "prompt": "как дела?"}));
+        stop(&mut st, "a", "Всё готово.");
+        assert!(delivered(&acts), "ход пользователя кончился — передача");
     }
 
     #[test]
