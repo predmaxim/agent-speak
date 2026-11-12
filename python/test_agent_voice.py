@@ -1817,6 +1817,30 @@ def test_hold_during_answer_window_turns_it_into_conversation(monkeypatch):
     assert oma.conv.quiet_at == clk.t + SILENCE_END
 
 
+def test_hold_while_she_thinks_over_the_window_answer_drops_the_window(monkeypatch):
+    # ревью wave4c-1 (пробой): на окно ответа уже ответили голосом, Ома думает — удержание спутника окно оставляло
+    # (first False): каждая следующая фраза отбрасывалась как речь в комнате, орб обводил A, мозг не слышал ничего
+    import agent_voice.__main__ as m
+    monkeypatch.setattr(m, "locked", lambda: False)
+    monkeypatch.setattr(m, "mic_outputs", lambda: [])
+    sent, emitted = [], []
+    clk, oma = _oma(sent, emitted)
+    clk.t = 1.0
+    run(oma.command({"do": "listen", "secs": 5, "key": "agent:b", "said": "Агент Б закончил."}))
+    run(settle(oma))
+    _voice(oma, clk, "а что он сделал", 1)
+    assert oma.conv.state == "thinking" and oma.conv.window["first"] is False
+
+    async def hold():
+        await oma.command({"do": "talk", "key": "agent:a"})
+        await settle(oma)
+    run(hold())
+    assert oma.brain.key == "agent:a" and oma.conv.window is None and oma.conv.state == "listening"
+    assert oma.conv.quiet_at == clk.t + SILENCE_END
+    _voice(oma, clk, "что ты делаешь сейчас", 2)
+    assert oma.brain.texts[-1] == "что ты делаешь сейчас", "реплика принята в чат agent:a"
+
+
 def test_brain_switch_during_conversation_moves_the_orb_outline():
     # ревью волны 4 (проба): после удержания A реплика, набранная в другой чат, переключала мозг строкой chat без was
     # "*" — орб держал обводку A, а сказанное голосом уходило в chat:x. Идёт разговор — переход мозга с was "*"

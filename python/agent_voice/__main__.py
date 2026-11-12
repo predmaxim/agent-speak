@@ -183,8 +183,9 @@ class Oma:
             key = cmd.get("key")  # удержание спутника орба — разговор с этим агентом, в его чате
             leave = not key and c.state == "idle" and self.brain.key.startswith("agent:")  # с Омой-помощником — в общем чате
             # слух — сразу: смена чата и выход прежнего claude начало фразы не задерживают; удержание, пока она слушает,
-            # разговор не кончает (клик кончил бы), а переводит в чат агента — и окно ответа делает обычным разговором
-            await self.act(c.converse() if key and c.state in ("listening", "paused") else c.talk())
+            # разговор не кончает (клик кончил бы), а переводит в чат агента — и окно ответа делает обычным разговором;
+            # пока она думает или говорит ответ окна, удержание обрывает его, как клик, и окно снимает тоже
+            await self.act(c.converse() if key and c.state in ("listening", "paused") else c.talk() + (c.converse() if key else []))
             await self.follow(await self.general() if leave else (key if key != self.brain.key else None))
             if c.active:
                 self.to_brain(self.brain.warm)  # claude поднимается, пока пользователь говорит
